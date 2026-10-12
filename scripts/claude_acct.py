@@ -1107,6 +1107,13 @@ def cmd_remove(args):
 
 
 def main(argv=None):
+    # acct.sh runs Python with -I, which ignores PYTHONIOENCODING. On Windows, pipes (how hooks and
+    # skills read the output) default to the ANSI code page, which cannot encode ▶ / 🔴 / ✅.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="claude-acct", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("login", help="log in to a new account / log in again (opens a terminal)"); p.add_argument("name", nargs="?"); p.add_argument("email", nargs="?"); p.set_defaults(fn=cmd_login)

@@ -2,7 +2,10 @@
 # End-to-end test with FAKE accounts in a temp directory. Usage: bash tests/e2e.sh <temp-dir> scripts/claude_acct.py
 export CLAUDE_ACCT_SWITCH_WAIT=0  # no post-switch sleep in tests
 PY=$(command -v python3 || command -v python)  # Windows runners have no python3
-S="$1"; SCRIPT="$2"; rm -rf "$S"; mkdir -p "$S/cfg"
+S="$1"; SCRIPT="$2"
+# $S is pasted into Python string literals below; D:\a\... would turn \a into a control character
+command -v cygpath >/dev/null && S=$(cygpath -m "$S")
+rm -rf "$S"; mkdir -p "$S/cfg"
 run(){ echo "\$ acct $*"; CLAUDE_CONFIG_DIR="$S/cfg" CLAUDE_ACCT_HOME="$S/store" CLAUDE_ACCT_KEYCHAIN_SERVICE=claude-acct-TEST "$PY" -I "$SCRIPT" "$@"; echo "[exit $?]"; }
 login(){ "$PY" -I - "$S/cfg" "$1" "$2" <<'EOF'
 import json,sys,time
