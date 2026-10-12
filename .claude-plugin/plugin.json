@@ -3,7 +3,8 @@
   "version": "0.6.0",
   "description": "Manage multiple Claude accounts (claude.ai login): save them, see 5-hour / 7-day usage, and switch without logging out and back in.",
   "author": {
-    "name": "Hieu Le"
+    "name": "Hieu Le",
+    "email": "hieule252uet@gmail.com"
   },
   "license": "MIT",
   "keywords": [

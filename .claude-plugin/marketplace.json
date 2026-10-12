@@ -1,7 +1,8 @@
 {
   "name": "claude-account-manager",
   "owner": {
-    "name": "Hieu Le"
+    "name": "Hieu Le",
+    "email": "hieule252uet@gmail.com"
   },
   "metadata": {
     "description": "Claude Code plugin to manage multiple Claude accounts: save, view usage, switch quickly."
