@@ -56,7 +56,7 @@ const startRegularChrome = async () => {
 };
 
 if (!(await hasCdp())) await startRegularChrome();
-const browser = await chromium.connectOverCDP(cdpUrl, { timeout: 10000 });
+const browser = await chromium.connectOverCDP(cdpUrl, { timeout: 10000, noDefaults: true });
 const context = browser.contexts()[0];
   if (!context) throw new Error("No browser context found at the CDP endpoint.");
   let page = context.pages().find((p) => p.url().startsWith("https://claude.ai/"));
@@ -71,6 +71,10 @@ const context = browser.contexts()[0];
   if (/login|signin/i.test(page.url())) {
     throw new Error("The connected browser is not signed in to Claude. Sign in as an organization owner or admin and retry.");
   }
+  // The sidebar includes a Members label before the member table finishes loading.
+  // Wait for both target emails so subsequent row lookups don't race the table render.
+  await page.getByText(oldEmail, { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+  await page.getByText(newEmail, { exact: true }).waitFor({ state: "visible", timeout: 30000 });
 
   const rowFor = async (email) => {
     const byRole = page.getByRole("row").filter({ hasText: email });
@@ -80,10 +84,19 @@ const context = browser.contexts()[0];
     throw new Error(`Could not find member ${email} on the Members page.`);
   };
   const tierOf = async (row) => {
-    const buttons = row.getByRole("button", { name: /^(Standard|Premium)$/i });
-    if (await buttons.count()) return (await buttons.first().innerText()).trim();
     const selects = row.getByRole("combobox");
-    if (await selects.count()) return (await selects.first().innerText()).trim();
+    // Organization members can have both a role selector and a seat-tier selector.
+    if (await selects.count()) {
+      const text = await selects.last().innerText();
+      const tier = text.match(/\b(Premium|Standard)\b/i);
+      if (tier) return tier[1];
+    }
+    const buttons = row.getByRole("button", { name: /^(Standard|Premium)$/i });
+    if (await buttons.count()) {
+      const text = await buttons.first().innerText();
+      const tier = text.match(/\b(Premium|Standard)\b/i);
+      if (tier) return tier[1];
+    }
     throw new Error("Could not locate a seat tier control for a member row.");
   };
   const setTier = async (email, tier) => {
@@ -95,14 +108,16 @@ const context = browser.contexts()[0];
       ? combo.last()
       : row.getByRole("button", { name: /^(Standard|Premium)$/i }).first();
     await control.click();
-    const option = page.getByText(new RegExp(`^${tier} seat\\b`, "i")).last();
+    const option = page.getByRole("option", { name: new RegExp(`^${tier} seat\\b`, "i") }).last();
     await option.click();
-    await page.waitForTimeout(700);
-    row = await rowFor(email);
-    const actual = await tierOf(row);
-    if (!new RegExp(`^${tier}$`, "i").test(actual)) {
-      throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
+    let actual;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      row = await rowFor(email);
+      actual = await tierOf(row);
+      if (new RegExp(`^${tier}$`, "i").test(actual)) return;
+      await page.waitForTimeout(500);
     }
+    throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
   };
 
   const oldRow = await rowFor(oldEmail);
@@ -112,8 +127,8 @@ const context = browser.contexts()[0];
   if (!/^Premium$/i.test(oldTier)) throw new Error(`${oldEmail} is not currently Premium (${oldTier}).`);
   if (!/^Standard$/i.test(newTier)) throw new Error(`${newEmail} must be Standard before rotation (${newTier}).`);
 
-  await setTier(oldEmail, "Standard");
   try {
+    await setTier(oldEmail, "Standard");
     await setTier(newEmail, "Premium");
   } catch (error) {
     // Best-effort rollback prevents a failed promotion from leaving the pool without Premium.

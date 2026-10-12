@@ -728,12 +728,39 @@ def cmd_auto_browser(args):
     print("Opened Chrome with the saved automation profile. Sign in as an organization owner/admin if needed. Leave this profile available for seat automation; the login is saved for future rotations.")
 
 
-def _next_rotation_account(cfg):
+def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold):
+    """Pick the next Standard account only after checking its live status and usage."""
     order = cfg.get("order", [])
-    cur = cfg.get("premiumAccount")
-    if cur not in order or len(order) < 2:
-        raise AcctError("Rotation config is invalid. Run `acct.sh auto configure` again.")
-    return order[(order.index(cur) + 1) % len(order)]
+    current = cfg.get("premiumAccount")
+    start = order.index(current)
+    skipped = []
+    for offset in range(1, len(order)):
+        name = order[(start + offset) % len(order)]
+        meta = idx["accounts"].get(name)
+        if not meta:
+            skipped.append("%s (not saved)" % name)
+            continue
+        try:
+            creds = read_stored_creds(name)
+        except AcctError:
+            skipped.append("%s (credentials unavailable)" % name)
+            continue
+        if token_state(meta, creds) == "relogin":
+            skipped.append("%s (login expired/revoked)" % name)
+            continue
+        status = refresh_usage(meta, creds)
+        usage = (meta.get("usage") or {}).get("data") or {}
+        values = _usage_window_values(usage)
+        # Fail closed: do not move Premium onto an account without fresh readings
+        # for both windows. refresh_usage uses its short cache to avoid 429s.
+        if status not in ("ok", "cache") or "five_hour" not in values or "seven_day" not in values:
+            skipped.append("%s (usage unavailable)" % name)
+            continue
+        if _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+            skipped.append("%s (already at threshold)" % name)
+            continue
+        return name, skipped
+    return None, skipped
 
 
 def _set_premium_seat(old_name, new_name, cfg, idx):
@@ -796,9 +823,13 @@ def _cmd_auto_check_locked(args):
     if not values or not _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
         return
     old_name = premium
-    new_name = _next_rotation_account(cfg)
-    if token_state(idx["accounts"].get(new_name, {}), read_stored_creds(new_name)) == "relogin":
-        raise AcctError("Next account '%s' needs a new login; Premium seat was not moved." % new_name)
+    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
+    save_index(idx)
+    if not new_name:
+        if args.manual:
+            raise AcctError("No eligible account for Premium: every other account is at the usage threshold or has an expired login / unavailable usage. "
+                            "No seat or account was changed. Checked: %s" % (", ".join(skipped) or "none"))
+        return
     if args.manual:
         reached = []
         if values.get("five_hour", -1) >= daily_threshold:
@@ -810,12 +841,7 @@ def _cmd_auto_check_locked(args):
     # Change credentials only after the Members page confirms the tier change.
     cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
     cfg["premiumAccount"] = new_name
-    next_usage = ((idx["accounts"].get(new_name, {}).get("usage") or {}).get("data") or {})
-    if _usage_reached_thresholds(next_usage, daily_threshold, weekly_threshold):
-        # Avoid immediately rotating through accounts whose standard-tier usage was already high.
-        cfg["rotationHold"] = new_name
-    else:
-        cfg.pop("rotationHold", None)
+    cfg.pop("rotationHold", None)
     save_rotation(cfg)
 
 
@@ -843,6 +869,22 @@ def cmd_auto_check(args):
             os.unlink(lock_path)
         except FileNotFoundError:
             pass
+
+
+def cmd_auto_recover(args):
+    """Best-effort seat rotation after Claude Code reports a quota rate limit."""
+    try:
+        event = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return
+    if event.get("error") != "rate_limit":
+        return
+    if not load_rotation().get("enabled"):
+        return
+    # StopFailure's rate_limit category also covers ordinary API throttling.
+    # Reuse normal checks: live usage must confirm the configured threshold, and
+    # the destination must have fresh usage below both thresholds.
+    cmd_auto_check(argparse.Namespace(force=True, manual=False))
 
 
 def cmd_remove(args):
@@ -885,6 +927,8 @@ def main(argv=None):
     q = autos.add_parser("check", help="check usage and rotate if threshold is reached")
     q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
     q.set_defaults(fn=cmd_auto_check)
+    q = autos.add_parser("recover", help=argparse.SUPPRESS)
+    q.set_defaults(fn=cmd_auto_recover)
     args = ap.parse_args(argv)
     try:
         if hasattr(args, "name") and not args.name:
