@@ -1,6 +1,6 @@
 {
   "name": "acct",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Quản lý nhiều account Claude (claude.ai login): lưu, xem usage 5h/7 ngày, đổi account không cần logout/login lại.",
   "author": { "name": "Hieu Le" },
   "license": "MIT",
