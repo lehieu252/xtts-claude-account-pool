@@ -510,9 +510,10 @@ def open_terminal(script):
                                capture_output=True, text=True)
             return r.returncode == 0
         if sys.platform.startswith("win") or os.environ.get("MSYSTEM"):
-            subprocess.Popen(["cmd.exe", "/c", "start", "", "bash", script])
+            # Git for Windows puts only git.exe on the Windows PATH; use the bash Claude Code runs with.
+            bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash") or "bash"
+            subprocess.Popen(["cmd.exe", "/c", "start", "", bash, script])
             return True
-        import shutil
         for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"], ["konsole", "-e"], ["xterm", "-e"]):
             if shutil.which(term[0]):
                 subprocess.Popen(term + ["bash", script])
@@ -748,9 +749,7 @@ def cmd_auto_browser(args):
     ensure_node_deps()
     node = os.environ.get("CLAUDE_ACCT_NODE", "node")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
-    env = dict(os.environ)
-    env["CLAUDE_ACCT_MEMBERS_URL"] = cfg.get("membersUrl", "https://claude.ai/admin-settings/members")
-    env["CLAUDE_ACCT_BROWSER_PROFILE"] = cfg.get("browserProfile", os.path.join(store_dir(), "browser-profile"))
+    env = seat_manager_env(cfg)
     try:
         subprocess.Popen([node, script, "--setup"], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -853,7 +852,21 @@ def find_chrome():
             if base and os.path.isfile(exe):
                 return exe
         return shutil.which("chrome.exe")
-    return shutil.which("google-chrome")
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        if shutil.which(name):
+            return shutil.which(name)
+    return None
+
+
+def seat_manager_env(cfg):
+    env = dict(os.environ)
+    env["CLAUDE_ACCT_MEMBERS_URL"] = cfg.get("membersUrl", "https://claude.ai/admin-settings/members")
+    env["CLAUDE_ACCT_CDP_URL"] = cfg.get("cdpUrl", "http://127.0.0.1:9222")
+    env["CLAUDE_ACCT_BROWSER_PROFILE"] = cfg.get("browserProfile", os.path.join(store_dir(), "browser-profile"))
+    chrome = find_chrome()
+    if chrome and sys.platform != "darwin":  # macOS starts Chrome with `open -a`; elsewhere seat_manager.mjs needs the path
+        env["CLAUDE_ACCT_CHROME"] = chrome
+    return env
 
 
 def cmd_doctor(args):
@@ -933,10 +946,7 @@ def _set_premium_seat(old_name, new_name, cfg, idx):
     ensure_node_deps()
     node = os.environ.get("CLAUDE_ACCT_NODE", "node")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
-    env = dict(os.environ)
-    env["CLAUDE_ACCT_MEMBERS_URL"] = cfg.get("membersUrl", "https://claude.ai/admin-settings/members")
-    env["CLAUDE_ACCT_CDP_URL"] = cfg.get("cdpUrl", "http://127.0.0.1:9222")
-    env["CLAUDE_ACCT_BROWSER_PROFILE"] = cfg.get("browserProfile", os.path.join(store_dir(), "browser-profile"))
+    env = seat_manager_env(cfg)
     try:
         r = subprocess.run([node, script, old_email, new_email], capture_output=True, text=True, timeout=120, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:

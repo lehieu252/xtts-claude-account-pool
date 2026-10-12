@@ -16,6 +16,16 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 
 Requirements: Claude Code (CLI or VS Code extension) logged in with a claude.ai account, Python 3.8+, Node.js 20+ with npm, and Google Chrome. Every account of the pool must be a member of the same claude.ai Team organization, and one person must be able to sign in to that organization as an owner or admin (for the seat changes). On Windows, Claude Code runs the plugin's shell scripts through Git Bash.
 
+Platform support:
+
+| | Login storage | Account switch | Seat automation (Chrome) |
+|---|---|---|---|
+| macOS | Keychain | ✅ (waits 31 s for Claude Code's Keychain cache) | ✅ Google Chrome |
+| Linux | `~/.claude/.credentials.json` | ✅ immediate | ✅ Google Chrome or Chromium, needs a desktop session (not a headless server) |
+| Windows | `%USERPROFILE%\.claude\.credentials.json` | ✅ immediate | ✅ Google Chrome; requires Git for Windows (Claude Code needs it too) |
+
+The unit and end-to-end tests run on all three systems with Python 3.8 and 3.12 (`.github/workflows/test.yml`). The parts that need a real claude.ai organization (seat changes on the Members page, a real usage limit) can only be checked by hand.
+
 ### The short way: ask Claude Code
 
 Paste this into Claude Code:
@@ -149,7 +159,7 @@ From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the
 The rotation is opt-in. The default trigger is **90% of the 5-hour usage** of the Premium account. Configure the current Premium account and the order in which seats should rotate:
 
 ```
-/acct:auto configure --premium xtts --order xtts,info,sales
+/acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com
 /acct:auto browser
 /acct:auto status
 /acct:auto enable
@@ -158,7 +168,7 @@ The rotation is opt-in. The default trigger is **90% of the 5-hour usage** of th
 To change the threshold, for example for a test at 75%:
 
 ```
-/acct:auto configure --premium xtts --order xtts,info,sales --threshold 75
+/acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com --threshold 75
 ```
 
 `--daily-threshold 75` is the same. Run `/acct:auto status` to see the active value. Re-running `configure` keeps rotation off until you enable it again.

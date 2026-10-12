@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.8", "3.12"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash  # Git Bash on Windows, the shell Claude Code runs plugin scripts with
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: End-to-end (fake accounts, file credential store)
+        env:
+          CLAUDE_ACCT_BACKEND: file
+        run: |
+          bash tests/e2e.sh "$RUNNER_TEMP/e2e" scripts/claude_acct.py > e2e.out 2>&1 || { cat e2e.out; exit 1; }
+          if grep -q Traceback e2e.out; then cat e2e.out; exit 1; fi
+      - name: Doctor installs the Node dependency
+        run: |
+          CLAUDE_ACCT_HOME="$RUNNER_TEMP/acct" bash scripts/acct.sh doctor | tee doctor.out
+          grep -q "✅ | playwright-core" doctor.out
+          node --check scripts/seat_manager.mjs

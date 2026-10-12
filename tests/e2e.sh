@@ -1,9 +1,10 @@
 #!/bin/bash
 # End-to-end test with FAKE accounts in a temp directory. Usage: bash tests/e2e.sh <temp-dir> scripts/claude_acct.py
 export CLAUDE_ACCT_SWITCH_WAIT=0  # no post-switch sleep in tests
+PY=$(command -v python3 || command -v python)  # Windows runners have no python3
 S="$1"; SCRIPT="$2"; rm -rf "$S"; mkdir -p "$S/cfg"
-run(){ echo "\$ acct $*"; CLAUDE_CONFIG_DIR="$S/cfg" CLAUDE_ACCT_HOME="$S/store" CLAUDE_ACCT_KEYCHAIN_SERVICE=claude-acct-TEST python3 -I "$SCRIPT" "$@"; echo "[exit $?]"; }
-login(){ python3 -I - "$S/cfg" "$1" "$2" <<'EOF'
+run(){ echo "\$ acct $*"; CLAUDE_CONFIG_DIR="$S/cfg" CLAUDE_ACCT_HOME="$S/store" CLAUDE_ACCT_KEYCHAIN_SERVICE=claude-acct-TEST "$PY" -I "$SCRIPT" "$@"; echo "[exit $?]"; }
+login(){ "$PY" -I - "$S/cfg" "$1" "$2" <<'EOF'
 import json,sys,time
 d,who,tok=sys.argv[1:]
 json.dump({"claudeAiOauth":{"accessToken":tok,"refreshToken":"r-"+tok,"expiresAt":int(time.time()*1000)-1,"subscriptionType":"max"}},open(d+"/.credentials.json","w"))
@@ -13,7 +14,7 @@ g["oauthAccount"]={"accountUuid":"u-"+who,"organizationUuid":"o1","emailAddress"
 json.dump(g,open(d+"/.claude.json","w"))
 EOF
 }
-live(){ python3 -I -c "import json;c=json.load(open('$S/cfg/.credentials.json'));g=json.load(open('$S/cfg/.claude.json'));print('LIVE =',c['claudeAiOauth']['accessToken'],g['oauthAccount']['emailAddress'],'other=',g.get('other'))"; }
+live(){ "$PY" -I -c "import json;c=json.load(open('$S/cfg/.credentials.json'));g=json.load(open('$S/cfg/.claude.json'));print('LIVE =',c['claudeAiOauth']['accessToken'],g['oauthAccount']['emailAddress'],'other=',g.get('other'))"; }
 for BACKEND in keychain file; do
  echo "=========== store backend: $BACKEND"; rm -rf "$S/store" "$S/cfg"; mkdir -p "$S/cfg"
  if [ $BACKEND = file ]; then export CLAUDE_ACCT_BACKEND=file; fi
@@ -42,7 +43,7 @@ run login c c@x.com
 H="$S/store/login-c/login.sh"; [ -f "$H" ] && echo "helper OK:" && grep -E 'auth|import-login' "$H" | sed 's#/[^ ]*/##g'
 # simulate claude auth login writing into the temp dir
 CLAUDE_CONFIG_DIR_SAVE="$S/cfg"; mkdir -p "$S/store/login-c"
-( cd "$S/store/login-c" && python3 -I - "$S/store/login-c" C tokC1 <<'EOF'
+( cd "$S/store/login-c" && "$PY" -I - "$S/store/login-c" C tokC1 <<'EOF'
 import json,sys,time
 d,who,tok=sys.argv[1:]
 json.dump({"claudeAiOauth":{"accessToken":tok,"refreshToken":"r","expiresAt":1,"subscriptionType":"pro"}},open(d+"/.credentials.json","w"))
@@ -52,12 +53,12 @@ EOF
 run import-login "$S/store/login-c" c; [ -d "$S/store/login-c" ] && echo "TEMP DIR LEFT BEHIND" || echo "temp dir cleaned"; live
 # log in again to c (same account) -> refresh; name a but account C -> error
 for NAME in c a; do mkdir -p "$S/store/login-$NAME"; cp "$S/store/secrets/c.json" "$S/store/login-$NAME/.credentials.json"
- python3 -I -c "import json;json.dump({'oauthAccount':{'accountUuid':'u-C','organizationUuid':'o1','emailAddress':'C@x.com'}},open('$S/store/login-$NAME/.claude.json','w'))"
+ "$PY" -I -c "import json;json.dump({'oauthAccount':{'accountUuid':'u-C','organizationUuid':'o1','emailAddress':'C@x.com'}},open('$S/store/login-$NAME/.claude.json','w'))"
  run import-login "$S/store/login-$NAME" $NAME; done
 run list
 
 echo "=========== email-only login + lookup by email / part before @"
-fake(){ mkdir -p "$1"; python3 -I -c "import json;json.dump({'claudeAiOauth':{'accessToken':'t-$2','refreshToken':'r','expiresAt':1}},open('$1/.credentials.json','w'));json.dump({'oauthAccount':{'accountUuid':'u-$2','organizationUuid':'o','emailAddress':'$2'}},open('$1/.claude.json','w'))"; }
+fake(){ mkdir -p "$1"; "$PY" -I -c "import json;json.dump({'claudeAiOauth':{'accessToken':'t-$2','refreshToken':'r','expiresAt':1}},open('$1/.credentials.json','w'));json.dump({'oauthAccount':{'accountUuid':'u-$2','organizationUuid':'o','emailAddress':'$2'}},open('$1/.claude.json','w'))"; }
 run login alice@example.com
 grep -o "'--email' '[^']*'\|import-login .*" "$S/store/login-alice@example.com/login.sh" | sed "s#'/[^']*'#<path>#g"
 fake "$S/store/login-alice@example.com" bob@example.com
@@ -77,7 +78,7 @@ rm -rf "$S/store" "$S/cfg"; mkdir -p "$S/cfg"
 login A tokA1; run save a          # current account, access token expired -> not flagged
 login B tokB1; run save b          # access expired, refresh valid -> not flagged
 login D tokD1; run save d
-python3 -I - "$S/store" <<'EOF'
+"$PY" -I - "$S/store" <<'EOF'
 import json,sys,time
 d=sys.argv[1]
 c=json.load(open(d+"/secrets/b.json")); c["claudeAiOauth"]["refreshTokenExpiresAt"]=int(time.time()*1000)-1000
