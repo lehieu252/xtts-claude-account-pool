@@ -7,7 +7,7 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 | `/acct:login <email>` or `/acct:login <name> [email]` | Log in to any account (new, or again) and save it. With just an email, the email is the account name, and the script checks that you signed in with that email in the browser. Opens a terminal window to finish the login; **your current account is not changed** |
 | `/acct:save <name>` | Save the account you are **currently logged in** with, no new login needed |
 | `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account |
-| `/acct:switch <name>` | Switch to another saved account. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
+| `/acct:switch <name> [--no-wait]` | Switch to another saved account and **keep working in the same chat**. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
 | `/acct:logout <name>` | Remove an account from the list (deletes its saved token) |
 
 ## Install
@@ -29,7 +29,7 @@ Requires Python 3.8+ (`python3`, `python` or `py -3`). On Windows, Claude Code r
 2. `/acct:login alice@example.com`: a terminal window and a browser login page open. Sign in with that account; if the page shows a code, paste it into the terminal.
 3. `/acct:list`: see both accounts and their usage.
 
-From then on, just run `/acct:switch work` or `/acct:switch alice`. Open tabs usually pick up the new account within 30-60 seconds. To be sure, open a new Claude tab and use `/resume` to continue your conversation.
+From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the confirmation, and keep working in the same chat. No new tab or `/resume` needed.
 
 If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login <name>` command it shows. Nothing else in the table needs your attention.
 
@@ -41,6 +41,7 @@ If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login
 - `login` runs `claude auth login` with `CLAUDE_CONFIG_DIR` pointing at a temporary directory, so your current login is untouched. When it finishes, the token is moved into the store and the temporary directory is deleted. On macOS the current login is backed up first and restored automatically if the Keychain turns out not to be keyed by directory.
 - `save` copies the current token into a private store: Keychain item `claude-acct` (macOS) or `~/.claude-acct/secrets/<name>.json` with mode 600 (Windows / Linux). The list and usage cache are in `~/.claude-acct/accounts.json`, which holds no tokens.
 - `switch` first saves the **latest** token of the current account (Claude Code refreshes tokens over time), then writes the target account's token and `oauthAccount` where Claude Code reads them.
+- A running Claude Code session compares its token with the stored one before each request, so it moves to the new account by itself. On macOS the Keychain read is cached for 30 seconds (`UOt=30000` in the Claude Code 2.1.29x bundle), so `switch` waits 31 seconds before it confirms; once it does, your next message in the same chat uses the new account. `--no-wait` skips the wait. On Windows / Linux the credentials file is re-read as soon as it changes, so there is no wait.
 - `switch` refuses when the current account is not saved, so you cannot lose that login by accident (`--force` skips the check). It also refuses to switch to an account that needs a new login.
 - Tokens are **never** printed into the conversation. Each command runs the script directly (`disable-model-invocation`); Claude only shows the output.
 
@@ -50,6 +51,7 @@ An account is flagged **🔴 Log in again** when its refresh token has expired (
 
 ## Limitations
 
+- The 30-second Keychain cache comes from reading Claude Code's own code, not from documentation, and may change in a future version.
 - **Usage comes from an unofficial API** (`api.anthropic.com/api/oauth/usage`, the same data as `/usage`). Anthropic can change it at any time. Results are cached for 2 minutes to avoid HTTP 429.
 - For an account you have not used for a while, the access token is expired, so `list` shows the last known usage with its age. The script does not refresh tokens itself, to avoid breaking the login. Switching to the account once brings fresh numbers.
 - The claude.ai login can ask you to paste a code, and the chat box cannot take input, so `/acct:login` opens a separate terminal window (macOS: Terminal; Windows: a Git Bash window; Linux: the default terminal). If none can be opened, it prints the command to run yourself.

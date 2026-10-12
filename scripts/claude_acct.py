@@ -41,6 +41,10 @@ STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
 USAGE_CACHE_TTL = 120  # seconds, to avoid HTTP 429
 EXPIRY_MARGIN_MS = 60_000
+# Claude Code caches Keychain reads for 30 s (UOt=30000 in the 2.1.29x bundle). After that, a
+# running session sees the new token and switches to it, so waiting this long after a swap
+# means the current chat already uses the new account. Override with CLAUDE_ACCT_SWITCH_WAIT.
+KEYCHAIN_CACHE_WAIT = float(os.environ.get("CLAUDE_ACCT_SWITCH_WAIT", "31"))
 BACKUP_NAME = ".live-backup"  # leading dot: valid_name() rejects it, so no account can collide
 
 
@@ -606,9 +610,14 @@ def cmd_switch(args):
     write_live_profile(idx["accounts"][args.name].get("profile"))
     save_index(idx)
     p = idx["accounts"][args.name].get("profile") or {}
+    # The file backend is re-read as soon as its mtime changes; only the Keychain read is cached.
+    if where == "keychain" and not args.no_wait and os.environ.get("CLAUDECODE") and KEYCHAIN_CACHE_WAIT > 0:
+        time.sleep(KEYCHAIN_CACHE_WAIT)
     print("Switched to **%s**: %s (%s)." % (args.name, p.get("emailAddress", "?"), p.get("organizationName", "?")))
-    print("Open tabs usually pick up the new account within 30-60 seconds (not confirmed by Anthropic). "
-          "To be sure, open a new Claude tab and use /resume to continue your conversation.")
+    if where == "keychain" and args.no_wait:
+        print("Your next message in this chat uses the new account after about 30 seconds.")
+    else:
+        print("You can continue in this chat: your next message uses the new account.")
 
 
 def cmd_remove(args):
@@ -631,7 +640,7 @@ def main(argv=None):
     p = sub.add_parser("import-login", help=argparse.SUPPRESS); p.add_argument("dir"); p.add_argument("name"); p.add_argument("expect_email", nargs="?"); p.set_defaults(fn=cmd_import_login)
     p = sub.add_parser("save", help="save the current account"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_save)
     p = sub.add_parser("list", help="list accounts + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
-    p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_switch)
+    p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.add_argument("--no-wait", action="store_true"); p.set_defaults(fn=cmd_switch)
     p = sub.add_parser("remove", help="remove an account from the list"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
     args = ap.parse_args(argv)
     try:

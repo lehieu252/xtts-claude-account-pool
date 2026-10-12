@@ -1,5 +1,6 @@
 #!/bin/bash
 # End-to-end test with FAKE accounts in a temp directory. Usage: bash tests/e2e.sh <temp-dir> scripts/claude_acct.py
+export CLAUDE_ACCT_SWITCH_WAIT=0  # no post-switch sleep in tests
 S="$1"; SCRIPT="$2"; rm -rf "$S"; mkdir -p "$S/cfg"
 run(){ echo "\$ acct $*"; CLAUDE_CONFIG_DIR="$S/cfg" CLAUDE_ACCT_HOME="$S/store" CLAUDE_ACCT_KEYCHAIN_SERVICE=claude-acct-TEST python3 -I "$SCRIPT" "$@"; echo "[exit $?]"; }
 login(){ python3 -I - "$S/cfg" "$1" "$2" <<'EOF'

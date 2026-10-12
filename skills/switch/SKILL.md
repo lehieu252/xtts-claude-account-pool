@@ -1,7 +1,7 @@
 ---
 name: switch
-description: Switch to another saved Claude account without logging out and back in.
-argument-hint: "<name | email | part before @>"
+description: Switch to another saved Claude account without logging out and back in; the current chat continues with the new account.
+argument-hint: "<name | email | part before @> [--no-wait]"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---
