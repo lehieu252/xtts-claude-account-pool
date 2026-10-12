@@ -1,7 +1,7 @@
 {
   "name": "acct",
-  "version": "0.6.0",
-  "description": "Manage multiple Claude accounts (claude.ai login): save them, see 5-hour / 7-day usage, and switch without logging out and back in.",
+  "version": "0.7.0",
+  "description": "Manage multiple Claude accounts, monitor usage, and automatically rotate an organization Premium seat between saved accounts.",
   "author": {
     "name": "Hieu Le",
     "email": "hieule252uet@gmail.com"
@@ -11,6 +11,8 @@
     "account",
     "switch",
     "usage",
-    "multi-account"
+    "multi-account",
+    "premium-seat",
+    "rotation"
   ]
 }

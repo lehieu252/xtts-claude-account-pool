@@ -1,0 +1,8 @@
+{
+  "name": "xtts-claude-account-pool",
+  "private": true,
+  "description": "Optional Playwright dependency for automatic Premium seat rotation",
+  "dependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}

@@ -620,6 +620,231 @@ def cmd_switch(args):
         print("You can continue in this chat: your next message uses the new account.")
 
 
+def auto_config_path():
+    return os.path.join(store_dir(), "rotation.json")
+
+
+def load_rotation():
+    return read_json(auto_config_path(), {}) or {}
+
+
+def save_rotation(cfg):
+    write_json_atomic(auto_config_path(), cfg, private=True)
+
+
+def _rotation_thresholds(cfg):
+    legacy = cfg.get("threshold", 90)
+    return (cfg.get("dailyThreshold", legacy), cfg.get("weeklyThreshold", legacy))
+
+
+def _usage_window_values(usage):
+    result = {}
+    for key in ("five_hour", "seven_day"):
+        window = usage.get(key)
+        if isinstance(window, dict) and isinstance(window.get("utilization"), (int, float)):
+            result[key] = window["utilization"]
+    return result
+
+
+def _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+    values = _usage_window_values(usage)
+    return ("five_hour" in values and values["five_hour"] >= daily_threshold) or \
+           ("seven_day" in values and values["seven_day"] >= weekly_threshold)
+
+
+def cmd_auto_configure(args):
+    idx = load_index()
+    premium = resolve_name(idx, args.premium)
+    order = [resolve_name(idx, item.strip()) for item in args.order.split(",") if item.strip()]
+    if len(order) < 2 or len(set(order)) != len(order):
+        raise AcctError("Rotation order must contain at least two different saved accounts.")
+    if premium not in order:
+        raise AcctError("The current Premium account must be included in the rotation order.")
+    legacy_threshold = args.threshold if args.threshold is not None else 90
+    daily_threshold = args.daily_threshold if args.daily_threshold is not None else legacy_threshold
+    weekly_threshold = args.weekly_threshold if args.weekly_threshold is not None else legacy_threshold
+    if not 1 <= daily_threshold <= 99 or not 1 <= weekly_threshold <= 99:
+        raise AcctError("Daily and weekly thresholds must each be between 1 and 99.")
+    cfg = {
+        "enabled": False,
+        "dailyThreshold": daily_threshold,
+        "weeklyThreshold": weekly_threshold,
+        "order": order,
+        "premiumAccount": premium,
+        "membersUrl": args.members_url,
+        "cdpUrl": args.cdp_url,
+        "browserProfile": os.path.abspath(os.path.expanduser(args.browser_profile)),
+    }
+    save_rotation(cfg)
+    print("Rotation configured: %s (Premium) → %s. Daily (5-hour) threshold: %d%%; weekly (7-day) threshold: %d%%. Rotation is OFF; run `acct auto enable` after setup."
+          % (premium, " → ".join(order[order.index(premium) + 1:] + order[:order.index(premium)]), daily_threshold, weekly_threshold))
+
+
+def cmd_auto_enable(args):
+    cfg = load_rotation()
+    if not cfg.get("order"):
+        raise AcctError("Configure rotation first: acct.sh auto configure --premium <account> --order name1,name2,...")
+    cfg["enabled"] = True
+    save_rotation(cfg)
+    print("Automatic Premium rotation enabled. It checks usage before prompts and tool calls.")
+
+
+def cmd_auto_disable(args):
+    cfg = load_rotation()
+    cfg["enabled"] = False
+    save_rotation(cfg)
+    print("Automatic Premium rotation disabled.")
+
+
+def cmd_auto_status(args):
+    cfg = load_rotation()
+    if not cfg.get("order"):
+        print("Automatic Premium rotation is not configured.")
+        return
+    print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
+    daily_threshold, weekly_threshold = _rotation_thresholds(cfg)
+    print("Daily (5-hour) threshold: %s%%" % daily_threshold)
+    print("Weekly (7-day) threshold: %s%%" % weekly_threshold)
+    print("Rotation order: %s" % " → ".join(cfg["order"]))
+    print("Current Premium account: %s" % cfg.get("premiumAccount", "?"))
+    print("Browser profile: %s" % cfg.get("browserProfile", "(CDP)"))
+
+
+def cmd_auto_browser(args):
+    cfg = load_rotation()
+    if not cfg.get("order"):
+        raise AcctError("Configure rotation first with `acct auto configure`.")
+    node = os.environ.get("CLAUDE_ACCT_NODE", "node")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
+    env = dict(os.environ)
+    env["CLAUDE_ACCT_MEMBERS_URL"] = cfg.get("membersUrl", "https://claude.ai/admin-settings/members")
+    env["CLAUDE_ACCT_BROWSER_PROFILE"] = cfg.get("browserProfile", os.path.join(store_dir(), "browser-profile"))
+    try:
+        subprocess.Popen([node, script, "--setup"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=env, start_new_session=True)
+    except OSError as e:
+        raise AcctError("Could not open the persistent Chrome profile: %s" % e)
+    print("Opened Chrome with the saved automation profile. Sign in as an organization owner/admin if needed. Leave this profile available for seat automation; the login is saved for future rotations.")
+
+
+def _next_rotation_account(cfg):
+    order = cfg.get("order", [])
+    cur = cfg.get("premiumAccount")
+    if cur not in order or len(order) < 2:
+        raise AcctError("Rotation config is invalid. Run `acct.sh auto configure` again.")
+    return order[(order.index(cur) + 1) % len(order)]
+
+
+def _set_premium_seat(old_name, new_name, cfg, idx):
+    old_email = ((idx["accounts"].get(old_name, {}).get("profile") or {}).get("emailAddress") or "").strip()
+    new_email = ((idx["accounts"].get(new_name, {}).get("profile") or {}).get("emailAddress") or "").strip()
+    if not old_email or not new_email:
+        raise AcctError("Both accounts need a saved email address before changing seat tiers.")
+    node = os.environ.get("CLAUDE_ACCT_NODE", "node")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
+    env = dict(os.environ)
+    env["CLAUDE_ACCT_MEMBERS_URL"] = cfg.get("membersUrl", "https://claude.ai/admin-settings/members")
+    env["CLAUDE_ACCT_CDP_URL"] = cfg.get("cdpUrl", "http://127.0.0.1:9222")
+    env["CLAUDE_ACCT_BROWSER_PROFILE"] = cfg.get("browserProfile", os.path.join(store_dir(), "browser-profile"))
+    try:
+        r = subprocess.run([node, script, old_email, new_email], capture_output=True, text=True, timeout=120, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise AcctError("Could not run seat automation: %s. Check Node.js, Playwright, and the Chrome CDP connection." % e)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "unknown error").strip()
+        raise AcctError("Premium seat transfer failed; account switch was not performed. %s" % detail[-1200:])
+    if r.stdout.strip():
+        print(r.stdout.strip())
+
+
+def _cmd_auto_check_locked(args):
+    cfg = load_rotation()
+    if not cfg.get("enabled"):
+        return
+    idx = load_index()
+    premium = cfg.get("premiumAccount")
+    if premium not in idx["accounts"]:
+        raise AcctError("Current Premium account '%s' is not saved. Disable rotation or reconfigure it." % premium)
+    # Rotate only while this Claude Code session is actually using the Premium account.
+    try:
+        cur = sync_current(idx)
+    except AcctError:
+        cur = current_name(idx)
+    if cur != premium:
+        return
+    try:
+        creds = read_stored_creds(premium)
+    except AcctError as e:
+        raise AcctError("Automatic rotation could not read the Premium account: %s" % e)
+    meta = idx["accounts"][premium]
+    status = refresh_usage(meta, creds, force=args.force)
+    if status not in ("ok", "cache"):
+        save_index(idx)
+        if args.manual:
+            raise AcctError("Cannot check Premium usage (%s); rotation did not run." % status)
+        return
+    usage = (meta.get("usage") or {}).get("data") or {}
+    daily_threshold, weekly_threshold = _rotation_thresholds(cfg)
+    values = _usage_window_values(usage)
+    save_index(idx)
+    if cfg.get("rotationHold") == premium:
+        if not values or _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+            return
+        cfg.pop("rotationHold", None)
+        save_rotation(cfg)
+    if not values or not _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+        return
+    old_name = premium
+    new_name = _next_rotation_account(cfg)
+    if token_state(idx["accounts"].get(new_name, {}), read_stored_creds(new_name)) == "relogin":
+        raise AcctError("Next account '%s' needs a new login; Premium seat was not moved." % new_name)
+    if args.manual:
+        reached = []
+        if values.get("five_hour", -1) >= daily_threshold:
+            reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
+        if values.get("seven_day", -1) >= weekly_threshold:
+            reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
+        print("Usage threshold reached for %s. Transferring Premium from %s to %s..." % (" and ".join(reached), old_name, new_name))
+    _set_premium_seat(old_name, new_name, cfg, idx)
+    # Change credentials only after the Members page confirms the tier change.
+    cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
+    cfg["premiumAccount"] = new_name
+    next_usage = ((idx["accounts"].get(new_name, {}).get("usage") or {}).get("data") or {})
+    if _usage_reached_thresholds(next_usage, daily_threshold, weekly_threshold):
+        # Avoid immediately rotating through accounts whose standard-tier usage was already high.
+        cfg["rotationHold"] = new_name
+    else:
+        cfg.pop("rotationHold", None)
+    save_rotation(cfg)
+
+
+def cmd_auto_check(args):
+    if not load_rotation().get("enabled"):
+        return
+    lock_path = os.path.join(store_dir(), "rotation.lock")
+    os.makedirs(store_dir(), exist_ok=True)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(lock_path) > 300:
+                os.unlink(lock_path)
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            else:
+                return
+        except (FileNotFoundError, FileExistsError):
+            return
+    try:
+        os.close(fd)
+        _cmd_auto_check_locked(args)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+
+
 def cmd_remove(args):
     idx = load_index()
     args.name = resolve_name(idx, args.name)
@@ -642,6 +867,24 @@ def main(argv=None):
     p = sub.add_parser("list", help="list accounts + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
     p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.add_argument("--no-wait", action="store_true"); p.set_defaults(fn=cmd_switch)
     p = sub.add_parser("remove", help="remove an account from the list"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
+    p = sub.add_parser("auto", help="configure automatic Premium seat rotation")
+    autos = p.add_subparsers(dest="auto_cmd", required=True)
+    q = autos.add_parser("configure", help="set account rotation order and organization page")
+    q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
+    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 90%%)")
+    q.add_argument("--weekly-threshold", type=int, help="7-day usage trigger (default: 90%%)")
+    q.add_argument("--threshold", type=int, help="legacy shorthand: set both thresholds to this value")
+    q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
+    q.add_argument("--cdp-url", default="http://127.0.0.1:9222")
+    q.add_argument("--browser-profile", default=os.path.join(store_dir(), "browser-profile"))
+    q.set_defaults(fn=cmd_auto_configure)
+    q = autos.add_parser("enable", help="enable automatic rotation"); q.set_defaults(fn=cmd_auto_enable)
+    q = autos.add_parser("disable", help="disable automatic rotation"); q.set_defaults(fn=cmd_auto_disable)
+    q = autos.add_parser("status", help="show rotation settings"); q.set_defaults(fn=cmd_auto_status)
+    q = autos.add_parser("browser", help="open the persistent admin browser profile for one-time sign-in"); q.set_defaults(fn=cmd_auto_browser)
+    q = autos.add_parser("check", help="check usage and rotate if threshold is reached")
+    q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
+    q.set_defaults(fn=cmd_auto_check)
     args = ap.parse_args(argv)
     try:
         if hasattr(args, "name") and not args.name:

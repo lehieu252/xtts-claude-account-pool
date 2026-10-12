@@ -1,4 +1,4 @@
-# claude-account-manager (`acct`)
+# xtts-claude-account-pool (`acct`)
 
 A Claude Code plugin for people with more than one Claude account (claude.ai login). Save your accounts, see the 5-hour / 7-day usage of all of them in one table, and switch between them **without logging out and back in**. Works in the CLI and the VS Code extension, on macOS, Windows and Linux.
 
@@ -8,6 +8,7 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 | `/acct:save <name>` | Save the account you are **currently logged in** with, no new login needed |
 | `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account |
 | `/acct:switch <name> [--no-wait]` | Switch to another saved account and **keep working in the same chat**. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
+| `/acct:auto <configure|enable|disable|status|check>` | Rotate the organization's Premium seat to the next saved account when the active Premium account reaches the configured usage threshold |
 | `/acct:logout <name>` | Remove an account from the list (deletes its saved token) |
 
 ## Install
@@ -15,13 +16,63 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 In Claude Code:
 
 ```
-/plugin marketplace add lehieu252/claude-account-manager
-/plugin install acct@claude-account-manager
+/plugin marketplace add lehieu252/xtts-claude-account-pool
+/plugin install acct@xtts-claude-account-pool
 ```
 
-In the VS Code extension, `/plugin` is not available. Type `/plugins` to open the plugin manager, or run the same two commands in a terminal with `claude plugin marketplace add …` and `claude plugin install … --scope user`.
+In the VS Code extension, type `/plugins` to open the plugin manager. You can also run the commands from a terminal:
 
-Requires Python 3.8+ (`python3`, `python` or `py -3`). On Windows, Claude Code runs commands through Git Bash.
+```bash
+claude plugin marketplace add lehieu252/xtts-claude-account-pool
+claude plugin install acct@xtts-claude-account-pool --scope user
+```
+
+Requirements: Claude Code, Python 3.8+, Node.js 20+, npm, and Google Chrome. On Windows, Claude Code runs the plugin's shell scripts through Git Bash.
+
+The seat automation uses `playwright-core`. After installing the plugin, install its Node dependency in the installed plugin's cache directory (replace `0.7.0` with the installed plugin version if it differs):
+
+```bash
+cd ~/.claude/plugins/cache/xtts-claude-account-pool/acct/0.7.0
+npm ci
+```
+
+The browser profile and saved sign-in session are local to each machine, under `~/.claude-acct/browser-profile` by default.
+
+## Set up a new machine
+
+1. Install and sign in to Claude Code. Install Google Chrome, Python 3.8+, and Node.js 20+.
+2. Install the plugin using the marketplace commands above, then run `npm ci` in its installed cache directory.
+3. Start Claude Code and save each account on this machine. The old machine's account tokens and Chrome session are not transferred:
+
+   ```text
+   /acct:login xtts xtts@example.com
+   /acct:login info info@example.com
+   /acct:login sales sales@example.com
+   /acct:list --refresh
+   ```
+
+   Replace the example emails with the actual addresses. Run `/acct:login <name> <email>` for every pool account. Each one must be a member of the same organization.
+4. Configure the current Premium account, rotation order, and threshold. Put the current Premium account first; the next name is the first rotation target:
+
+   ```text
+   /acct:auto configure --premium xtts --order xtts,info,sales
+   ```
+
+5. Open the dedicated browser profile once:
+
+   ```text
+   /acct:auto browser
+   ```
+
+   Sign in to Claude as an organization owner or admin and complete any Cloudflare check. This profile stores that login locally for future seat changes.
+6. Check `/acct:list --refresh` and `/acct:auto status`. Confirm the current Premium account and order are correct and that the next account has usable capacity. Rotation is still off at this point.
+7. Turn on automatic rotation:
+
+   ```text
+   /acct:auto enable
+   ```
+
+   To stop it later, run `/acct:auto disable`.
 
 ## First use
 
@@ -30,6 +81,31 @@ Requires Python 3.8+ (`python3`, `python` or `py -3`). On Windows, Claude Code r
 3. `/acct:list`: see both accounts and their usage.
 
 From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the confirmation, and keep working in the same chat. No new tab or `/resume` needed.
+
+### Automatic Premium seat rotation
+
+The rotation is opt-in. The default trigger is **90% for 5-hour usage and 90% for 7-day usage**. Configure the current Premium account and the order in which seats should rotate:
+
+```
+/acct:auto configure --premium xtts --order xtts,info,sales
+/acct:auto browser
+/acct:auto status
+/acct:auto enable
+```
+
+To change thresholds for a test, set the 5-hour and 7-day values independently. For example, trigger at 75% for 5-hour usage while keeping weekly at 90%:
+
+```
+/acct:auto configure --premium xtts --order xtts,info,sales --daily-threshold 75 --weekly-threshold 90
+```
+
+Use `--daily-threshold 90 --weekly-threshold 75` to test the reverse, or `--threshold 75` as shorthand to set both to 75%. Daily means the 5-hour usage window shown by `/acct:list`; weekly means the 7-day window. Run `/acct:auto status` to see the active values. Re-running `configure` keeps rotation off until you enable it again.
+
+The plugin checks the active Premium account before each prompt and tool call. When either the 5-hour or 7-day usage reaches the threshold, it changes the old member to Standard, promotes the next member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If the seat change fails, it does not switch credentials and makes a best-effort rollback. Use `/acct:auto disable` to stop rotation.
+
+Run `/acct:auto browser` once to open the persistent automation profile in regular Chrome. Sign in as an organization owner/admin if needed. The plugin uses Chrome's local debugging endpoint to control this dedicated profile; your normal Chrome profile stays separate. Chrome 136 and later block remote debugging of the default user-data directory, so the plugin uses this dedicated profile. The Members page defaults to `https://claude.ai/admin-settings/members`; override it with `--members-url` if your organization uses a different path on claude.ai.
+
+The account order is explicit and cyclic. Only saved accounts in that order are eligible; each must already be a Standard member except the account currently marked Premium. If a newly promoted account was already over the threshold on Standard, rotation waits for its usage to fall below the threshold before monitoring it, preventing rapid repeated seat moves. Disable rotation before changing the pool or editing seat tiers manually.
 
 If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login <name>` command it shows. Nothing else in the table needs your attention.
 
@@ -57,6 +133,7 @@ An account is flagged **🔴 Log in again** when its refresh token has expired (
 - The claude.ai login can ask you to paste a code, and the chat box cannot take input, so `/acct:login` opens a separate terminal window (macOS: Terminal; Windows: a Git Bash window; Linux: the default terminal). If none can be opened, it prints the command to run yourself.
 - In the VS Code extension, plugin commands may not appear in the `/` suggestion menu (known Claude Code issue). Typing the full command, e.g. `/acct:list`, works.
 - API key, Bedrock and Vertex logins are not supported.
+- Seat management depends on the current claude.ai Members page and its UI; Anthropic can change it. The automation requires an owner/admin browser session and a local Chrome CDP endpoint. Rotation runs at Claude Code hook boundaries, so it cannot interrupt an already-running request; the changed account applies to the next model request.
 - If you set `CLAUDE_CONFIG_DIR` on macOS, the Keychain item name gets a suffix based on the path. The script follows community observations; this is not documented by Anthropic.
 - Using several subscription accounts is subject to Anthropic's terms.
 

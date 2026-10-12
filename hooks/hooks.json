@@ -1,0 +1,28 @@
+{
+  "description": "Check saved Premium account usage before prompts and tool calls; rotation is opt-in.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/acct.sh\" auto check",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/acct.sh\" auto check",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

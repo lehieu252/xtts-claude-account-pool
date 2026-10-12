@@ -1,17 +1,17 @@
 {
-  "name": "claude-account-manager",
+  "name": "xtts-claude-account-pool",
   "owner": {
     "name": "Hieu Le",
     "email": "hieule252uet@gmail.com"
   },
   "metadata": {
-    "description": "Claude Code plugin to manage multiple Claude accounts: save, view usage, switch quickly."
+    "description": "Claude Code plugin to manage multiple Claude accounts and automatically rotate organization Premium seats."
   },
   "plugins": [
     {
       "name": "acct",
       "source": "./",
-      "description": "Manage multiple Claude accounts: /acct:login, /acct:save, /acct:list, /acct:switch, /acct:logout"
+      "description": "Manage multiple Claude accounts, usage monitoring, and opt-in automatic Premium seat rotation"
     }
   ]
 }
