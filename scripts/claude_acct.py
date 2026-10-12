@@ -845,24 +845,34 @@ def _cmd_auto_check_locked(args):
     save_rotation(cfg)
 
 
-def cmd_auto_check(args):
+def _acquire_rotation_lock(lock_path, wait=0):
+    """Return True once this process holds the rotation lock, False if it stays busy for `wait` seconds."""
+    deadline = time.time() + wait
+    while True:
+        try:
+            os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            return True
+        except FileExistsError:
+            pass
+        try:
+            if time.time() - os.path.getmtime(lock_path) > 300:
+                os.unlink(lock_path)
+                continue
+        except FileNotFoundError:
+            continue
+        if time.time() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def cmd_auto_check(args, lock_wait=0):
     if not load_rotation().get("enabled"):
         return
     lock_path = os.path.join(store_dir(), "rotation.lock")
     os.makedirs(store_dir(), exist_ok=True)
+    if not _acquire_rotation_lock(lock_path, lock_wait):
+        return
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        try:
-            if time.time() - os.path.getmtime(lock_path) > 300:
-                os.unlink(lock_path)
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            else:
-                return
-        except (FileNotFoundError, FileExistsError):
-            return
-    try:
-        os.close(fd)
         _cmd_auto_check_locked(args)
     finally:
         try:
@@ -871,8 +881,19 @@ def cmd_auto_check(args):
             pass
 
 
+# Exit code 2 from an `asyncRewake` hook wakes the model with this text (stderr) in the same session.
+REWAKE_EXIT = 2
+REWAKE_MESSAGE = ("The claude.ai usage limit of account %s was reached, so the acct plugin moved the Premium seat "
+                  "and switched this session to account %s, which has usage available. Continue the task you were "
+                  "working on when the limit was reached; do not repeat work that is already complete.")
+
+
 def cmd_auto_recover(args):
-    """Best-effort seat rotation after Claude Code reports a quota rate limit."""
+    """Seat rotation after Claude Code reports a quota rate limit; wakes the model when the account changed.
+
+    Runs as an `asyncRewake` StopFailure hook: in the background, so the seat transfer and the
+    Keychain cache wait do not block the UI. Exit 2 makes Claude Code continue the stopped task.
+    """
     try:
         event = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -881,10 +902,16 @@ def cmd_auto_recover(args):
         return
     if not load_rotation().get("enabled"):
         return
+    before = current_name(load_index())
     # StopFailure's rate_limit category also covers ordinary API throttling.
     # Reuse normal checks: live usage must confirm the configured threshold, and
-    # the destination must have fresh usage below both thresholds.
-    cmd_auto_check(argparse.Namespace(force=True, manual=False))
+    # the destination must have fresh usage below both thresholds. Wait for a
+    # check that is already rotating instead of skipping it.
+    cmd_auto_check(argparse.Namespace(force=True, manual=False), lock_wait=240)
+    after = current_name(load_index())
+    if before and after and after != before:
+        sys.stderr.write(REWAKE_MESSAGE % (before, after))
+        sys.exit(REWAKE_EXIT)
 
 
 def cmd_remove(args):

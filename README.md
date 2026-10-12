@@ -29,10 +29,10 @@ claude plugin install acct@xtts-claude-account-pool --scope user
 
 Requirements: Claude Code, Python 3.8+, Node.js 20+, npm, and Google Chrome. On Windows, Claude Code runs the plugin's shell scripts through Git Bash.
 
-The seat automation uses `playwright-core`. After installing the plugin, install its Node dependency in the installed plugin's cache directory (replace `0.7.0` with the installed plugin version if it differs):
+The seat automation uses `playwright-core`. After installing the plugin, install its Node dependency in the installed plugin's cache directory (replace `0.8.0` with the installed plugin version if it differs):
 
 ```bash
-cd ~/.claude/plugins/cache/xtts-claude-account-pool/acct/0.7.0
+cd ~/.claude/plugins/cache/xtts-claude-account-pool/acct/0.8.0
 npm ci
 ```
 
@@ -103,7 +103,9 @@ Use `--daily-threshold 90 --weekly-threshold 75` to test the reverse, or `--thre
 
 The plugin checks the active Premium account before each prompt and tool call. When either the 5-hour or 7-day usage reaches the threshold, it changes the old member to Standard, promotes the next eligible member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If Claude Code reports a usage-related `rate_limit` failure, a `StopFailure` hook makes one best-effort rotation attempt using the same fresh-usage and seat checks. It ignores ordinary API throttling and other errors. Use `/acct:auto disable` to stop rotation.
 
-On interactive Claude Code **v2.1.234 or later**, Claude Code has its own automatic continue behavior after a claude.ai usage limit. Keep `autoContinueAtUsageLimit` enabled and leave the session open. The plugin can rotate credentials after a recognized usage failure, but Claude Code's `StopFailure` hook has no control to force an immediate retry. Native automatic continue may wait for the reported reset, and changing accounts during that wait can affect whether Claude Code continues; verify this behavior with your installed Claude Code version before relying on unattended recovery.
+**Continuing after a usage-limit stop.** A long response can cross the limit before the next tool call, so the turn stops with a usage-limit error. The `StopFailure` hook runs with `asyncRewake`: it rotates in the background, waits out the Keychain cache, then exits with code 2. Claude Code treats that as a wake-up and continues the stopped task in the same chat, with the same context and the new account. Nobody has to type "continue". If nothing was rotated (ordinary throttling, no eligible account, rotation off), the hook exits 0 and the session stays stopped. Each rotation wakes the model at most once, so the chain ends when the pool runs out.
+
+Claude Code's own `autoContinueAtUsageLimit` (v2.1.234 or later) waits for the reset time of the account that hit the limit; it does not notice that the plugin switched to an account with usage left. The plugin's wake-up does not depend on it. Whether the two interact (for example, the wake-up being held until that reset while native auto-continue is waiting) has not been verified on a real usage limit. Test it once with your Claude Code version, and turn `autoContinueAtUsageLimit` off if the wake-up is held.
 
 Run `/acct:auto browser` once to open the persistent automation profile in regular Chrome. Sign in as an organization owner/admin if needed. The plugin uses Chrome's local debugging endpoint to control this dedicated profile; your normal Chrome profile stays separate. Chrome 136 and later block remote debugging of the default user-data directory, so the plugin uses this dedicated profile. The Members page defaults to `https://claude.ai/admin-settings/members`; override it with `--members-url` if your organization uses a different path on claude.ai.
 
@@ -135,7 +137,7 @@ An account is flagged **🔴 Log in again** when its refresh token has expired (
 - The claude.ai login can ask you to paste a code, and the chat box cannot take input, so `/acct:login` opens a separate terminal window (macOS: Terminal; Windows: a Git Bash window; Linux: the default terminal). If none can be opened, it prints the command to run yourself.
 - In the VS Code extension, plugin commands may not appear in the `/` suggestion menu (known Claude Code issue). Typing the full command, e.g. `/acct:list`, works.
 - API key, Bedrock and Vertex logins are not supported.
-- Seat management depends on the current claude.ai Members page and its UI; Anthropic can change it. The automation requires an owner/admin browser session and a local Chrome CDP endpoint. Rotation runs at Claude Code hook boundaries, so it cannot interrupt an already-running request. `StopFailure` can trigger a safe seat/account rotation after a usage error, but plugin hooks cannot themselves replay a failed model request; unattended continuation depends on Claude Code's own auto-continue support and session behavior.
+- Seat management depends on the current claude.ai Members page and its UI; Anthropic can change it. The automation requires an owner/admin browser session and a local Chrome CDP endpoint. Rotation runs at Claude Code hook boundaries, so it cannot interrupt an already-running request. The continue-after-limit wake-up uses the `asyncRewake` hook option, verified against Claude Code 2.1.296 with a mock API that returns a usage-limit 429. It needs the session to stay open: `claude -p` exits before the background hook finishes.
 - If you set `CLAUDE_CONFIG_DIR` on macOS, the Keychain item name gets a suffix based on the path. The script follows community observations; this is not documented by Anthropic.
 - Using several subscription accounts is subject to Anthropic's terms.
 

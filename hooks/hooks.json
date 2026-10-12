@@ -1,5 +1,5 @@
 {
-  "description": "Check saved Premium account usage before prompts and tool calls; rotation is opt-in.",
+  "description": "Check saved Premium account usage before prompts and tool calls; after a usage-limit stop, rotate and continue the task. Rotation is opt-in.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -31,7 +31,8 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/acct.sh\" auto recover",
-            "timeout": 180
+            "timeout": 300,
+            "asyncRewake": true
           }
         ]
       }
