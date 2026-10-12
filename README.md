@@ -6,7 +6,7 @@ Plugin Claude Code để quản lý nhiều account Claude (đăng nhập claude
 |---|---|
 | `/acct:login <email>` hoặc `/acct:login <tên> [email]` | Đăng nhập một account bất kỳ (mới hoặc đăng nhập lại) và lưu. Chỉ gõ email thì email là tên account, và script kiểm tra bạn đăng nhập đúng email đó trên trình duyệt. Mở cửa sổ Terminal để hoàn tất đăng nhập; **account đang dùng không bị đổi** |
 | `/acct:save <tên>` | Lưu account **đang đăng nhập** vào danh sách, không cần đăng nhập lại |
-| `/acct:list [--refresh]` | Bảng các account đã lưu: email, tổ chức, gói, usage 5h / 7 ngày, giờ reset. `▶` = account đang dùng |
+| `/acct:list [--refresh]` | Bảng các account đã lưu: email, tổ chức, gói, **trạng thái đăng nhập**, usage 5h / 7 ngày, giờ reset. `▶` = account đang dùng |
 | `/acct:switch <tên>` | Đổi sang account `<tên>`. Nhận tên, email hoặc phần trước `@` (vd `alice`) nếu không trùng account khác |
 | `/acct:logout <tên>` | Xoá account `<tên>` khỏi danh sách (xoá token đã lưu) |
 
@@ -39,6 +39,14 @@ Token của account đã lưu hết hạn (lâu không dùng)? Gõ lại `/acct:
 - `switch` lưu lại token **mới nhất** của account hiện tại (Claude Code tự làm mới token theo thời gian) rồi ghi token + `oauthAccount` của account đích vào chỗ Claude Code đọc.
 - `switch` từ chối nếu account đang đăng nhập chưa được lưu, để không làm mất đăng nhập đó (`--force` để bỏ qua).
 - Token **không bao giờ** được in ra hội thoại; lệnh chạy script trực tiếp (`disable-model-invocation`), Claude chỉ hiển thị kết quả.
+
+## Trạng thái trong `/acct:list`
+
+| Trạng thái | Nghĩa | Cần làm |
+|---|---|---|
+| ✅ OK | Token còn hạn | Không |
+| ⏳ Token tạm hết hạn | Token truy cập ngắn hạn hết hạn, token làm mới còn hạn | Không. Claude Code tự làm mới khi switch sang |
+| 🔴 Cần đăng nhập lại | Token làm mới hết hạn (`refreshTokenExpiresAt`) hoặc bị thu hồi (API usage trả 401) | `/acct:login <tên>`. `/acct:switch` từ chối đổi sang account này |
 
 ## Giới hạn
 

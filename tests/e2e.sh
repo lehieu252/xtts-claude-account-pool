@@ -70,3 +70,17 @@ run switch alice@example.com
 run switch ALICE@OTHER.COM
 run remove alice@other.com
 run switch alice; run list
+
+echo "=========== trạng thái token"
+rm -rf "$S/store" "$S/cfg"; mkdir -p "$S/cfg"
+login A tokA1; run save a          # account đang dùng, access hết hạn -> vẫn OK
+login B tokB1; run save b          # access hết hạn, refresh còn -> ⏳
+login D tokD1; run save d
+python3 -I - "$S/store" <<'EOF'
+import json,sys,time
+d=sys.argv[1]
+c=json.load(open(d+"/secrets/b.json")); c["claudeAiOauth"]["refreshTokenExpiresAt"]=int(time.time()*1000)-1000
+json.dump(c,open(d+"/secrets/b.json","w"))                       # refresh hết hạn -> 🔴
+i=json.load(open(d+"/accounts.json")); i["accounts"]["a"]["revoked"]=True; json.dump(i,open(d+"/accounts.json","w"))  # a bị thu hồi -> 🔴
+EOF
+run switch a; run list; run switch b

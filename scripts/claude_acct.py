@@ -285,6 +285,20 @@ def fetch_usage(access_token):
         return json.loads(r.read().decode("utf-8"))
 
 
+def token_state(meta, creds):
+    """ok | access_expired (Claude tự làm mới khi dùng) | relogin (phải đăng nhập lại)."""
+    o = creds.get("claudeAiOauth", {})
+    now_ms = time.time() * 1000
+    if meta.get("revoked") or not o.get("refreshToken"):
+        return "relogin"
+    rexp = o.get("refreshTokenExpiresAt")
+    if isinstance(rexp, (int, float)) and rexp and rexp < now_ms:
+        return "relogin"
+    if not o.get("accessToken") or (o.get("expiresAt") or 0) < now_ms + EXPIRY_MARGIN_MS:
+        return "access_expired"
+    return "ok"
+
+
 def refresh_usage(meta, creds, force=False):
     """Cập nhật meta['usage'] nếu token còn hạn. Trả về chuỗi trạng thái."""
     cache = meta.get("usage")
@@ -297,10 +311,14 @@ def refresh_usage(meta, creds, force=False):
     try:
         data = fetch_usage(o["accessToken"])
     except urllib.error.HTTPError as e:
+        if e.code == 401:  # token còn hạn mà bị từ chối = đã bị thu hồi
+            meta["revoked"] = True
+            return "revoked"
         return "http %d" % e.code
     except Exception as e:  # mạng lỗi, timeout...
         return "lỗi: %s" % type(e).__name__
     meta["usage"] = {"fetchedAt": now, "data": data}
+    meta.pop("revoked", None)
     return "ok"
 
 
@@ -519,38 +537,52 @@ def cmd_list(args):
     except AcctError:
         cur = None
     live_profile = read_live_profile()
-    rows = []
+    rows, need_login = [], []
     for name in sorted(idx["accounts"]):
         meta = idx["accounts"][name]
         try:
             creds = read_stored_creds(name)
             status = refresh_usage(meta, creds, force=args.refresh)
+            state = token_state(meta, creds)
         except AcctError as e:
-            status = str(e)
+            status, state = str(e), "relogin"
+        if name == cur and state == "access_expired":
+            state = "ok"  # account đang dùng: Claude Code tự làm mới token
         usage = (meta.get("usage") or {}).get("data") or {}
         fetched = (meta.get("usage") or {}).get("fetchedAt")
-        if status in ("ok", "cache"):
-            note = "cập nhật " + fmt_age(fetched)
-        elif fetched:
-            note = "số cũ, cập nhật %s (%s)" % (fmt_age(fetched), "token hết hạn" if status == "expired" else status)
+        if state == "relogin":
+            badge = "🔴 Cần đăng nhập lại: /acct:login %s" % name
+            need_login.append(name)
+        elif state == "access_expired":
+            badge = "⏳ Token tạm hết hạn (tự làm mới khi switch)"
         else:
-            note = "chưa có số (%s)" % ("token hết hạn — switch sang để làm mới" if status == "expired" else status)
+            badge = "✅ OK"
+        if fetched:
+            note = ("cập nhật " if status in ("ok", "cache") else "số cũ, cập nhật ") + fmt_age(fetched)
+        else:
+            note = "chưa có số"
+        if status not in ("ok", "cache", "expired", "revoked"):
+            note += " (%s)" % status
         p = meta.get("profile") or {}
         rows.append([
             ("▶ " if name == cur else "") + name,
             p.get("emailAddress", "?"),
             p.get("organizationName", "?"),
             (meta.get("oauth") or {}).get("subscriptionType") or "?",
+            badge,
             fmt_window(usage.get("five_hour")),
             fmt_window(usage.get("seven_day")),
             note,
         ])
     save_index(idx)
-    head = ["Account", "Email", "Tổ chức", "Gói", "5 giờ", "7 ngày", "Ghi chú"]
+    head = ["Account", "Email", "Tổ chức", "Gói", "Trạng thái", "5 giờ", "7 ngày", "Usage"]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
         print("| " + " | ".join(r) + " |")
+    if need_login:
+        print("\n🔴 %d account cần đăng nhập lại: %s" % (len(need_login), ", ".join(
+            "`/acct:login %s`" % n for n in need_login)))
     if not cur:
         print("\nĐang đăng nhập %s nhưng account này chưa được lưu — gõ /acct:save <tên> để lưu."
               % ((live_profile or {}).get("emailAddress") or "(không rõ)"))
@@ -565,6 +597,10 @@ def cmd_switch(args):
     if cur == args.name:
         print("Đang dùng **%s** rồi." % args.name)
         return
+    target = read_stored_creds(args.name)
+    if token_state(idx["accounts"][args.name], target) == "relogin":
+        raise AcctError("Đăng nhập của '%s' đã hết hạn hoặc bị thu hồi. Gõ /acct:login %s để đăng nhập lại."
+                        % (args.name, args.name))
     live_creds, where = read_live_creds()
     if cur is None and not args.force:
         raise AcctError("Account đang đăng nhập (%s) chưa được lưu — đổi đi sẽ mất đăng nhập này. "
@@ -573,7 +609,6 @@ def cmd_switch(args):
     if cur:
         write_stored_creds(cur, live_creds)  # giữ token mới nhất của account cũ
         idx["accounts"][cur]["oauth"] = public_oauth(live_creds)
-    target = read_stored_creds(args.name)
     write_live_creds(target, where)
     write_live_profile(idx["accounts"][args.name].get("profile"))
     save_index(idx)
