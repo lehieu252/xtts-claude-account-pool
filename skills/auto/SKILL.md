@@ -1,6 +1,6 @@
 ---
 name: auto
-description: Configure separate 5-hour and 7-day usage thresholds, enable or disable automatic Premium seat rotation, and inspect its status.
+description: Configure the 5-hour usage threshold, enable or disable automatic Premium seat rotation, and inspect its status.
 argument-hint: "<configure|enable|disable|status|check> [options]"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)

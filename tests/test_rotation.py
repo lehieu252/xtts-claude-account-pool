@@ -41,18 +41,18 @@ class RotationCandidateTests(unittest.TestCase):
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90, 90)
+                self.idx, 90)
         self.assertEqual(name, "xtts")
         self.assertEqual(skipped, ["sales (already at threshold)"])
 
     def test_returns_no_candidate_when_all_accounts_are_over_threshold(self):
-        self.idx["accounts"]["xtts"] = account(20, 95)
+        self.idx["accounts"]["xtts"] = account(95, 20)
         with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
              patch.object(acct, "token_state", return_value="ok"), \
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90, 90)
+                self.idx, 90)
         self.assertIsNone(name)
         self.assertEqual(len(skipped), 2)
 
@@ -62,9 +62,56 @@ class RotationCandidateTests(unittest.TestCase):
              patch.object(acct, "refresh_usage", return_value="error: timeout"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90, 90)
+                self.idx, 90)
         self.assertIsNone(name)
         self.assertEqual(skipped, ["sales (usage unavailable)", "xtts (usage unavailable)"])
+
+
+class DailyOnlyThresholdTests(unittest.TestCase):
+    def pick(self, idx, cfg):
+        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_usage", return_value="cache"):
+            return acct._next_eligible_rotation_account(cfg, idx, 75)
+
+    def test_weekly_usage_alone_does_not_trigger_rotation(self):
+        usage = account(10, 99)["usage"]["data"]
+        self.assertFalse(acct._usage_reached_threshold(usage, 75))
+
+    def test_daily_threshold_triggers_rotation(self):
+        usage = account(75, 0)["usage"]["data"]
+        self.assertTrue(acct._usage_reached_threshold(usage, 75))
+
+    def test_used_up_weekly_window_still_triggers_rotation(self):
+        usage = account(10, 100)["usage"]["data"]
+        self.assertTrue(acct._usage_reached_threshold(usage, 75))
+
+    def test_destination_weekly_usage_is_ignored(self):
+        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
+        name, skipped = self.pick(idx, {"order": ["info", "sales", "xtts"], "premiumAccount": "sales"})
+        self.assertEqual(name, "xtts")
+        self.assertEqual(skipped, [])
+
+    def test_account_used_up_as_premium_is_skipped_until_reset(self):
+        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
+        cfg = {"order": ["info", "sales", "xtts"], "premiumAccount": "sales",
+               "usedUpUntil": {"xtts": time.time() + 3600, "info": time.time() - 1}}
+        name, skipped = self.pick(idx, cfg)
+        self.assertEqual(name, "info")
+        self.assertTrue(skipped[0].startswith("xtts (used up as Premium until"))
+        self.assertNotIn("info", cfg["usedUpUntil"])  # expired entries are dropped
+
+    def test_marks_used_up_premium_until_latest_reset(self):
+        cfg = {}
+        usage = {"five_hour": {"utilization": 100, "resets_at": "2026-10-12T15:00:00+00:00"},
+                 "seven_day": {"utilization": 100, "resets_at": "2026-10-15T10:00:00+00:00"}}
+        acct._mark_used_up(cfg, "sales", usage)
+        self.assertEqual(cfg["usedUpUntil"]["sales"], acct._parse_reset("2026-10-15T10:00:00+00:00"))
+
+    def test_daily_threshold_alone_does_not_mark_used_up(self):
+        cfg = {}
+        acct._mark_used_up(cfg, "sales", account(80, 40)["usage"]["data"])
+        self.assertEqual(cfg, {})
 
 
 class StopFailureRecoveryTests(unittest.TestCase):
@@ -129,6 +176,31 @@ class RotationLockTests(unittest.TestCase):
         old = time.time() - 301
         os.utime(self.lock, (old, old))
         self.assertTrue(acct._acquire_rotation_lock(self.lock))
+
+
+class SeatTests(unittest.TestCase):
+    def creds(self):
+        return {"claudeAiOauth": {"accessToken": "t", "expiresAt": (time.time() + 3600) * 1000}}
+
+    def test_labels_known_team_seat_tiers(self):
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": "team_tier_1"}}), "Premium")
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": "team_standard"}}), "Standard")
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": None}}), "No seat")
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": "enterprise_x"}}), "enterprise_x")
+        self.assertEqual(acct.fmt_seat({}), "?")
+
+    def test_reads_seat_tier_from_profile(self):
+        meta = {}
+        with patch.object(acct, "fetch_usage", return_value={"organization": {"seat_tier": "team_tier_1"}}) as f:
+            acct.refresh_seat(meta, self.creds())
+        self.assertEqual(f.call_args.args[1], acct.PROFILE_URL)
+        self.assertEqual(meta["seat"]["tier"], "team_tier_1")
+
+    def test_keeps_last_known_seat_when_profile_fails(self):
+        meta = {"seat": {"fetchedAt": 0, "tier": "team_standard"}}
+        with patch.object(acct, "fetch_usage", side_effect=OSError("down")):
+            acct.refresh_seat(meta, self.creds())
+        self.assertEqual(meta["seat"]["tier"], "team_standard")
 
 
 if __name__ == "__main__":

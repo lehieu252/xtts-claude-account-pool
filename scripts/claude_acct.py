@@ -7,6 +7,7 @@ Commands:
   list                         List saved accounts + 5-hour / 7-day usage
   switch <name>                Switch to account <name>
   remove <name>                Remove account <name> from the list (deletes its saved token)
+  doctor                       Check requirements, install the Node dependency, list what is left to set up
 
 Where Claude Code keeps the live login:
   macOS          Keychain, service "Claude Code-credentials", account = $USER
@@ -27,6 +28,7 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,8 @@ LIVE_SERVICE = "Claude Code-credentials"
 STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
 USAGE_CACHE_TTL = 120  # seconds, to avoid HTTP 429
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # unofficial; organization.seat_tier is the member's seat
+SEAT_LABELS = {"team_standard": "Standard", "team_tier_1": "Premium"}
 EXPIRY_MARGIN_MS = 60_000
 # Claude Code caches Keychain reads for 30 s (UOt=30000 in the 2.1.29x bundle). After that, a
 # running session sees the new token and switches to it, so waiting this long after a swap
@@ -278,8 +282,8 @@ def resolve_name(idx, query, must_exist=True):
 
 # ---------------------------------------------------------------- usage
 
-def fetch_usage(access_token):
-    req = urllib.request.Request(USAGE_URL, headers={
+def fetch_usage(access_token, url=USAGE_URL):
+    req = urllib.request.Request(url, headers={
         "Authorization": "Bearer " + access_token,
         "anthropic-beta": "oauth-2025-04-20",
         "Content-Type": "application/json",
@@ -324,6 +328,32 @@ def refresh_usage(meta, creds, force=False):
     meta["usage"] = {"fetchedAt": now, "data": data}
     meta.pop("revoked", None)
     return "ok"
+
+
+def refresh_seat(meta, creds, force=False):
+    """Update meta['seat'] with the organization seat tier, under the same rules as refresh_usage."""
+    cache = meta.get("seat")
+    now = time.time()
+    if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
+        return
+    o = creds.get("claudeAiOauth", {})
+    if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
+        return
+    try:
+        org = fetch_usage(o["accessToken"], PROFILE_URL).get("organization") or {}
+    except Exception:  # keep the last known seat; the usage column already reports token problems
+        return
+    meta["seat"] = {"fetchedAt": now, "tier": org.get("seat_tier")}
+
+
+def fmt_seat(meta):
+    seat = meta.get("seat")
+    if not seat:
+        return "?"
+    tier = seat.get("tier")
+    if not tier:
+        return "No seat"
+    return SEAT_LABELS.get(tier, tier)
 
 
 def fmt_window(w):
@@ -412,7 +442,6 @@ def claude_bin():
     cand = os.environ.get("CLAUDE_CODE_EXECPATH")
     if cand and os.path.isfile(cand):
         return cand
-    import shutil
     for n in ("claude", "claude.exe"):
         found = shutil.which(n)
         if found:
@@ -547,6 +576,7 @@ def cmd_list(args):
         try:
             creds = read_stored_creds(name)
             status = refresh_usage(meta, creds, force=args.refresh)
+            refresh_seat(meta, creds, force=args.refresh)
             state = token_state(meta, creds)
         except AcctError as e:
             status, state = str(e), "relogin"
@@ -566,13 +596,14 @@ def cmd_list(args):
             p.get("emailAddress", "?"),
             p.get("organizationName", "?"),
             (meta.get("oauth") or {}).get("subscriptionType") or "?",
+            fmt_seat(meta),
             badge,
             fmt_window(usage.get("five_hour")),
             fmt_window(usage.get("seven_day")),
             note,
         ])
     save_index(idx)
-    head = ["Account", "Email", "Organization", "Plan", "Status", "5-hour", "7-day", "Usage"]
+    head = ["Account", "Email", "Organization", "Plan", "Seat", "Status", "5-hour", "7-day", "Usage"]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
@@ -632,9 +663,8 @@ def save_rotation(cfg):
     write_json_atomic(auto_config_path(), cfg, private=True)
 
 
-def _rotation_thresholds(cfg):
-    legacy = cfg.get("threshold", 90)
-    return (cfg.get("dailyThreshold", legacy), cfg.get("weeklyThreshold", legacy))
+def _rotation_threshold(cfg):
+    return cfg.get("dailyThreshold", cfg.get("threshold", 90))
 
 
 def _usage_window_values(usage):
@@ -646,10 +676,15 @@ def _usage_window_values(usage):
     return result
 
 
-def _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+def _usage_reached_threshold(usage, daily_threshold):
+    """Only the 5-hour window triggers rotation, plus any window that is actually used up.
+
+    The 7-day reading of a Standard member is measured against Standard limits, so it says
+    nothing about the account once it holds the Premium seat; a used-up window still means
+    the Premium account cannot continue.
+    """
     values = _usage_window_values(usage)
-    return ("five_hour" in values and values["five_hour"] >= daily_threshold) or \
-           ("seven_day" in values and values["seven_day"] >= weekly_threshold)
+    return values.get("five_hour", -1) >= daily_threshold or any(v >= 100 for v in values.values())
 
 
 def cmd_auto_configure(args):
@@ -660,15 +695,12 @@ def cmd_auto_configure(args):
         raise AcctError("Rotation order must contain at least two different saved accounts.")
     if premium not in order:
         raise AcctError("The current Premium account must be included in the rotation order.")
-    legacy_threshold = args.threshold if args.threshold is not None else 90
-    daily_threshold = args.daily_threshold if args.daily_threshold is not None else legacy_threshold
-    weekly_threshold = args.weekly_threshold if args.weekly_threshold is not None else legacy_threshold
-    if not 1 <= daily_threshold <= 99 or not 1 <= weekly_threshold <= 99:
-        raise AcctError("Daily and weekly thresholds must each be between 1 and 99.")
+    daily_threshold = next((t for t in (args.daily_threshold, args.threshold) if t is not None), 90)
+    if not 1 <= daily_threshold <= 99:
+        raise AcctError("The daily (5-hour) threshold must be between 1 and 99.")
     cfg = {
         "enabled": False,
         "dailyThreshold": daily_threshold,
-        "weeklyThreshold": weekly_threshold,
         "order": order,
         "premiumAccount": premium,
         "membersUrl": args.members_url,
@@ -676,8 +708,8 @@ def cmd_auto_configure(args):
         "browserProfile": os.path.abspath(os.path.expanduser(args.browser_profile)),
     }
     save_rotation(cfg)
-    print("Rotation configured: %s (Premium) → %s. Daily (5-hour) threshold: %d%%; weekly (7-day) threshold: %d%%. Rotation is OFF; run `acct auto enable` after setup."
-          % (premium, " → ".join(order[order.index(premium) + 1:] + order[:order.index(premium)]), daily_threshold, weekly_threshold))
+    print("Rotation configured: %s (Premium) → %s. Daily (5-hour) threshold: %d%%; the 7-day window only triggers at 100%%. Rotation is OFF; run `acct auto enable` after setup."
+          % (premium, " → ".join(order[order.index(premium) + 1:] + order[:order.index(premium)]), daily_threshold))
 
 
 def cmd_auto_enable(args):
@@ -702,9 +734,8 @@ def cmd_auto_status(args):
         print("Automatic Premium rotation is not configured.")
         return
     print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
-    daily_threshold, weekly_threshold = _rotation_thresholds(cfg)
-    print("Daily (5-hour) threshold: %s%%" % daily_threshold)
-    print("Weekly (7-day) threshold: %s%%" % weekly_threshold)
+    print("Daily (5-hour) threshold: %s%%" % _rotation_threshold(cfg))
+    print("Weekly (7-day): not a trigger; rotates only when a window is used up (100%)")
     print("Rotation order: %s" % " → ".join(cfg["order"]))
     print("Current Premium account: %s" % cfg.get("premiumAccount", "?"))
     print("Browser profile: %s" % cfg.get("browserProfile", "(CDP)"))
@@ -714,6 +745,7 @@ def cmd_auto_browser(args):
     cfg = load_rotation()
     if not cfg.get("order"):
         raise AcctError("Configure rotation first with `acct auto configure`.")
+    ensure_node_deps()
     node = os.environ.get("CLAUDE_ACCT_NODE", "node")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
     env = dict(os.environ)
@@ -728,17 +760,40 @@ def cmd_auto_browser(args):
     print("Opened Chrome with the saved automation profile. Sign in as an organization owner/admin if needed. Leave this profile available for seat automation; the login is saved for future rotations.")
 
 
-def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold):
+def _parse_reset(value):
+    try:
+        return dt.datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_used_up(cfg, name, usage):
+    """Remember until when a Premium account left with a used-up window cannot take the seat back."""
+    resets = [_parse_reset((usage.get(k) or {}).get("resets_at"))
+              for k, v in _usage_window_values(usage).items() if v >= 100]
+    resets = [r for r in resets if r]
+    if resets:
+        cfg.setdefault("usedUpUntil", {})[name] = max(resets)
+
+
+def _next_eligible_rotation_account(cfg, idx, daily_threshold):
     """Pick the next Standard account only after checking its live status and usage."""
     order = cfg.get("order", [])
     current = cfg.get("premiumAccount")
     start = order.index(current)
+    used_up = {n: t for n, t in (cfg.get("usedUpUntil") or {}).items() if t > time.time()}
+    cfg["usedUpUntil"] = used_up
     skipped = []
     for offset in range(1, len(order)):
         name = order[(start + offset) % len(order)]
         meta = idx["accounts"].get(name)
         if not meta:
             skipped.append("%s (not saved)" % name)
+            continue
+        if name in used_up:
+            # It ran out as Premium; taking the seat back before the reset would bounce straight off again.
+            skipped.append("%s (used up as Premium until %s)" % (
+                name, dt.datetime.fromtimestamp(used_up[name]).strftime("%d/%m %H:%M")))
             continue
         try:
             creds = read_stored_creds(name)
@@ -751,16 +806,123 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
         status = refresh_usage(meta, creds)
         usage = (meta.get("usage") or {}).get("data") or {}
         values = _usage_window_values(usage)
-        # Fail closed: do not move Premium onto an account without fresh readings
-        # for both windows. refresh_usage uses its short cache to avoid 429s.
-        if status not in ("ok", "cache") or "five_hour" not in values or "seven_day" not in values:
+        # Fail closed: do not move Premium onto an account without a fresh 5-hour
+        # reading. refresh_usage uses its short cache to avoid 429s.
+        if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
-        if _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+        # Its 7-day reading counts against Standard limits, so only the 5-hour window decides.
+        if values["five_hour"] >= daily_threshold:
             skipped.append("%s (already at threshold)" % name)
             continue
         return name, skipped
     return None, skipped
+
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def ensure_node_deps():
+    """Install playwright-core next to the plugin the first time seat automation needs it.
+
+    Every plugin version gets its own cache directory, so this also covers updates.
+    """
+    if os.path.isfile(os.path.join(PLUGIN_ROOT, "node_modules", "playwright-core", "package.json")):
+        return
+    npm = shutil.which("npm")
+    if not npm:
+        raise AcctError("npm was not found. Install Node.js 20+ (it includes npm), then run /acct:doctor.")
+    r = subprocess.run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=PLUGIN_ROOT,
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "unknown error").strip()
+        raise AcctError("Could not install playwright-core with npm in %s: %s" % (PLUGIN_ROOT, detail[-600:]))
+
+
+def find_chrome():
+    """Return the Chrome executable seat_manager.mjs will start, or None."""
+    if os.environ.get("CLAUDE_ACCT_CHROME"):
+        return shutil.which(os.environ["CLAUDE_ACCT_CHROME"]) or (
+            os.environ["CLAUDE_ACCT_CHROME"] if os.path.isfile(os.environ["CLAUDE_ACCT_CHROME"]) else None)
+    if sys.platform == "darwin":
+        app = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        return app if os.path.isfile(app) else None
+    if sys.platform == "win32":
+        for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
+            exe = os.path.join(base or "", "Google", "Chrome", "Application", "chrome.exe")
+            if base and os.path.isfile(exe):
+                return exe
+        return shutil.which("chrome.exe")
+    return shutil.which("google-chrome")
+
+
+def cmd_doctor(args):
+    """Check everything the plugin needs, install the Node dependency, and say what is left to do."""
+    rows, todo = [], []
+
+    def check(name, ok, detail, fix=None):
+        rows.append(("✅" if ok else "❌", name, detail))
+        if not ok and fix:
+            todo.append(fix)
+
+    check("Python", True, "%d.%d" % sys.version_info[:2])
+    node = shutil.which(os.environ.get("CLAUDE_ACCT_NODE", "node"))
+    node_version = None
+    if node:
+        try:
+            node_version = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        node_ok = int((node_version or "v0").lstrip("v").split(".")[0]) >= 20
+    except ValueError:
+        node_ok = False
+    check("Node.js 20+", node_ok, node_version or "not found", "Install Node.js 20 or later (https://nodejs.org), then run /acct:doctor again.")
+    if node_ok:
+        try:
+            ensure_node_deps()
+            check("playwright-core", True, "installed in %s" % PLUGIN_ROOT)
+        except (AcctError, OSError, subprocess.TimeoutExpired) as e:
+            check("playwright-core", False, str(e), "Fix the npm error above, then run /acct:doctor again.")
+    else:
+        check("playwright-core", False, "needs Node.js first")
+    chrome = find_chrome()
+    check("Google Chrome", bool(chrome), chrome or "not found",
+          "Install Google Chrome (or set CLAUDE_ACCT_CHROME to its executable).")
+    try:
+        read_live_creds()
+        live = read_live_profile() or {}
+        check("Claude Code login", True, "%s (%s)" % (live.get("emailAddress", "?"), live.get("organizationName", "?")))
+    except AcctError:
+        check("Claude Code login", False, "not logged in", "Log in to Claude Code with /login.")
+    idx = load_index()
+    names = sorted(idx["accounts"])
+    cur = current_name(idx)
+    check("Saved accounts", len(names) >= 2, ", ".join(names) or "none",
+          "Save every account of the pool: /acct:save <name> for the current one, /acct:login <name> <email> for each other one.")
+    if names and not cur:
+        todo.append("The current Claude Code login is not saved: run /acct:save <name>.")
+    cfg = load_rotation()
+    if not cfg.get("order"):
+        check("Rotation", False, "not configured",
+              "Configure rotation: /acct:auto configure --premium <current Premium account> --order <premium>,<next>,...")
+    else:
+        check("Rotation", True, "%s, Premium: %s, 5-hour threshold %s%%, order %s" % (
+            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _rotation_threshold(cfg), " → ".join(cfg["order"])))
+        if not os.path.isdir(cfg.get("browserProfile") or ""):
+            todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
+        if not cfg.get("enabled"):
+            todo.append("When the steps above are done: /acct:auto enable")
+    print("| | Check | Detail |")
+    print("|---|---|---|")
+    for r in rows:
+        print("| %s | %s | %s |" % r)
+    if todo:
+        print("\nTo do:")
+        for i, t in enumerate(todo, 1):
+            print("%d. %s" % (i, t))
+    else:
+        print("\nEverything is ready.")
 
 
 def _set_premium_seat(old_name, new_name, cfg, idx):
@@ -768,6 +930,7 @@ def _set_premium_seat(old_name, new_name, cfg, idx):
     new_email = ((idx["accounts"].get(new_name, {}).get("profile") or {}).get("emailAddress") or "").strip()
     if not old_email or not new_email:
         raise AcctError("Both accounts need a saved email address before changing seat tiers.")
+    ensure_node_deps()
     node = os.environ.get("CLAUDE_ACCT_NODE", "node")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
     env = dict(os.environ)
@@ -812,18 +975,20 @@ def _cmd_auto_check_locked(args):
             raise AcctError("Cannot check Premium usage (%s); rotation did not run." % status)
         return
     usage = (meta.get("usage") or {}).get("data") or {}
-    daily_threshold, weekly_threshold = _rotation_thresholds(cfg)
+    daily_threshold = _rotation_threshold(cfg)
     values = _usage_window_values(usage)
     save_index(idx)
     if cfg.get("rotationHold") == premium:
-        if not values or _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+        if not values or _usage_reached_threshold(usage, daily_threshold):
             return
         cfg.pop("rotationHold", None)
         save_rotation(cfg)
-    if not values or not _usage_reached_thresholds(usage, daily_threshold, weekly_threshold):
+    if not values or not _usage_reached_threshold(usage, daily_threshold):
         return
     old_name = premium
-    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
+    _mark_used_up(cfg, premium, usage)
+    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold)
+    save_rotation(cfg)
     save_index(idx)
     if not new_name:
         if args.manual:
@@ -834,8 +999,8 @@ def _cmd_auto_check_locked(args):
         reached = []
         if values.get("five_hour", -1) >= daily_threshold:
             reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
-        if values.get("seven_day", -1) >= weekly_threshold:
-            reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
+        if values.get("seven_day", -1) >= 100:
+            reached.append("7-day %d%% (used up)" % round(values["seven_day"]))
         print("Usage threshold reached for %s. Transferring Premium from %s to %s..." % (" and ".join(reached), old_name, new_name))
     _set_premium_seat(old_name, new_name, cfg, idx)
     # Change credentials only after the Members page confirms the tier change.
@@ -843,6 +1008,10 @@ def _cmd_auto_check_locked(args):
     cfg["premiumAccount"] = new_name
     cfg.pop("rotationHold", None)
     save_rotation(cfg)
+    idx = load_index()  # cmd_switch saved its own copy; the cached seats of both members are now wrong
+    for name in (old_name, new_name):
+        idx["accounts"][name].pop("seat", None)
+    save_index(idx)
 
 
 def _acquire_rotation_lock(lock_path, wait=0):
@@ -936,13 +1105,13 @@ def main(argv=None):
     p = sub.add_parser("list", help="list accounts + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
     p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.add_argument("--no-wait", action="store_true"); p.set_defaults(fn=cmd_switch)
     p = sub.add_parser("remove", help="remove an account from the list"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
+    p = sub.add_parser("doctor", help="check requirements, install the Node dependency, list remaining setup steps"); p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("auto", help="configure automatic Premium seat rotation")
     autos = p.add_subparsers(dest="auto_cmd", required=True)
     q = autos.add_parser("configure", help="set account rotation order and organization page")
     q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
     q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 90%%)")
-    q.add_argument("--weekly-threshold", type=int, help="7-day usage trigger (default: 90%%)")
-    q.add_argument("--threshold", type=int, help="legacy shorthand: set both thresholds to this value")
+    q.add_argument("--threshold", type=int, help="same as --daily-threshold")
     q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
     q.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     q.add_argument("--browser-profile", default=os.path.join(store_dir(), "browser-profile"))
