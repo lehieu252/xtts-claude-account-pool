@@ -579,7 +579,8 @@ def cmd_switch(args):
     save_index(idx)
     p = idx["accounts"][args.name].get("profile") or {}
     print("Đã chuyển sang **%s** — %s (%s)." % (args.name, p.get("emailAddress", "?"), p.get("organizationName", "?")))
-    print("Mở tab/phiên Claude MỚI để dùng account này; tab đang mở vẫn giữ account cũ.")
+    print("Tab đang mở có thể tự dùng account mới sau khoảng 30–60 giây (chưa được Anthropic xác nhận). "
+          "Chắc chắn nhất: mở tab Claude mới rồi /resume để tiếp tục cuộc hội thoại cũ.")
 
 
 def cmd_remove(args):

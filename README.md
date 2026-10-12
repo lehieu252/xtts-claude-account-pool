@@ -27,7 +27,7 @@ Cần Python 3.8+ (`python3`, `python` hoặc `py -3`). Trên Windows, Claude Co
 2. `/acct:login ban@example.com`: Terminal mở ra, trình duyệt mở trang đăng nhập. Đăng nhập đúng account, nếu trang hiện mã thì dán mã vào Terminal.
 3. `/acct:list`: xem cả hai account và usage.
 
-Từ đó trở đi chỉ cần `/acct:switch work` hoặc `/acct:switch ban`, rồi **mở tab / phiên Claude mới**. Tab đang mở vẫn giữ account cũ đến khi đóng.
+Từ đó trở đi chỉ cần `/acct:switch work` hoặc `/acct:switch ban`, rồi **mở tab Claude mới** và gõ `/resume` để tiếp tục cuộc hội thoại cũ. Tab đang mở có thể tự dùng account mới sau khoảng 30–60 giây vì Claude Code chỉ cache Keychain một lúc (theo README của claude-swap, Anthropic chưa xác nhận).
 
 Token của account đã lưu hết hạn (lâu không dùng)? Gõ lại `/acct:login <tên>` để đăng nhập lại.
 
