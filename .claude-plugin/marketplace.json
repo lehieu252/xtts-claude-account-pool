@@ -4,13 +4,13 @@
     "name": "Hieu Le"
   },
   "metadata": {
-    "description": "Plugin quản lý nhiều account Claude Code: lưu, xem usage, đổi account nhanh."
+    "description": "Claude Code plugin to manage multiple Claude accounts: save, view usage, switch quickly."
   },
   "plugins": [
     {
       "name": "acct",
       "source": "./",
-      "description": "Quản lý nhiều account Claude: /acct:login, /acct:save, /acct:list, /acct:switch, /acct:logout"
+      "description": "Manage multiple Claude accounts: /acct:login, /acct:save, /acct:list, /acct:switch, /acct:logout"
     }
   ]
 }

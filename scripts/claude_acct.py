@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""claude-acct — quản lý nhiều account Claude Code (claude.ai login) trên một máy.
+"""claude-acct: manage multiple Claude Code accounts (claude.ai login) on one machine.
 
-Lệnh:
-  login  <name> [email]  Đăng nhập account mới / đăng nhập lại (mở Terminal), lưu dưới tên <name>
-  save   <name>   Lưu account đang đăng nhập dưới tên <name>
-  list            Liệt kê account đã lưu + usage 5h / 7 ngày
-  switch <name>   Đổi sang account <name> (có hiệu lực ở phiên/tab Claude mới)
-  remove <name>   Xoá account <name> khỏi danh sách (xoá token đã lưu)
+Commands:
+  login  <name|email> [email]  Log in to a new account / log in again (opens a terminal), save as <name>
+  save   <name>                Save the currently logged-in account as <name>
+  list                         List saved accounts + 5-hour / 7-day usage
+  switch <name>                Switch to account <name>
+  remove <name>                Remove account <name> from the list (deletes its saved token)
 
-Nơi Claude Code giữ đăng nhập (live):
-  macOS         Keychain, service "Claude Code-credentials", account = $USER
-  Windows/Linux <config_dir>/.credentials.json
-  Danh tính     <home>/.claude.json, khoá "oauthAccount"
+Where Claude Code keeps the live login:
+  macOS          Keychain, service "Claude Code-credentials", account = $USER
+  Windows/Linux  <config_dir>/.credentials.json
+  Identity       <home>/.claude.json, key "oauthAccount"
 
-Nơi script giữ các account đã lưu ($CLAUDE_ACCT_HOME, mặc định ~/.claude-acct):
-  accounts.json         danh sách + thông tin không bí mật + usage cache
-  macOS                 token ở Keychain, service "claude-acct", account = <name>
-  Windows/Linux         token ở secrets/<name>.json (quyền 600)
+Where this script keeps saved accounts ($CLAUDE_ACCT_HOME, default ~/.claude-acct):
+  accounts.json  list + non-secret metadata + usage cache
+  macOS          tokens in Keychain, service "claude-acct", account = <name>
+  Windows/Linux  tokens in secrets/<name>.json (mode 600)
 
-Chỉ dùng thư viện chuẩn của Python 3.8+.
+Standard library only, Python 3.8+.
 """
 
 import argparse
@@ -34,14 +34,14 @@ import time
 import urllib.error
 import urllib.request
 
-# CLAUDE_ACCT_BACKEND=file ép dùng file thay Keychain (để test luồng Windows/Linux trên macOS)
+# CLAUDE_ACCT_BACKEND=file forces the file backend instead of Keychain (to test the Windows/Linux path on macOS)
 IS_MAC = sys.platform == "darwin" and os.environ.get("CLAUDE_ACCT_BACKEND") != "file"
 LIVE_SERVICE = "Claude Code-credentials"
 STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # không chính thức
-USAGE_CACHE_TTL = 120  # giây — tránh bị 429
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
+USAGE_CACHE_TTL = 120  # seconds, to avoid HTTP 429
 EXPIRY_MARGIN_MS = 60_000
-BACKUP_NAME = ".live-backup"  # tên dấu chấm: valid_name() không cho account trùng
+BACKUP_NAME = ".live-backup"  # leading dot: valid_name() rejects it, so no account can collide
 
 
 class AcctError(Exception):
@@ -107,12 +107,12 @@ def _kc_find(service, account):
 
 
 def _kc_write(service, account, secret):
-    # Ghi qua `security -i` (stdin) + -X hex để token không xuất hiện trên argv / ps.
+    # Write through `security -i` (stdin) with -X hex so the token never appears in argv / ps.
     hexdata = secret.encode("utf-8").hex()
     cmd = 'add-generic-password -U -s "%s" -a "%s" -X %s\n' % (service, account, hexdata)
     r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True)
     if r.returncode != 0 or "error" in (r.stderr or "").lower():
-        raise AcctError("Ghi Keychain thất bại (%s/%s): %s" % (service, account, r.stderr.strip()))
+        raise AcctError("Keychain write failed (%s/%s): %s" % (service, account, r.stderr.strip()))
 
 
 def _kc_delete(service, account):
@@ -124,7 +124,7 @@ def live_keychain_service():
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if not env:
         return LIVE_SERVICE
-    # Theo quan sát cộng đồng (anthropics/claude-code#20553): hậu tố = 8 ký tự hex sha256 của đường dẫn.
+    # Community observation (anthropics/claude-code#20553): suffix = first 8 hex chars of sha256(path).
     return "%s-%s" % (LIVE_SERVICE, hashlib.sha256(config_dir().encode()).hexdigest()[:8])
 
 
@@ -135,7 +135,7 @@ def live_creds_file():
 
 
 def read_live_creds():
-    """Trả về (dict credentials, nơi lưu) của account Claude Code đang đăng nhập."""
+    """Return (credentials dict, storage kind) of the account Claude Code is logged in with."""
     if IS_MAC:
         raw = _kc_find(live_keychain_service(), getpass.getuser())
         if raw:
@@ -143,7 +143,7 @@ def read_live_creds():
     data = read_json(live_creds_file())
     if data:
         return data, "file"
-    raise AcctError("Không thấy đăng nhập Claude Code nào. Hãy gõ /login trước.")
+    raise AcctError("No Claude Code login found. Run /login first.")
 
 
 def write_live_creds(creds, where):
@@ -180,11 +180,11 @@ def read_stored_creds(name):
     if IS_MAC:
         raw = _kc_find(STORE_SERVICE, name)
         if raw is None:
-            raise AcctError("Thiếu token đã lưu của '%s' trong Keychain." % name)
+            raise AcctError("Saved token for '%s' is missing from the Keychain." % name)
         return json.loads(raw)
     data = read_json(os.path.join(store_dir(), "secrets", name + ".json"))
     if data is None:
-        raise AcctError("Thiếu token đã lưu của '%s'." % name)
+        raise AcctError("Saved token for '%s' is missing." % name)
     return data
 
 
@@ -227,7 +227,7 @@ def current_name(idx):
 
 
 def sync_current(idx):
-    """Ghi token mới nhất của account đang dùng vào kho (Claude Code tự làm mới token theo thời gian)."""
+    """Copy the active account's latest token into the store (Claude Code refreshes tokens over time)."""
     name = current_name(idx)
     if not name:
         return None
@@ -246,11 +246,11 @@ def public_oauth(creds):
 
 def valid_name(name):
     if not name or any(c in name for c in '/\\:"\' ') or name.startswith("."):
-        raise AcctError("Tên account không hợp lệ: '%s' (không dùng khoảng trắng, / \\ : hoặc dấu nháy)." % name)
+        raise AcctError("Invalid account name: '%s' (no spaces, / \\ : or quotes)." % name)
 
 
 def resolve_name(idx, query, must_exist=True):
-    """Tìm account theo tên, email, hoặc phần trước @ của email (không phân biệt hoa thường)."""
+    """Find an account by name, email, or the part of the email before @ (case-insensitive)."""
     accts = idx["accounts"]
     if query in accts:
         return query
@@ -266,9 +266,9 @@ def resolve_name(idx, query, must_exist=True):
         if len(hits) == 1:
             return hits[0]
         if len(hits) > 1:
-            raise AcctError("'%s' khớp nhiều account: %s. Gõ đầy đủ tên." % (query, ", ".join(sorted(hits))))
+            raise AcctError("'%s' matches several accounts: %s. Type the full name." % (query, ", ".join(sorted(hits))))
     if must_exist:
-        raise AcctError("Không có account '%s'. Đã lưu: %s" % (query, ", ".join(sorted(accts)) or "(trống)"))
+        raise AcctError("No account '%s'. Saved: %s" % (query, ", ".join(sorted(accts)) or "(none)"))
     return None
 
 
@@ -286,7 +286,7 @@ def fetch_usage(access_token):
 
 
 def token_state(meta, creds):
-    """ok | access_expired (Claude tự làm mới khi dùng) | relogin (phải đăng nhập lại)."""
+    """ok | access_expired (Claude Code refreshes it on use) | relogin (must log in again)."""
     o = creds.get("claudeAiOauth", {})
     now_ms = time.time() * 1000
     if meta.get("revoked") or not o.get("refreshToken"):
@@ -300,7 +300,7 @@ def token_state(meta, creds):
 
 
 def refresh_usage(meta, creds, force=False):
-    """Cập nhật meta['usage'] nếu token còn hạn. Trả về chuỗi trạng thái."""
+    """Update meta['usage'] if the access token is still valid. Return a status string."""
     cache = meta.get("usage")
     now = time.time()
     if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
@@ -311,12 +311,12 @@ def refresh_usage(meta, creds, force=False):
     try:
         data = fetch_usage(o["accessToken"])
     except urllib.error.HTTPError as e:
-        if e.code == 401:  # token còn hạn mà bị từ chối = đã bị thu hồi
+        if e.code == 401:  # a non-expired token that is rejected has been revoked
             meta["revoked"] = True
             return "revoked"
         return "http %d" % e.code
-    except Exception as e:  # mạng lỗi, timeout...
-        return "lỗi: %s" % type(e).__name__
+    except Exception as e:  # network error, timeout, ...
+        return "error: %s" % type(e).__name__
     meta["usage"] = {"fetchedAt": now, "data": data}
     meta.pop("revoked", None)
     return "ok"
@@ -342,28 +342,28 @@ def fmt_window(w):
 def fmt_age(ts):
     mins = int((time.time() - ts) // 60)
     if mins < 1:
-        return "vừa xong"
+        return "just now"
     if mins < 60:
-        return "%d phút trước" % mins
+        return "%d min ago" % mins
     if mins < 60 * 24:
-        return "%d giờ trước" % (mins // 60)
-    return "%d ngày trước" % (mins // 1440)
+        return "%d h ago" % (mins // 60)
+    return "%d d ago" % (mins // 1440)
 
 
 # ---------------------------------------------------------------- commands
 
 def store_account(idx, name, creds, profile, source):
-    """Lưu creds+profile dưới tên name. Cùng tên + cùng account = cập nhật token (đăng nhập lại)."""
+    """Save creds + profile as `name`. Same name + same account = update the token (re-login)."""
     ident = identity(profile)
     if not ident or ident == (None, None):
-        raise AcctError("Không đọc được thông tin account (%s)." % source)
+        raise AcctError("Could not read the account identity (%s)." % source)
     email = (profile or {}).get("emailAddress", "?")
     existing = find_by_identity(idx, ident)
     if existing and existing != name:
-        raise AcctError("Account %s đã được lưu với tên '%s'. Dùng tên đó (vd /acct:login %s để đăng nhập lại)."
+        raise AcctError("Account %s is already saved as '%s'. Use that name (e.g. /acct:login %s to log in again)."
                         % (email, existing, existing))
     if name in idx["accounts"] and identity(idx["accounts"][name].get("profile")) != ident:
-        raise AcctError("Tên '%s' đang là của account khác (%s). Chọn tên khác hoặc /acct:logout %s trước."
+        raise AcctError("Name '%s' belongs to another account (%s). Pick another name or run /acct:logout %s first."
                         % (name, idx["accounts"][name].get("profile", {}).get("emailAddress"), name))
     relogin = name in idx["accounts"]
     write_stored_creds(name, creds)
@@ -374,7 +374,7 @@ def store_account(idx, name, creds, profile, source):
         "usage": idx["accounts"].get(name, {}).get("usage"),
     }
     save_index(idx)
-    print("%s account **%s** — %s (%s)." % ("Đã cập nhật đăng nhập" if relogin else "Đã lưu",
+    print("%s account **%s**: %s (%s)." % ("Refreshed login for" if relogin else "Saved",
           name, email, (profile or {}).get("organizationName", "?")))
 
 
@@ -382,13 +382,13 @@ def cmd_save(args):
     valid_name(args.name)
     idx = load_index()
     creds, _ = read_live_creds()
-    store_account(idx, args.name, creds, read_live_profile(), "account đang đăng nhập")
+    store_account(idx, args.name, creds, read_live_profile(), "current login")
 
 
-# ---------------------------------------------------------------- login (đăng nhập mới trong Terminal)
+# ---------------------------------------------------------------- login (new login in a terminal window)
 
 class _ConfigDir:
-    """Tạm trỏ CLAUDE_CONFIG_DIR sang thư mục khác để đọc/xoá đăng nhập trong đó."""
+    """Temporarily point CLAUDE_CONFIG_DIR at another directory to read / delete the login there."""
 
     def __init__(self, path):
         self.path, self.old = path, None
@@ -413,7 +413,7 @@ def claude_bin():
         found = shutil.which(n)
         if found:
             return found
-    raise AcctError("Không tìm thấy chương trình claude. Chạy lệnh này trong Claude Code, hoặc thêm claude vào PATH.")
+    raise AcctError("Could not find the claude executable. Run this inside Claude Code, or add claude to PATH.")
 
 
 def sh_quote(s):
@@ -424,7 +424,7 @@ def cmd_login(args):
     valid_name(args.name)
     idx = load_index()
     existing = resolve_name(idx, args.name, must_exist=False)
-    if existing:  # đăng nhập lại account đã lưu
+    if existing:  # logging in again to a saved account
         args.name = existing
         if not args.email:
             args.email = (idx["accounts"][existing].get("profile") or {}).get("emailAddress")
@@ -436,7 +436,7 @@ def cmd_login(args):
         shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
     if IS_MAC:
-        # Sao lưu đăng nhập đang dùng, phòng Keychain không tách theo CLAUDE_CONFIG_DIR (xem cmd_import_login).
+        # Back up the live login in case the Keychain is not keyed by CLAUDE_CONFIG_DIR (see cmd_import_login).
         main = _kc_find(LIVE_SERVICE, getpass.getuser())
         if main:
             _kc_write(STORE_SERVICE, BACKUP_NAME, main)
@@ -444,30 +444,30 @@ def cmd_login(args):
     helper = os.path.join(tmp, "login.sh")
     with open(helper, "w", encoding="utf-8", newline="\n") as f:
         f.write("#!/usr/bin/env bash\n")
-        f.write("echo '=== Đăng nhập account Claude: %s ==='\n" % args.name)
+        f.write("echo '=== Claude account login: %s ==='\n" % args.name)
         f.write("export CLAUDE_CONFIG_DIR=%s\n" % sh_quote(tmp))
         f.write(" ".join(sh_quote(a) for a in login_cmd) + "\n")
         f.write("unset CLAUDE_CONFIG_DIR\n")
         f.write("bash %s import-login %s %s %s\n" % (
             sh_quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")), sh_quote(tmp),
             sh_quote(args.name), sh_quote(args.email or "")))
-        f.write("echo; echo 'Xong. Có thể đóng cửa sổ này và quay lại Claude: /acct:list'\n")
+        f.write("echo; echo 'Done. You can close this window and go back to Claude: /acct:list'\n")
     os.chmod(helper, 0o700)
     opened = open_terminal(helper)
     if opened:
-        print("Đã mở cửa sổ **Terminal** để đăng nhập account **%s**%s." % (
+        print("Opened a **terminal window** to log in to **%s**%s." % (
             args.name, " (" + args.email + ")" if args.email else ""))
-        print("1. Đăng nhập trên trình duyệt vừa mở (đúng account muốn lưu).")
-        print("2. Nếu trang web hiện mã, dán mã vào cửa sổ Terminal rồi Enter.")
-        print("3. Xong thì gõ /acct:list để kiểm tra. Account đang dùng KHÔNG bị thay đổi.")
+        print("1. Sign in with the right account in the browser window that opened.")
+        print("2. If the page shows a code, paste it into the terminal window and press Enter.")
+        print("3. Then run /acct:list to check. Your current account is NOT changed.")
     else:
-        print("Không tự mở được cửa sổ terminal. Mở một terminal rồi chạy:")
+        print("Could not open a terminal window. Open a terminal and run:")
         print("")
         print("    bash %s" % sh_quote(helper))
 
 
 def open_terminal(script):
-    if os.environ.get("CLAUDE_ACCT_NO_TERMINAL"):  # dùng khi test
+    if os.environ.get("CLAUDE_ACCT_NO_TERMINAL"):  # used by tests
         return False
     try:
         if sys.platform == "darwin":
@@ -490,7 +490,7 @@ def open_terminal(script):
 
 
 def cmd_import_login(args):
-    """Gọi từ login.sh sau khi `claude auth login` xong: lấy đăng nhập trong thư mục tạm, lưu, rồi dọn."""
+    """Called by login.sh after `claude auth login`: take the login from the temp dir, save it, clean up."""
     import shutil
     tmp = os.path.abspath(args.dir)
     idx = load_index()
@@ -505,21 +505,21 @@ def cmd_import_login(args):
                 creds = read_json(live_creds_file())
             profile = read_live_profile()
         if creds is None and IS_MAC:
-            # Phòng trường hợp Keychain KHÔNG tách theo CLAUDE_CONFIG_DIR: đăng nhập mới đã ghi đè
-            # mục chính. Lấy token mới từ mục chính rồi trả lại đăng nhập cũ đã sao lưu.
+            # In case the Keychain is NOT keyed by CLAUDE_CONFIG_DIR: the new login overwrote the
+            # main item. Take the new token from it, then restore the backed-up live login.
             backup = _kc_find(STORE_SERVICE, BACKUP_NAME)
             main = _kc_find(LIVE_SERVICE, getpass.getuser())
             if backup and main and main != backup:
                 creds = json.loads(main)
                 _kc_write(LIVE_SERVICE, getpass.getuser(), backup)
-                print("(Keychain dùng chung mục chính — đã khôi phục đăng nhập đang dùng.)")
+                print("(Keychain item is shared, so your current login was restored.)")
         if creds is None:
-            raise AcctError("Chưa đăng nhập xong (không thấy token mới). Chạy lại /acct:login %s." % args.name)
+            raise AcctError("Login did not finish (no new token found). Run /acct:login %s again." % args.name)
         got = ((profile or {}).get("emailAddress") or "").lower()
         if args.expect_email and got and got != args.expect_email.lower():
-            raise AcctError("Bạn vừa đăng nhập %s, không phải %s — KHÔNG lưu. Chạy lại /acct:login %s và chọn đúng account trên trình duyệt."
+            raise AcctError("You signed in as %s, not %s, so nothing was saved. Run /acct:login %s again and pick the right account in the browser."
                             % (got, args.expect_email, args.name))
-        store_account(idx, args.name, creds, profile, "đăng nhập mới")
+        store_account(idx, args.name, creds, profile, "new login")
     finally:
         if IS_MAC:
             _kc_delete(service, getpass.getuser())
@@ -530,7 +530,7 @@ def cmd_import_login(args):
 def cmd_list(args):
     idx = load_index()
     if not idx["accounts"]:
-        print("Chưa lưu account nào. Gõ /acct:login <tên> [email] để đăng nhập, hoặc /acct:save <tên> để lưu account đang dùng.")
+        print("No saved accounts. Run /acct:login <email> to log in, or /acct:save <name> to save the current account.")
         return
     try:
         cur = sync_current(idx)
@@ -546,22 +546,15 @@ def cmd_list(args):
             state = token_state(meta, creds)
         except AcctError as e:
             status, state = str(e), "relogin"
-        if name == cur and state == "access_expired":
-            state = "ok"  # account đang dùng: Claude Code tự làm mới token
         usage = (meta.get("usage") or {}).get("data") or {}
         fetched = (meta.get("usage") or {}).get("fetchedAt")
+        # Only flag accounts that need action; an expired access token is refreshed automatically.
+        badge = ""
         if state == "relogin":
-            badge = "🔴 Cần đăng nhập lại: /acct:login %s" % name
+            badge = "🔴 Log in again: `/acct:login %s`" % name
             need_login.append(name)
-        elif state == "access_expired":
-            badge = "⏳ Token tạm hết hạn (tự làm mới khi switch)"
-        else:
-            badge = "✅ OK"
-        if fetched:
-            note = ("cập nhật " if status in ("ok", "cache") else "số cũ, cập nhật ") + fmt_age(fetched)
-        else:
-            note = "chưa có số"
-        if status not in ("ok", "cache", "expired", "revoked"):
+        note = ("updated " + fmt_age(fetched)) if fetched else "no data yet"
+        if status not in ("ok", "cache", "expired", "revoked") and state != "relogin":
             note += " (%s)" % status
         p = meta.get("profile") or {}
         rows.append([
@@ -575,19 +568,19 @@ def cmd_list(args):
             note,
         ])
     save_index(idx)
-    head = ["Account", "Email", "Tổ chức", "Gói", "Trạng thái", "5 giờ", "7 ngày", "Usage"]
+    head = ["Account", "Email", "Organization", "Plan", "Status", "5-hour", "7-day", "Usage"]
     print("| " + " | ".join(head) + " |")
     print("|" + "---|" * len(head))
     for r in rows:
         print("| " + " | ".join(r) + " |")
     if need_login:
-        print("\n🔴 %d account cần đăng nhập lại: %s" % (len(need_login), ", ".join(
+        print("\n🔴 %d account(s) need a new login: %s" % (len(need_login), ", ".join(
             "`/acct:login %s`" % n for n in need_login)))
     if not cur:
-        print("\nĐang đăng nhập %s nhưng account này chưa được lưu — gõ /acct:save <tên> để lưu."
-              % ((live_profile or {}).get("emailAddress") or "(không rõ)"))
+        print("\nLogged in as %s, but this account is not saved. Run /acct:save <name> to save it."
+              % ((live_profile or {}).get("emailAddress") or "(unknown)"))
     else:
-        print("\n▶ = account đang dùng.")
+        print("\n▶ = current account.")
 
 
 def cmd_switch(args):
@@ -595,27 +588,27 @@ def cmd_switch(args):
     args.name = resolve_name(idx, args.name)
     cur = current_name(idx)
     if cur == args.name:
-        print("Đang dùng **%s** rồi." % args.name)
+        print("Already using **%s**." % args.name)
         return
     target = read_stored_creds(args.name)
     if token_state(idx["accounts"][args.name], target) == "relogin":
-        raise AcctError("Đăng nhập của '%s' đã hết hạn hoặc bị thu hồi. Gõ /acct:login %s để đăng nhập lại."
+        raise AcctError("The login for '%s' has expired or was revoked. Run /acct:login %s to log in again."
                         % (args.name, args.name))
     live_creds, where = read_live_creds()
     if cur is None and not args.force:
-        raise AcctError("Account đang đăng nhập (%s) chưa được lưu — đổi đi sẽ mất đăng nhập này. "
-                        "Gõ /acct:save <tên> để lưu trước, hoặc thêm --force để bỏ qua."
-                        % ((read_live_profile() or {}).get("emailAddress") or "không rõ"))
+        raise AcctError("The current account (%s) is not saved, so switching away would lose this login. "
+                        "Run /acct:save <name> first, or add --force to skip this check."
+                        % ((read_live_profile() or {}).get("emailAddress") or "unknown"))
     if cur:
-        write_stored_creds(cur, live_creds)  # giữ token mới nhất của account cũ
+        write_stored_creds(cur, live_creds)  # keep the latest token of the account we leave
         idx["accounts"][cur]["oauth"] = public_oauth(live_creds)
     write_live_creds(target, where)
     write_live_profile(idx["accounts"][args.name].get("profile"))
     save_index(idx)
     p = idx["accounts"][args.name].get("profile") or {}
-    print("Đã chuyển sang **%s** — %s (%s)." % (args.name, p.get("emailAddress", "?"), p.get("organizationName", "?")))
-    print("Tab đang mở có thể tự dùng account mới sau khoảng 30–60 giây (chưa được Anthropic xác nhận). "
-          "Chắc chắn nhất: mở tab Claude mới rồi /resume để tiếp tục cuộc hội thoại cũ.")
+    print("Switched to **%s**: %s (%s)." % (args.name, p.get("emailAddress", "?"), p.get("organizationName", "?")))
+    print("Open tabs usually pick up the new account within 30-60 seconds (not confirmed by Anthropic). "
+          "To be sure, open a new Claude tab and use /resume to continue your conversation.")
 
 
 def cmd_remove(args):
@@ -625,29 +618,29 @@ def cmd_remove(args):
     delete_stored_creds(args.name)
     del idx["accounts"][args.name]
     save_index(idx)
-    print("Đã xoá **%s** khỏi danh sách." % args.name)
+    print("Removed **%s** from the list." % args.name)
     if was_current:
-        print("Đây là account đang đăng nhập — Claude Code vẫn đăng nhập account này. "
-              "Muốn đăng xuất hẳn thì gõ /logout, hoặc /acct:switch sang account khác.")
+        print("This is the current account, and Claude Code is still logged in with it. "
+              "To log out completely, run /logout, or /acct:switch to another account.")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="claude-acct", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("login", help="đăng nhập account mới/lại (mở Terminal)"); p.add_argument("name", nargs="?"); p.add_argument("email", nargs="?"); p.set_defaults(fn=cmd_login)
+    p = sub.add_parser("login", help="log in to a new account / log in again (opens a terminal)"); p.add_argument("name", nargs="?"); p.add_argument("email", nargs="?"); p.set_defaults(fn=cmd_login)
     p = sub.add_parser("import-login", help=argparse.SUPPRESS); p.add_argument("dir"); p.add_argument("name"); p.add_argument("expect_email", nargs="?"); p.set_defaults(fn=cmd_import_login)
-    p = sub.add_parser("save", help="lưu account đang đăng nhập"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_save)
-    p = sub.add_parser("list", help="liệt kê + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
-    p = sub.add_parser("switch", help="đổi account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_switch)
-    p = sub.add_parser("remove", help="xoá account khỏi danh sách"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
+    p = sub.add_parser("save", help="save the current account"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_save)
+    p = sub.add_parser("list", help="list accounts + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
+    p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_switch)
+    p = sub.add_parser("remove", help="remove an account from the list"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
     args = ap.parse_args(argv)
     try:
         if hasattr(args, "name") and not args.name:
             hint = {"login": "/acct:login", "save": "/acct:save", "switch": "/acct:switch", "remove": "/acct:logout"}[args.cmd]
-            raise AcctError("Thiếu tên account. Ví dụ: %s work" % hint)
+            raise AcctError("Missing account name. Example: %s work" % hint)
         args.fn(args)
     except AcctError as e:
-        print("Lỗi: %s" % e)
+        print("Error: %s" % e)
         return 1
     return 0
 
