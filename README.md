@@ -15,7 +15,7 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 In Claude Code:
 
 ```
-/plugin marketplace add <github-owner>/claude-account-manager
+/plugin marketplace add lehieu252/claude-account-manager
 /plugin install acct@claude-account-manager
 ```
 
