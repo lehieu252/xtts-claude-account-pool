@@ -1,7 +1,7 @@
 ---
 name: switch
 description: Đổi sang account Claude khác đã lưu, không cần logout/login lại.
-argument-hint: "<tên-account>"
+argument-hint: "<tên | email | phần trước @>"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---

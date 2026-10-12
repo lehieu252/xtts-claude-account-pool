@@ -4,10 +4,10 @@ Plugin Claude Code để quản lý nhiều account Claude (đăng nhập claude
 
 | Lệnh | Việc làm |
 |---|---|
-| `/acct:login <tên> [email]` | Đăng nhập một account bất kỳ (mới hoặc đăng nhập lại) và lưu với tên `<tên>`. Mở cửa sổ Terminal để hoàn tất đăng nhập; **account đang dùng không bị đổi** |
+| `/acct:login <email>` hoặc `/acct:login <tên> [email]` | Đăng nhập một account bất kỳ (mới hoặc đăng nhập lại) và lưu. Chỉ gõ email thì email là tên account, và script kiểm tra bạn đăng nhập đúng email đó trên trình duyệt. Mở cửa sổ Terminal để hoàn tất đăng nhập; **account đang dùng không bị đổi** |
 | `/acct:save <tên>` | Lưu account **đang đăng nhập** vào danh sách, không cần đăng nhập lại |
 | `/acct:list [--refresh]` | Bảng các account đã lưu: email, tổ chức, gói, usage 5h / 7 ngày, giờ reset. `▶` = account đang dùng |
-| `/acct:switch <tên>` | Đổi sang account `<tên>` |
+| `/acct:switch <tên>` | Đổi sang account `<tên>`. Nhận tên, email hoặc phần trước `@` (vd `alice`) nếu không trùng account khác |
 | `/acct:logout <tên>` | Xoá account `<tên>` khỏi danh sách (xoá token đã lưu) |
 
 ## Cài đặt
@@ -24,10 +24,10 @@ Cần Python 3.8+ (`python3`, `python` hoặc `py -3`). Trên Windows, Claude Co
 ## Dùng lần đầu
 
 1. `/acct:save work`: lưu account đang dùng.
-2. `/acct:login personal ban@example.com`: Terminal mở ra, trình duyệt mở trang đăng nhập. Đăng nhập đúng account, nếu trang hiện mã thì dán mã vào Terminal.
+2. `/acct:login ban@example.com`: Terminal mở ra, trình duyệt mở trang đăng nhập. Đăng nhập đúng account, nếu trang hiện mã thì dán mã vào Terminal.
 3. `/acct:list`: xem cả hai account và usage.
 
-Từ đó trở đi chỉ cần `/acct:switch work` hoặc `/acct:switch personal`, rồi **mở tab / phiên Claude mới**. Tab đang mở vẫn giữ account cũ đến khi đóng.
+Từ đó trở đi chỉ cần `/acct:switch work` hoặc `/acct:switch ban`, rồi **mở tab / phiên Claude mới**. Tab đang mở vẫn giữ account cũ đến khi đóng.
 
 Token của account đã lưu hết hạn (lâu không dùng)? Gõ lại `/acct:login <tên>` để đăng nhập lại.
 

@@ -1,7 +1,7 @@
 ---
 name: login
 description: Đăng nhập account Claude bất kỳ (mới hoặc đăng nhập lại) và lưu vào danh sách — mở Terminal để hoàn tất đăng nhập, không đổi account đang dùng.
-argument-hint: "<tên-account> [email]"
+argument-hint: "<email | tên-account> [email]"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---

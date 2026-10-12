@@ -249,6 +249,29 @@ def valid_name(name):
         raise AcctError("Tên account không hợp lệ: '%s' (không dùng khoảng trắng, / \\ : hoặc dấu nháy)." % name)
 
 
+def resolve_name(idx, query, must_exist=True):
+    """Tìm account theo tên, email, hoặc phần trước @ của email (không phân biệt hoa thường)."""
+    accts = idx["accounts"]
+    if query in accts:
+        return query
+    q = query.lower()
+
+    def email(n):
+        return ((accts[n].get("profile") or {}).get("emailAddress") or "").lower()
+
+    for test in (lambda n: n.lower() == q,
+                 lambda n: email(n) == q,
+                 lambda n: email(n).split("@")[0] == q or n.lower().split("@")[0] == q):
+        hits = [n for n in accts if test(n)]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise AcctError("'%s' khớp nhiều account: %s. Gõ đầy đủ tên." % (query, ", ".join(sorted(hits))))
+    if must_exist:
+        raise AcctError("Không có account '%s'. Đã lưu: %s" % (query, ", ".join(sorted(accts)) or "(trống)"))
+    return None
+
+
 # ---------------------------------------------------------------- usage
 
 def fetch_usage(access_token):
@@ -381,6 +404,14 @@ def sh_quote(s):
 
 def cmd_login(args):
     valid_name(args.name)
+    idx = load_index()
+    existing = resolve_name(idx, args.name, must_exist=False)
+    if existing:  # đăng nhập lại account đã lưu
+        args.name = existing
+        if not args.email:
+            args.email = (idx["accounts"][existing].get("profile") or {}).get("emailAddress")
+    if not args.email and "@" in args.name:
+        args.email = args.name
     tmp = os.path.join(store_dir(), "login-" + args.name)
     if os.path.isdir(tmp):
         import shutil
@@ -399,8 +430,9 @@ def cmd_login(args):
         f.write("export CLAUDE_CONFIG_DIR=%s\n" % sh_quote(tmp))
         f.write(" ".join(sh_quote(a) for a in login_cmd) + "\n")
         f.write("unset CLAUDE_CONFIG_DIR\n")
-        f.write("bash %s import-login %s %s\n" % (
-            sh_quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")), sh_quote(tmp), sh_quote(args.name)))
+        f.write("bash %s import-login %s %s %s\n" % (
+            sh_quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")), sh_quote(tmp),
+            sh_quote(args.name), sh_quote(args.email or "")))
         f.write("echo; echo 'Xong. Có thể đóng cửa sổ này và quay lại Claude: /acct:list'\n")
     os.chmod(helper, 0o700)
     opened = open_terminal(helper)
@@ -465,6 +497,10 @@ def cmd_import_login(args):
                 print("(Keychain dùng chung mục chính — đã khôi phục đăng nhập đang dùng.)")
         if creds is None:
             raise AcctError("Chưa đăng nhập xong (không thấy token mới). Chạy lại /acct:login %s." % args.name)
+        got = ((profile or {}).get("emailAddress") or "").lower()
+        if args.expect_email and got and got != args.expect_email.lower():
+            raise AcctError("Bạn vừa đăng nhập %s, không phải %s — KHÔNG lưu. Chạy lại /acct:login %s và chọn đúng account trên trình duyệt."
+                            % (got, args.expect_email, args.name))
         store_account(idx, args.name, creds, profile, "đăng nhập mới")
     finally:
         if IS_MAC:
@@ -524,8 +560,7 @@ def cmd_list(args):
 
 def cmd_switch(args):
     idx = load_index()
-    if args.name not in idx["accounts"]:
-        raise AcctError("Không có account '%s'. Đã lưu: %s" % (args.name, ", ".join(sorted(idx["accounts"])) or "(trống)"))
+    args.name = resolve_name(idx, args.name)
     cur = current_name(idx)
     if cur == args.name:
         print("Đang dùng **%s** rồi." % args.name)
@@ -549,8 +584,7 @@ def cmd_switch(args):
 
 def cmd_remove(args):
     idx = load_index()
-    if args.name not in idx["accounts"]:
-        raise AcctError("Không có account '%s'." % args.name)
+    args.name = resolve_name(idx, args.name)
     was_current = current_name(idx) == args.name
     delete_stored_creds(args.name)
     del idx["accounts"][args.name]
@@ -565,7 +599,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="claude-acct", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("login", help="đăng nhập account mới/lại (mở Terminal)"); p.add_argument("name", nargs="?"); p.add_argument("email", nargs="?"); p.set_defaults(fn=cmd_login)
-    p = sub.add_parser("import-login", help=argparse.SUPPRESS); p.add_argument("dir"); p.add_argument("name"); p.set_defaults(fn=cmd_import_login)
+    p = sub.add_parser("import-login", help=argparse.SUPPRESS); p.add_argument("dir"); p.add_argument("name"); p.add_argument("expect_email", nargs="?"); p.set_defaults(fn=cmd_import_login)
     p = sub.add_parser("save", help="lưu account đang đăng nhập"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_save)
     p = sub.add_parser("list", help="liệt kê + usage"); p.add_argument("--refresh", action="store_true"); p.set_defaults(fn=cmd_list)
     p = sub.add_parser("switch", help="đổi account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_switch)

@@ -1,7 +1,7 @@
 ---
 name: logout
 description: Xoá một account Claude khỏi danh sách đã lưu.
-argument-hint: "<tên-account>"
+argument-hint: "<tên | email | phần trước @>"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---

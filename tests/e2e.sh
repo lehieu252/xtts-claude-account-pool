@@ -54,3 +54,19 @@ for NAME in c a; do mkdir -p "$S/store/login-$NAME"; cp "$S/store/secrets/c.json
  python3 -I -c "import json;json.dump({'oauthAccount':{'accountUuid':'u-C','organizationUuid':'o1','emailAddress':'C@x.com'}},open('$S/store/login-$NAME/.claude.json','w'))"
  run import-login "$S/store/login-$NAME" $NAME; done
 run list
+
+echo "=========== login chỉ bằng email + tìm theo email/phần trước @"
+fake(){ mkdir -p "$1"; python3 -I -c "import json;json.dump({'claudeAiOauth':{'accessToken':'t-$2','refreshToken':'r','expiresAt':1}},open('$1/.credentials.json','w'));json.dump({'oauthAccount':{'accountUuid':'u-$2','organizationUuid':'o','emailAddress':'$2'}},open('$1/.claude.json','w'))"; }
+run login alice@example.com
+grep -o "'--email' '[^']*'\|import-login .*" "$S/store/login-alice@example.com/login.sh" | sed "s#'/[^']*'#<path>#g"
+fake "$S/store/login-alice@example.com" khac@example.com
+run import-login "$S/store/login-alice@example.com" alice@example.com alice@example.com   # nhầm account -> lỗi
+fake "$S/store/login-alice@example.com" Alice@example.com
+run import-login "$S/store/login-alice@example.com" alice@example.com alice@example.com   # đúng (khác hoa thường)
+run login alice; grep -o "'--email' '[^']*'" "$S/store/login-alice@example.com/login.sh"   # đăng nhập lại theo phần trước @
+fake "$S/x2" alice@other.com; run import-login "$S/x2" alice@other.com alice@other.com
+run switch alice              # nhập nhằng
+run switch alice@example.com
+run switch ALICE@OTHER.COM
+run remove alice@other.com
+run switch alice; run list
