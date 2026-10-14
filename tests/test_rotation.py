@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import ssl
 import sys
 import tempfile
 import threading
@@ -189,6 +190,38 @@ class TokenRefreshTests(unittest.TestCase):
              patch.object(acct.sys, "stdout", io.StringIO()):
             acct.cmd_list(argparse.Namespace(refresh=False))
         self.assertEqual(calls, [None, "b"])
+
+
+class CertificateFallbackTests(unittest.TestCase):
+    """A Python without CA certificates (python.org on macOS) still reaches the API."""
+
+    def setUp(self):
+        acct._ssl_context = None
+
+    tearDown = setUp
+
+    def cert_error(self):
+        return urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+
+    def test_retries_with_fallback_certificates(self):
+        ctx = object()
+        with patch.object(acct.urllib.request, "urlopen", side_effect=[self.cert_error(), "response"]) as op, \
+             patch.object(acct, "_fallback_ssl_context", return_value=ctx):
+            self.assertEqual(acct.urlopen("req", timeout=5), "response")
+        self.assertIs(op.call_args.kwargs["context"], ctx)
+        self.assertIs(acct._ssl_context, ctx)
+
+    def test_http_errors_are_not_retried(self):
+        err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        with patch.object(acct.urllib.request, "urlopen", side_effect=err), \
+             patch.object(acct, "_fallback_ssl_context") as fallback:
+            with self.assertRaises(urllib.error.HTTPError):
+                acct.urlopen("req", timeout=5)
+        fallback.assert_not_called()
+
+    def test_reports_certificate_problem_clearly(self):
+        self.assertIn("SSL certificate", acct.net_error(self.cert_error()))
+        self.assertEqual(acct.net_error(urllib.error.URLError("timed out")), "timed out")
 
 
 class StopFailureRecoveryTests(unittest.TestCase):

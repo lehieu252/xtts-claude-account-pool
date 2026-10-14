@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -285,6 +286,57 @@ def resolve_name(idx, query, must_exist=True):
 
 # ---------------------------------------------------------------- usage
 
+_ssl_context = None  # None: Python's default CA store; replaced once if that store cannot verify
+
+
+def _fallback_ssl_context():
+    """CA certificates for a Python that has none.
+
+    python.org builds on macOS ship without a CA store until "Install Certificates.command" is
+    run; Claude Code still works there because it brings its own. Use certifi when installed,
+    otherwise the root certificates of the macOS system keychain.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    if sys.platform == "darwin":
+        try:
+            pem = subprocess.run(["security", "find-certificate", "-a", "-p",
+                                  "/System/Library/Keychains/SystemRootCertificates.keychain"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            if "BEGIN CERTIFICATE" in pem:
+                return ssl.create_default_context(cadata=pem)
+        except (OSError, subprocess.TimeoutExpired, ssl.SSLError):
+            pass
+    return None
+
+
+def urlopen(req, timeout):
+    global _ssl_context
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context)
+    except urllib.error.URLError as e:
+        if _ssl_context is not None or not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            raise
+        ctx = _fallback_ssl_context()
+        if ctx is None:
+            raise
+        _ssl_context = ctx
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
+def net_error(e):
+    """Short reason for a failed request, e.g. 'SSL certificate not trusted' instead of 'URLError'."""
+    reason = getattr(e, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "SSL certificate not trusted by this Python; see /acct:doctor"
+    if reason is not None:
+        return ("%s" % reason)[:80]
+    return type(e).__name__
+
+
 def fetch_usage(access_token, url=USAGE_URL):
     req = urllib.request.Request(url, headers={
         "Authorization": "Bearer " + access_token,
@@ -292,7 +344,7 @@ def fetch_usage(access_token, url=USAGE_URL):
         "Content-Type": "application/json",
         "User-Agent": "claude-acct/0.1",
     })
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urlopen(req, timeout=10) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -316,7 +368,7 @@ def _post_token_refresh(oauth):
         body["scope"] = " ".join(oauth["scopes"])
     req = urllib.request.Request(TOKEN_URL, data=json.dumps(body).encode("utf-8"), method="POST", headers={
         "Content-Type": "application/json", "User-Agent": "claude-acct/0.1"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -352,7 +404,7 @@ def refresh_stored_token(name, meta, creds):
                 return "revoked"
             return "refresh http %d" % e.code
         except Exception as e:
-            return "refresh error: %s" % type(e).__name__
+            return "refresh error: %s" % net_error(e)
         if not data.get("access_token") or not isinstance(data.get("expires_in"), (int, float)):
             return "refresh error: unexpected response"
         now_ms = int(time.time() * 1000)
@@ -401,7 +453,7 @@ def refresh_usage(meta, creds, force=False, refresh_name=None):
             return "revoked"
         return "http %d" % e.code
     except Exception as e:  # network error, timeout, ...
-        return "error: %s" % type(e).__name__
+        return "error: %s" % net_error(e)
     meta["usage"] = {"fetchedAt": now, "data": data}
     meta.pop("revoked", None)
     return "ok"
@@ -979,6 +1031,17 @@ def cmd_doctor(args):
             check("playwright-core", False, str(e), "Fix the npm error above, then run /acct:doctor again.")
     else:
         check("playwright-core", False, "needs Node.js first")
+    try:
+        fetch_usage("doctor-check")  # no valid token: a 401 proves HTTPS works
+        check("HTTPS to api.anthropic.com", True, "ok")
+    except urllib.error.HTTPError:
+        check("HTTPS to api.anthropic.com", True, "ok" + (" (macOS system certificates)" if _ssl_context else ""))
+    except Exception as e:
+        cert = isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError)
+        check("HTTPS to api.anthropic.com", False, net_error(e),
+              ("This Python (%s) has no CA certificates. python.org on macOS: run \"/Applications/Python %d.%d/Install Certificates.command\", "
+               "or `%s -m pip install certifi`." % (sys.executable, sys.version_info[0], sys.version_info[1], sys.executable)) if cert
+              else "Check the network, proxy or firewall for api.anthropic.com.")
     chrome = find_chrome()
     check("Google Chrome", bool(chrome), chrome or "not found",
           "Install Google Chrome (or set CLAUDE_ACCT_CHROME to its executable).")

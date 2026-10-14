@@ -203,6 +203,11 @@ If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login
 
 An account is flagged **🔴 Log in again** when its refresh token has expired (`refreshTokenExpiresAt`) or the usage API rejects a still-valid token with HTTP 401 (the token was revoked). An expired short-lived access token is **not** flagged: Claude Code refreshes it automatically the next time you switch to that account.
 
+## Troubleshooting
+
+- **Usage shows "no data yet (error: …)" for every account**: the script cannot reach `api.anthropic.com`. Run `/acct:doctor` and look at the "HTTPS to api.anthropic.com" line. A Python installed from python.org on macOS has no CA certificates until you run `/Applications/Python 3.x/Install Certificates.command`; the plugin falls back to the macOS system root certificates (or `certifi` when installed) by itself, so this only remains when that fallback is not available. Otherwise check the network, proxy or firewall.
+- **"no data yet" without an error**: the account has no usage reading yet; `/acct:list` fetches it (and refreshes an expired access token first). Plugin versions before 0.8.4 did not refresh tokens, so update the plugin.
+
 ## Limitations
 
 - The 30-second Keychain cache comes from reading Claude Code's own code, not from documentation, and may change in a future version.
