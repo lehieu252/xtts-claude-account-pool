@@ -1,5 +1,7 @@
+import argparse
 import importlib.util
 import io
+import json
 import os
 import shutil
 import sys
@@ -7,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 
@@ -114,6 +117,80 @@ class DailyOnlyThresholdTests(unittest.TestCase):
         self.assertEqual(cfg, {})
 
 
+class TokenRefreshTests(unittest.TestCase):
+    """Idle saved accounts get a new access token; the live login is never touched."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = patch.dict(os.environ, {"CLAUDE_ACCT_HOME": self.dir})
+        self.env.start()
+        self.store = {"b": {"claudeAiOauth": {"accessToken": "old", "refreshToken": "r1", "expiresAt": 1,
+                                              "scopes": ["user:inference", "user:profile"]}}}
+        self.patches = [
+            patch.object(acct, "read_stored_creds", side_effect=lambda n: json.loads(json.dumps(self.store[n]))),
+            patch.object(acct, "write_stored_creds", side_effect=lambda n, c: self.store.__setitem__(n, c)),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.env.stop()
+        shutil.rmtree(self.dir)
+
+    def test_expired_token_without_refresh_name_is_left_alone(self):
+        with patch.object(acct, "_post_token_refresh") as post:
+            status = acct.refresh_usage({}, acct.read_stored_creds("b"))
+        self.assertEqual(status, "expired")
+        post.assert_not_called()
+
+    def test_refreshes_saves_rotated_refresh_token_then_reads_usage(self):
+        meta, creds = {}, acct.read_stored_creds("b")
+        with patch.object(acct, "_post_token_refresh", return_value={
+                "access_token": "new", "refresh_token": "r2", "expires_in": 28800}) as post, \
+             patch.object(acct, "fetch_usage", return_value={"five_hour": {"utilization": 3}}) as fetch:
+            status = acct.refresh_usage(meta, creds, refresh_name="b")
+        self.assertEqual(status, "ok")
+        self.assertEqual(post.call_args.args[0]["refreshToken"], "r1")
+        saved = self.store["b"]["claudeAiOauth"]
+        self.assertEqual((saved["accessToken"], saved["refreshToken"]), ("new", "r2"))
+        self.assertGreater(saved["expiresAt"], time.time() * 1000 + 3600 * 1000)
+        self.assertEqual(saved["scopes"], ["user:inference", "user:profile"])
+        self.assertEqual(fetch.call_args.args[0], "new")
+        self.assertEqual(creds["claudeAiOauth"]["accessToken"], "new")
+
+    def test_rejected_refresh_token_flags_log_in_again(self):
+        err = urllib.error.HTTPError(acct.TOKEN_URL, 400, "Bad Request", {}, io.BytesIO(b'{"error":"invalid_grant"}'))
+        meta = {}
+        with patch.object(acct, "_post_token_refresh", side_effect=err):
+            status = acct.refresh_usage(meta, acct.read_stored_creds("b"), refresh_name="b")
+        self.assertEqual(status, "revoked")
+        self.assertTrue(meta["revoked"])
+        self.assertEqual(self.store["b"]["claudeAiOauth"]["refreshToken"], "r1")
+
+    def test_network_error_keeps_the_login(self):
+        meta = {}
+        with patch.object(acct, "_post_token_refresh", side_effect=OSError("offline")):
+            status = acct.refresh_usage(meta, acct.read_stored_creds("b"), refresh_name="b")
+        self.assertEqual(status, "refresh error: OSError")
+        self.assertNotIn("revoked", meta)
+
+    def test_list_never_refreshes_the_live_account(self):
+        idx = {"accounts": {"a": {"profile": {"emailAddress": "a@x.com"}}, "b": {"profile": {"emailAddress": "b@x.com"}}}}
+        self.store["a"] = {"claudeAiOauth": {"accessToken": "live", "refreshToken": "ra", "expiresAt": 1}}
+        calls = []
+        with patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), \
+             patch.object(acct, "sync_current", return_value="a"), \
+             patch.object(acct, "read_live_profile", return_value={}), \
+             patch.object(acct, "refresh_seat"), \
+             patch.object(acct, "refresh_usage", side_effect=lambda m, c, force=False, refresh_name=None: calls.append(refresh_name) or "expired"), \
+             patch.object(acct.sys, "stdout", io.StringIO()):
+            acct.cmd_list(argparse.Namespace(refresh=False))
+        self.assertEqual(calls, [None, "b"])
+
+
 class StopFailureRecoveryTests(unittest.TestCase):
     def recover(self, event, before, after):
         """Run cmd_auto_recover with the live account changing from `before` to `after` during the check."""
@@ -164,18 +241,18 @@ class RotationLockTests(unittest.TestCase):
 
     def test_busy_lock_is_not_acquired_without_waiting(self):
         open(self.lock, "w").close()
-        self.assertFalse(acct._acquire_rotation_lock(self.lock))
+        self.assertFalse(acct._acquire_lock(self.lock))
 
     def test_waits_for_a_running_check_to_release_the_lock(self):
         open(self.lock, "w").close()
         threading.Timer(0.5, os.unlink, [self.lock]).start()
-        self.assertTrue(acct._acquire_rotation_lock(self.lock, wait=5))
+        self.assertTrue(acct._acquire_lock(self.lock, wait=5))
 
     def test_stale_lock_is_replaced(self):
         open(self.lock, "w").close()
         old = time.time() - 301
         os.utime(self.lock, (old, old))
-        self.assertTrue(acct._acquire_rotation_lock(self.lock))
+        self.assertTrue(acct._acquire_lock(self.lock))
 
 
 class SeatTests(unittest.TestCase):
@@ -185,7 +262,8 @@ class SeatTests(unittest.TestCase):
     def test_labels_known_team_seat_tiers(self):
         self.assertEqual(acct.fmt_seat({"seat": {"tier": "team_tier_1"}}), "Premium")
         self.assertEqual(acct.fmt_seat({"seat": {"tier": "team_standard"}}), "Standard")
-        self.assertEqual(acct.fmt_seat({"seat": {"tier": None}}), "No seat")
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": None}, "oauth": {"subscriptionType": "team"}}), "No seat")
+        self.assertEqual(acct.fmt_seat({"seat": {"tier": None}, "oauth": {"subscriptionType": "pro"}}), "—")
         self.assertEqual(acct.fmt_seat({"seat": {"tier": "enterprise_x"}}), "enterprise_x")
         self.assertEqual(acct.fmt_seat({}), "?")
 

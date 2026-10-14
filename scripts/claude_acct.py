@@ -42,6 +42,9 @@ LIVE_SERVICE = "Claude Code-credentials"
 STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
 USAGE_CACHE_TTL = 120  # seconds, to avoid HTTP 429
+# OAuth refresh as Claude Code 2.1.29x does it (unofficial); access tokens last about 8 hours.
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # unofficial; organization.seat_tier is the member's seat
 SEAT_LABELS = {"team_standard": "Standard", "team_tier_1": "Premium"}
 EXPIRY_MARGIN_MS = 60_000
@@ -307,15 +310,89 @@ def token_state(meta, creds):
     return "ok"
 
 
-def refresh_usage(meta, creds, force=False):
-    """Update meta['usage'] if the access token is still valid. Return a status string."""
+def _post_token_refresh(oauth):
+    body = {"grant_type": "refresh_token", "refresh_token": oauth["refreshToken"], "client_id": OAUTH_CLIENT_ID}
+    if oauth.get("scopes"):
+        body["scope"] = " ".join(oauth["scopes"])
+    req = urllib.request.Request(TOKEN_URL, data=json.dumps(body).encode("utf-8"), method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": "claude-acct/0.1"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def refresh_stored_token(name, meta, creds):
+    """Get a new access token for a saved account that is NOT the live Claude Code login.
+
+    The store holds the only copy of such a login, so the script may use its refresh token. The
+    server can rotate the refresh token, so the new pair is saved before anything else. Never call
+    this for the live account: Claude Code owns that refresh token. Updates `creds` in place and
+    returns "ok", "revoked" (log in again) or a short error.
+    """
+    lock_path = os.path.join(store_dir(), "refresh-%s.lock" % hashlib.sha1(name.encode("utf-8")).hexdigest()[:12])
+    os.makedirs(store_dir(), exist_ok=True)
+    if not _acquire_lock(lock_path, wait=20):
+        return "refresh busy"
+    try:
+        latest = read_stored_creds(name)  # another process may have refreshed it while we waited
+        o = latest.get("claudeAiOauth", {})
+        if o.get("accessToken") and (o.get("expiresAt") or 0) >= time.time() * 1000 + EXPIRY_MARGIN_MS:
+            creds.clear(); creds.update(latest)
+            return "ok"
+        if not o.get("refreshToken"):
+            return "revoked"
+        try:
+            data = _post_token_refresh(o)
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read().decode("utf-8")).get("error")
+            except Exception:
+                err = None
+            if err == "invalid_grant":
+                meta["revoked"] = True
+                return "revoked"
+            return "refresh http %d" % e.code
+        except Exception as e:
+            return "refresh error: %s" % type(e).__name__
+        if not data.get("access_token") or not isinstance(data.get("expires_in"), (int, float)):
+            return "refresh error: unexpected response"
+        now_ms = int(time.time() * 1000)
+        o = dict(o, accessToken=data["access_token"], refreshToken=data.get("refresh_token") or o["refreshToken"],
+                 expiresAt=now_ms + int(data["expires_in"] * 1000))
+        if isinstance(data.get("refresh_token_expires_in"), (int, float)):
+            o["refreshTokenExpiresAt"] = now_ms + int(data["refresh_token_expires_in"] * 1000)
+        if isinstance(data.get("scope"), str) and data["scope"]:
+            o["scopes"] = data["scope"].split()
+        latest["claudeAiOauth"] = o
+        write_stored_creds(name, latest)
+        meta["oauth"] = public_oauth(latest)
+        meta.pop("revoked", None)
+        creds.clear(); creds.update(latest)
+        return "ok"
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+
+
+def refresh_usage(meta, creds, force=False, refresh_name=None):
+    """Update meta['usage'] if the access token is still valid. Return a status string.
+
+    With `refresh_name` (a saved account that is not the live login), an expired access token is
+    refreshed first, so idle accounts still report their usage.
+    """
     cache = meta.get("usage")
     now = time.time()
     if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
         return "cache"
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
-        return "expired"
+        if not refresh_name:
+            return "expired"
+        status = refresh_stored_token(refresh_name, meta, creds)
+        if status != "ok":
+            return status
+        o = creds.get("claudeAiOauth", {})
     try:
         data = fetch_usage(o["accessToken"])
     except urllib.error.HTTPError as e:
@@ -351,8 +428,9 @@ def fmt_seat(meta):
     if not seat:
         return "?"
     tier = seat.get("tier")
-    if not tier:
-        return "No seat"
+    if not tier:  # personal plans (Pro, Max) have no organization seat at all
+        plan = (meta.get("oauth") or {}).get("subscriptionType")
+        return "No seat" if plan in ("team", "enterprise") else "—"
     return SEAT_LABELS.get(tier, tier)
 
 
@@ -570,13 +648,14 @@ def cmd_list(args):
         cur = sync_current(idx)
     except AcctError:
         cur = None
+    live = cur or current_name(idx)  # by identity: never refresh the token Claude Code is using
     live_profile = read_live_profile()
     rows, need_login = [], []
     for name in sorted(idx["accounts"]):
         meta = idx["accounts"][name]
         try:
             creds = read_stored_creds(name)
-            status = refresh_usage(meta, creds, force=args.refresh)
+            status = refresh_usage(meta, creds, force=args.refresh, refresh_name=None if name == live else name)
             refresh_seat(meta, creds, force=args.refresh)
             state = token_state(meta, creds)
         except AcctError as e:
@@ -802,7 +881,8 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold):
         if token_state(meta, creds) == "relogin":
             skipped.append("%s (login expired/revoked)" % name)
             continue
-        status = refresh_usage(meta, creds)
+        # Destinations are never the live login (rotation only runs while that is the Premium account).
+        status = refresh_usage(meta, creds, refresh_name=name)
         usage = (meta.get("usage") or {}).get("data") or {}
         values = _usage_window_values(usage)
         # Fail closed: do not move Premium onto an account without a fresh 5-hour
@@ -1024,8 +1104,8 @@ def _cmd_auto_check_locked(args):
     save_index(idx)
 
 
-def _acquire_rotation_lock(lock_path, wait=0):
-    """Return True once this process holds the rotation lock, False if it stays busy for `wait` seconds."""
+def _acquire_lock(lock_path, wait=0):
+    """Return True once this process holds the lock file, False if it stays busy for `wait` seconds."""
     deadline = time.time() + wait
     while True:
         try:
@@ -1049,7 +1129,7 @@ def cmd_auto_check(args, lock_wait=0):
         return
     lock_path = os.path.join(store_dir(), "rotation.lock")
     os.makedirs(store_dir(), exist_ok=True)
-    if not _acquire_rotation_lock(lock_path, lock_wait):
+    if not _acquire_lock(lock_path, lock_wait):
         return
     try:
         _cmd_auto_check_locked(args)
