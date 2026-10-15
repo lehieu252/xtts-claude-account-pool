@@ -8,7 +8,7 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 | `/acct:save <name>` | Save the account you are **currently logged in** with, no new login needed |
 | `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, organization seat (Premium / Standard / No seat), 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account |
 | `/acct:switch <name> [--no-wait]` | Switch to another saved account and **keep working in the same chat**. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
-| `/acct:auto <configure|enable|disable|status|check>` | Move the organization's Premium seat to the least-used saved account when the active Premium account reaches its 5-hour or 7-day usage threshold |
+| `/acct:auto <configure|enable|disable|status|check>` | Move the organization's Premium seat to the least-used saved account when the active Premium account reaches its usage threshold |
 | `/acct:logout <name>` | Remove an account from the list (deletes its saved token) |
 | `/acct:doctor` | Check the requirements, install the Node dependency, and list the setup steps that are left |
 
@@ -85,7 +85,7 @@ $ACCT list --refresh
 
 Every account should be listed without "🔴 Log in again", and the Seat column shows which one holds Premium now.
 
-**5. Configure rotation.** Use the account whose Seat is Premium as `--premium`, and put it first in `--order`, followed by the other accounts in the order the user wants them to take over. The default threshold is 90% of the 5-hour usage; add `--threshold <1-99>` only if the user asks for another value.
+**5. Configure rotation.** Use the account whose Seat is Premium as `--premium`, and put it first in `--order`, followed by the other accounts in the order the user wants them to take over. The default thresholds are 15% of the 5-hour usage, or 85% of the 7-day usage while the 5-hour usage is below 20%; add `--threshold <1-99>` only if the user asks for another value.
 
 ```bash
 $ACCT auto configure --premium <premium email> --order <premium email>,<next email>,<next email>
@@ -156,7 +156,7 @@ From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the
 
 ### Automatic Premium seat rotation
 
-The rotation is opt-in. It triggers at **90% of the 5-hour usage** or **90% of the 7-day usage** of the Premium account. Configure the current Premium account and the pool of accounts that can take the seat:
+The rotation is opt-in. It triggers when the Premium account reaches **15% of its 5-hour usage**, or **85% of its 7-day usage while its 5-hour usage is below 20%**, or when any window is used up (100%). Configure the current Premium account and the pool of accounts that can take the seat:
 
 ```
 /acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com
@@ -173,9 +173,9 @@ To change the threshold, for example for a test at 75%:
 
 `--daily-threshold 75` is the same. Run `/acct:auto status` to see the active value. Re-running `configure` keeps rotation off until you enable it again.
 
-**How the 7-day window is used.** A member's 7-day usage is measured against the limits of the seat it holds. On the Premium account it is a real measure of what is left, so the plugin rotates at 90% of it (and at 100% of any window), and does not give that account the seat back until its 7-day window resets. On Standard accounts it never excludes a destination, because it says nothing about what the account can do once it holds Premium. All Standard members share the same limits, though, so it does say which one has used least: the next Premium is the account with the **lowest 7-day usage, then the lowest 5-hour usage**; on a tie, the one that comes first in `--order` after the current Premium. The 7-day threshold is 90% and needs no configuration; configs written by earlier versions pick it up after the plugin update.
+**How the 7-day window is used.** A member's 7-day usage is measured against the limits of the seat it holds. On the Premium account it is a real measure of what is left, so the plugin rotates at 85% of it (while the 5-hour usage is below 20%; at 100% of any window regardless), and does not give that account the seat back until its 7-day window resets. On Standard accounts it never excludes a destination, because it says nothing about what the account can do once it holds Premium. All Standard members share the same limits, though, so it does say which one has used least: the next Premium is the account with the **lowest 7-day usage, then the lowest 5-hour usage**; on a tie, the one that comes first in `--order` after the current Premium. These thresholds need no configuration: configs written by earlier versions, which saved the old 90% default, pick them up after the plugin update. Only an explicit `--threshold` overrides the 5-hour value.
 
-The plugin checks the active Premium account before each prompt and tool call. When its 5-hour or 7-day usage reaches the threshold, or one of its windows is used up, it changes the old member to Standard, promotes the least-used eligible member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If Claude Code reports a usage-related `rate_limit` failure, a `StopFailure` hook makes one best-effort rotation attempt using the same fresh-usage and seat checks. It ignores ordinary API throttling and other errors. Use `/acct:auto disable` to stop rotation.
+The plugin checks the active Premium account before each prompt and tool call. When its usage reaches the threshold, it changes the old member to Standard, promotes the least-used eligible member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If Claude Code reports a usage-related `rate_limit` failure, a `StopFailure` hook makes one best-effort rotation attempt using the same fresh-usage and seat checks. It ignores ordinary API throttling and other errors. Use `/acct:auto disable` to stop rotation.
 
 **Continuing after a usage-limit stop.** A long response can cross the limit before the next tool call, so the turn stops with a usage-limit error. The `StopFailure` hook runs with `asyncRewake`: it rotates in the background, waits out the Keychain cache, then exits with code 2. Claude Code treats that as a wake-up and continues the stopped task in the same chat, with the same context and the new account. Nobody has to type "continue". If nothing was rotated (ordinary throttling, no eligible account, rotation off), the hook exits 0 and the session stays stopped. Each rotation wakes the model at most once, so the chain ends when the pool runs out.
 

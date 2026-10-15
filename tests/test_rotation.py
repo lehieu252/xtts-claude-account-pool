@@ -86,9 +86,29 @@ class ThresholdTests(unittest.TestCase):
         usage = account(10, 90)["usage"]["data"]
         self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
 
-    def test_weekly_threshold_defaults_to_90_for_existing_configs(self):
-        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 90)
+    def test_weekly_threshold_defaults_for_existing_configs(self):
+        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 85)
         self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
+
+    def test_old_default_daily_threshold_follows_the_new_default(self):
+        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 15)
+        self.assertEqual(acct._rotation_threshold({}), 15)
+        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 75}), 75)
+
+    def check(self, five_hour, seven_day):
+        cfg = {"dailyThreshold": 90}  # as saved by `configure` before 0.9.1
+        return acct._usage_reached_threshold(account(five_hour, seven_day)["usage"]["data"],
+                                             acct._rotation_threshold(cfg), acct._weekly_threshold(cfg),
+                                             acct._weekly_max_five_hour(cfg))
+
+    def test_default_rule(self):
+        # 5-hour >= 15%, or (7-day >= 85% and 5-hour < 20%), or any window used up.
+        self.assertFalse(self.check(14, 84))
+        self.assertTrue(self.check(15, 0))
+        self.assertTrue(self.check(0, 85))
+        self.assertTrue(self.check(19, 85))
+        self.assertTrue(self.check(60, 90))  # caught by the 5-hour rule
+        self.assertTrue(self.check(0, 100))
 
     def test_daily_threshold_triggers_rotation(self):
         usage = account(75, 0)["usage"]["data"]

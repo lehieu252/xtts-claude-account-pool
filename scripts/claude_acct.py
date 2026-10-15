@@ -795,13 +795,26 @@ def save_rotation(cfg):
     write_json_atomic(auto_config_path(), cfg, private=True)
 
 
+# Rotation: 5-hour >= DAILY_THRESHOLD, or (7-day >= WEEKLY_THRESHOLD and 5-hour < WEEKLY_MAX_FIVE_HOUR).
+DAILY_THRESHOLD = 15
+WEEKLY_THRESHOLD = 85
+WEEKLY_MAX_FIVE_HOUR = 20
+LEGACY_DAILY_DEFAULT = 90  # written by `configure` before 0.9.1 when no --threshold was given
+
+
 def _rotation_threshold(cfg):
-    return cfg.get("dailyThreshold", cfg.get("threshold", 90))
+    value = cfg.get("dailyThreshold", cfg.get("threshold"))
+    # Configs saved with the old default follow the current default without re-running `configure`.
+    return DAILY_THRESHOLD if value in (None, LEGACY_DAILY_DEFAULT) else value
 
 
 def _weekly_threshold(cfg):
     # Not set by `configure`, so configs written by earlier versions get it without re-running anything.
-    return cfg.get("weeklyThreshold", 90)
+    return cfg.get("weeklyThreshold", WEEKLY_THRESHOLD)
+
+
+def _weekly_max_five_hour(cfg):
+    return cfg.get("weeklyMaxFiveHour", WEEKLY_MAX_FIVE_HOUR)
 
 
 def _usage_window_values(usage):
@@ -813,14 +826,17 @@ def _usage_window_values(usage):
     return result
 
 
-def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100):
-    """Rotate the Premium account at the 5-hour or 7-day threshold, or when any window is used up.
+def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100, weekly_max_five_hour=100):
+    """Rotate the Premium account at the 5-hour threshold, at the 7-day threshold while its 5-hour
+    usage is below `weekly_max_five_hour`, or when any window is used up.
 
     Only applied to the account holding Premium: its 7-day reading is measured against Premium
     limits. A Standard member's reading is not, so it never disqualifies a destination.
     """
     values = _usage_window_values(usage)
-    return (values.get("five_hour", -1) >= daily_threshold or values.get("seven_day", -1) >= weekly_threshold
+    five_hour = values.get("five_hour", -1)
+    return (five_hour >= daily_threshold
+            or (values.get("seven_day", -1) >= weekly_threshold and five_hour < weekly_max_five_hour)
             or any(v >= 100 for v in values.values()))
 
 
@@ -832,21 +848,27 @@ def cmd_auto_configure(args):
         raise AcctError("Rotation order must contain at least two different saved accounts.")
     if premium not in order:
         raise AcctError("The current Premium account must be included in the rotation order.")
-    daily_threshold = next((t for t in (args.daily_threshold, args.threshold) if t is not None), 90)
-    if not 1 <= daily_threshold <= 99:
+    daily_threshold = next((t for t in (args.daily_threshold, args.threshold) if t is not None), None)
+    if daily_threshold is not None and not 1 <= daily_threshold <= 99:
         raise AcctError("The daily (5-hour) threshold must be between 1 and 99.")
     cfg = {
         "enabled": False,
-        "dailyThreshold": daily_threshold,
         "order": order,
         "premiumAccount": premium,
         "membersUrl": args.members_url,
         "cdpUrl": args.cdp_url,
         "browserProfile": os.path.abspath(os.path.expanduser(args.browser_profile)),
     }
+    if daily_threshold is not None:  # left out, the default applies and follows plugin updates
+        cfg["dailyThreshold"] = daily_threshold
     save_rotation(cfg)
-    print("Rotation configured: Premium %s; pool %s. Thresholds: 5-hour %d%%, 7-day %d%%. The next Premium is the pool account with the lowest 7-day, then 5-hour usage. Rotation is OFF; run `acct auto enable` after setup."
-          % (premium, ", ".join(order), daily_threshold, _weekly_threshold(cfg)))
+    print("Rotation configured: Premium %s; pool %s. Rotates at %s. The next Premium is the pool account with the lowest 7-day, then 5-hour usage. Rotation is OFF; run `acct auto enable` after setup."
+          % (premium, ", ".join(order), _trigger_text(cfg)))
+
+
+def _trigger_text(cfg):
+    return "5-hour >= %s%%, or 7-day >= %s%% while 5-hour < %s%%, or any window at 100%%" % (
+        _rotation_threshold(cfg), _weekly_threshold(cfg), _weekly_max_five_hour(cfg))
 
 
 def cmd_auto_enable(args):
@@ -871,8 +893,7 @@ def cmd_auto_status(args):
         print("Automatic Premium rotation is not configured.")
         return
     print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
-    print("Daily (5-hour) threshold: %s%%" % _rotation_threshold(cfg))
-    print("Weekly (7-day) threshold: %s%%" % _weekly_threshold(cfg))
+    print("Rotates at: %s" % _trigger_text(cfg))
     print("Next Premium: the least-used account (lowest 7-day, then 5-hour usage); ties follow the order")
     print("Rotation order: %s" % " → ".join(cfg["order"]))
     print("Current Premium account: %s" % cfg.get("premiumAccount", "?"))
@@ -1076,9 +1097,8 @@ def cmd_doctor(args):
         check("Rotation", False, "not configured",
               "Configure rotation: /acct:auto configure --premium <current Premium account> --order <premium>,<next>,...")
     else:
-        check("Rotation", True, "%s, Premium: %s, 5-hour threshold %s%%, 7-day threshold %s%%, next Premium: least used of %s" % (
-            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _rotation_threshold(cfg), _weekly_threshold(cfg),
-            ", ".join(cfg["order"])))
+        check("Rotation", True, "%s, Premium: %s, rotates at %s, next Premium: least used of %s" % (
+            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _trigger_text(cfg), ", ".join(cfg["order"])))
         if not os.path.isdir(cfg.get("browserProfile") or ""):
             todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
         if not cfg.get("enabled"):
@@ -1144,14 +1164,15 @@ def _cmd_auto_check_locked(args):
     usage = (meta.get("usage") or {}).get("data") or {}
     daily_threshold = _rotation_threshold(cfg)
     weekly_threshold = _weekly_threshold(cfg)
+    weekly_max_five_hour = _weekly_max_five_hour(cfg)
     values = _usage_window_values(usage)
     save_index(idx)
     if cfg.get("rotationHold") == premium:
-        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
+        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold, weekly_max_five_hour):
             return
         cfg.pop("rotationHold", None)
         save_rotation(cfg)
-    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
+    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold, weekly_max_five_hour):
         return
     old_name = premium
     _mark_used_up(cfg, premium, usage, weekly_threshold)
@@ -1167,7 +1188,7 @@ def _cmd_auto_check_locked(args):
         reached = []
         if values.get("five_hour", -1) >= daily_threshold:
             reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
-        if values.get("seven_day", -1) >= weekly_threshold:
+        if values.get("seven_day", -1) >= weekly_threshold and values.get("five_hour", -1) < weekly_max_five_hour:
             reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
         elif values.get("seven_day", -1) >= 100:
             reached.append("7-day %d%% (used up)" % round(values["seven_day"]))
@@ -1287,7 +1308,7 @@ def main(argv=None):
     autos = p.add_subparsers(dest="auto_cmd", required=True)
     q = autos.add_parser("configure", help="set account rotation order and organization page")
     q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
-    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 90%%)")
+    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 15%%)")
     q.add_argument("--threshold", type=int, help="same as --daily-threshold")
     q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
     q.add_argument("--cdp-url", default="http://127.0.0.1:9222")
