@@ -275,6 +275,84 @@ class CertificateFallbackTests(unittest.TestCase):
         self.assertEqual(acct.net_error(urllib.error.URLError("timed out")), "timed out")
 
 
+class FollowPremiumSeatTests(unittest.TestCase):
+    """The seat can move outside this machine; the session follows it instead of rotating a Standard account."""
+
+    def run_check(self, cur, tiers, cfg=None, statuses=None, manual=False):
+        """Run one check with `cur` live and `tiers` {name: seat tier}. Return (cfg, switched_to, rotated)."""
+        self.cfg = cfg or {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
+        idx = {"accounts": {n: account(0, 0) for n in ("info", "sales", "hieunx", "personal")}}
+        statuses = statuses or {}
+
+        def seat(meta, creds, force=False, refresh_name=None):
+            name = creds["name"]
+            if name in tiers:
+                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[name]}
+            return statuses.get(name, "ok")
+
+        switched = []
+        with patch.object(acct, "load_rotation", return_value=self.cfg), \
+             patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
+             patch.object(acct, "sync_current", return_value=cur), \
+             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
+             patch.object(acct, "refresh_seat", side_effect=seat), \
+             patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct, "_set_premium_seat") as rotate, \
+             patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)), \
+             patch.object(acct.sys, "stdout", io.StringIO()):
+            acct._cmd_auto_check_locked(argparse.Namespace(force=False, manual=manual))
+        return self.cfg, switched, rotate.called
+
+    def test_follows_seat_moved_by_hand(self):
+        cfg, switched, rotated = self.run_check("sales", {"sales": "team_standard", "hieunx": "team_tier_1"})
+        self.assertEqual(cfg["premiumAccount"], "hieunx")
+        self.assertEqual(switched, ["hieunx"])
+        self.assertFalse(rotated)
+
+    def test_pool_account_that_is_not_premium_switches_to_the_holder(self):
+        cfg, switched, _ = self.run_check("info", {"sales": "team_tier_1"})
+        self.assertEqual(cfg["premiumAccount"], "sales")
+        self.assertEqual(switched, ["sales"])
+
+    def test_session_already_on_the_holder_stays(self):
+        _, switched, rotated = self.run_check("sales", {"sales": "team_tier_1"})
+        self.assertEqual(switched, [])
+        self.assertFalse(rotated)  # usage is 0%: no rotation either
+
+    def test_login_outside_the_pool_is_left_alone(self):
+        _, switched, _ = self.run_check("personal", {"sales": "team_standard", "hieunx": "team_tier_1"})
+        self.assertEqual(switched, [])
+
+    def test_unreadable_seat_keeps_the_configured_premium(self):
+        cfg, switched, _ = self.run_check("sales", {}, statuses={"sales": "error: timeout"})
+        self.assertEqual(cfg["premiumAccount"], "sales")
+        self.assertEqual(switched, [])
+
+    def test_no_saved_holder_changes_nothing_and_does_not_rotate(self):
+        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
+        cfg, switched, rotated = self.run_check(
+            "sales", {"sales": "team_standard", "info": "team_standard", "hieunx": "team_standard"}, cfg=cfg)
+        self.assertEqual(cfg["premiumAccount"], "sales")
+        self.assertEqual(switched, [])
+        self.assertFalse(rotated)
+
+    def test_grace_period_after_own_rotation_skips_the_seat_lookup(self):
+        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
+               "rotatedAt": time.time()}
+        cfg, switched, _ = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
+        self.assertEqual(cfg["premiumAccount"], "hieunx")
+        self.assertEqual(switched, [])
+
+    def test_seat_refresh_renews_the_token_of_an_idle_account_only(self):
+        expired = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 1, "refreshToken": "r"}}
+        with patch.object(acct, "refresh_stored_token", return_value="revoked") as refresh:
+            self.assertEqual(acct.refresh_seat({}, dict(expired)), "expired")
+            refresh.assert_not_called()
+            self.assertEqual(acct.refresh_seat({}, dict(expired), refresh_name="b"), "revoked")
+            refresh.assert_called_once()
+
+
 class StopFailureRecoveryTests(unittest.TestCase):
     def recover(self, event, before, after):
         """Run cmd_auto_recover with the live account changing from `before` to `after` during the check."""

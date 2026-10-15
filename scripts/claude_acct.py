@@ -48,6 +48,7 @@ TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # unofficial; organization.seat_tier is the member's seat
 SEAT_LABELS = {"team_standard": "Standard", "team_tier_1": "Premium"}
+PREMIUM_TIER = "team_tier_1"
 EXPIRY_MARGIN_MS = 60_000
 # Claude Code caches Keychain reads for 30 s (UOt=30000 in the 2.1.29x bundle). After that, a
 # running session sees the new token and switches to it, so waiting this long after a swap
@@ -459,20 +460,29 @@ def refresh_usage(meta, creds, force=False, refresh_name=None):
     return "ok"
 
 
-def refresh_seat(meta, creds, force=False):
-    """Update meta['seat'] with the organization seat tier, under the same rules as refresh_usage."""
+def refresh_seat(meta, creds, force=False, refresh_name=None):
+    """Update meta['seat'] with the organization seat tier, under the same rules as refresh_usage.
+
+    Return "ok", "cache", or why the seat could not be read (the last known seat is kept).
+    """
     cache = meta.get("seat")
     now = time.time()
     if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
-        return
+        return "cache"
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
-        return
+        if not refresh_name:
+            return "expired"
+        status = refresh_stored_token(refresh_name, meta, creds)
+        if status != "ok":
+            return status
+        o = creds.get("claudeAiOauth", {})
     try:
         org = fetch_usage(o["accessToken"], PROFILE_URL).get("organization") or {}
-    except Exception:  # keep the last known seat; the usage column already reports token problems
-        return
+    except Exception as e:  # the usage column already reports token problems
+        return "error: %s" % net_error(e)
     meta["seat"] = {"fetchedAt": now, "tier": org.get("seat_tier")}
+    return "ok"
 
 
 def fmt_seat(meta):
@@ -1115,6 +1125,64 @@ def cmd_doctor(args):
         print("\nEverything is ready.")
 
 
+FOLLOW_GRACE = 300  # seconds after this machine moved the seat, while the profile API may still show the old tiers
+
+
+def _seat_tier(idx, name, live, force=False):
+    """Return (status, tier) of a saved account's seat. The live login's token is never refreshed here."""
+    try:
+        creds = read_stored_creds(name)
+    except AcctError:
+        return "credentials unavailable", None
+    meta = idx["accounts"][name]
+    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name)
+    return status, (meta.get("seat") or {}).get("tier")
+
+
+def _find_premium_holder(cfg, idx, live, force=False):
+    """Return the pool account that holds the Premium seat, or None if no pool account confirms it.
+
+    The seat can move without this machine: by hand on the Members page, or by another machine
+    that shares the pool. Unconfirmed readings keep the configured account.
+    """
+    premium = cfg.get("premiumAccount")
+    status, tier = _seat_tier(idx, premium, live, force)
+    if status not in ("ok", "cache") or tier == PREMIUM_TIER:
+        return premium
+    for name in cfg.get("order", []):
+        if name == premium or name not in idx["accounts"]:
+            continue
+        # Fresh readings: a cached Premium may be the seat this machine saw before it moved.
+        status, tier = _seat_tier(idx, name, live, force=True)
+        if status == "ok" and tier == PREMIUM_TIER:
+            return name
+    return None
+
+
+def _follow_premium_seat(cfg, idx, cur, args):
+    """Point the config and this session at the account holding Premium. Return True if done for this check."""
+    premium = cfg.get("premiumAccount")
+    if time.time() - cfg.get("rotatedAt", 0) < FOLLOW_GRACE:
+        return cur != premium
+    holder = _find_premium_holder(cfg, idx, cur or current_name(idx), force=args.force)
+    save_index(idx)
+    if holder is None:
+        # Rotating would ask the Members page to demote an account that is not Premium.
+        if args.manual:
+            raise AcctError("%s no longer holds the Premium seat, and no saved account in the rotation order does. "
+                            "No seat or account was changed." % premium)
+        return True
+    if holder != premium:
+        cfg["premiumAccount"] = holder
+        cfg.pop("rotationHold", None)
+        save_rotation(cfg)
+        print("The Premium seat moved from %s to %s outside this machine." % (premium, holder))
+    if cur == holder:
+        return False
+    cmd_switch(argparse.Namespace(name=holder, force=False, no_wait=False))
+    return True
+
+
 def _set_premium_seat(old_name, new_name, cfg, idx):
     old_email = ((idx["accounts"].get(old_name, {}).get("profile") or {}).get("emailAddress") or "").strip()
     new_email = ((idx["accounts"].get(new_name, {}).get("profile") or {}).get("emailAddress") or "").strip()
@@ -1143,13 +1211,16 @@ def _cmd_auto_check_locked(args):
     premium = cfg.get("premiumAccount")
     if premium not in idx["accounts"]:
         raise AcctError("Current Premium account '%s' is not saved. Disable rotation or reconfigure it." % premium)
-    # Rotate only while this Claude Code session is actually using the Premium account.
     try:
         cur = sync_current(idx)
     except AcctError:
         cur = current_name(idx)
-    if cur != premium:
+    # A login outside the pool (a personal plan, an unsaved account) is left alone.
+    if cur != premium and cur not in cfg.get("order", []):
         return
+    if _follow_premium_seat(cfg, idx, cur, args):
+        return
+    premium = cfg["premiumAccount"]
     try:
         creds = read_stored_creds(premium)
     except AcctError as e:
@@ -1197,6 +1268,7 @@ def _cmd_auto_check_locked(args):
     # Change credentials only after the Members page confirms the tier change.
     cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
     cfg["premiumAccount"] = new_name
+    cfg["rotatedAt"] = time.time()
     cfg.pop("rotationHold", None)
     save_rotation(cfg)
     idx = load_index()  # cmd_switch saved its own copy; the cached seats of both members are now wrong
@@ -1243,8 +1315,8 @@ def cmd_auto_check(args, lock_wait=0):
 
 # Exit code 2 from an `asyncRewake` hook wakes the model with this text (stderr) in the same session.
 REWAKE_EXIT = 2
-REWAKE_MESSAGE = ("The claude.ai usage limit of account %s was reached, so the acct plugin moved the Premium seat "
-                  "and switched this session to account %s, which has usage available. Continue the task you were "
+REWAKE_MESSAGE = ("The claude.ai usage limit of account %s was reached, so the acct plugin switched this session to "
+                  "account %s, which holds the organization's Premium seat and has usage available. Continue the task you were "
                   "working on when the limit was reached; do not repeat work that is already complete.")
 
 
