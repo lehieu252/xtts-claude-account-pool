@@ -337,12 +337,27 @@ class FollowPremiumSeatTests(unittest.TestCase):
         self.assertEqual(switched, [])
         self.assertFalse(rotated)
 
-    def test_grace_period_after_own_rotation_skips_the_seat_lookup(self):
+    def test_right_after_own_rotation_never_follows_back_to_the_account_it_left(self):
         cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
-               "rotatedAt": time.time()}
-        cfg, switched, _ = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
+               "rotatedAt": time.time(), "rotatedFrom": "sales"}
+        cfg, switched, rotated = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
         self.assertEqual(cfg["premiumAccount"], "hieunx")
         self.assertEqual(switched, [])
+        self.assertFalse(rotated)
+
+    def test_right_after_own_rotation_still_follows_a_move_to_another_account(self):
+        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
+               "rotatedAt": time.time(), "rotatedFrom": "sales"}
+        cfg, switched, _ = self.run_check(
+            "hieunx", {"hieunx": "team_standard", "sales": "team_tier_1", "info": "team_tier_1"}, cfg=cfg)
+        self.assertEqual(cfg["premiumAccount"], "info")
+        self.assertEqual(switched, ["info"])
+
+    def test_follow_back_is_allowed_once_the_grace_period_is_over(self):
+        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
+               "rotatedAt": time.time() - acct.FOLLOW_GRACE - 1, "rotatedFrom": "sales"}
+        cfg, switched, _ = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
+        self.assertEqual(switched, ["sales"])
 
     def test_seat_refresh_renews_the_token_of_an_idle_account_only(self):
         expired = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 1, "refreshToken": "r"}}

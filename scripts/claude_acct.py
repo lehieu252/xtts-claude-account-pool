@@ -1125,7 +1125,7 @@ def cmd_doctor(args):
         print("\nEverything is ready.")
 
 
-FOLLOW_GRACE = 300  # seconds after this machine moved the seat, while the profile API may still show the old tiers
+FOLLOW_GRACE = 300  # seconds after this machine moved the seat; see _follow_premium_seat
 
 
 def _seat_tier(idx, name, live, force=False):
@@ -1139,18 +1139,19 @@ def _seat_tier(idx, name, live, force=False):
     return status, (meta.get("seat") or {}).get("tier")
 
 
-def _find_premium_holder(cfg, idx, live, force=False):
+def _find_premium_holder(cfg, idx, live, force=False, exclude=None):
     """Return the pool account that holds the Premium seat, or None if no pool account confirms it.
 
     The seat can move without this machine: by hand on the Members page, or by another machine
-    that shares the pool. Unconfirmed readings keep the configured account.
+    that shares the pool. Unconfirmed readings keep the configured account; `exclude` is never
+    taken as the holder.
     """
     premium = cfg.get("premiumAccount")
     status, tier = _seat_tier(idx, premium, live, force)
     if status not in ("ok", "cache") or tier == PREMIUM_TIER:
         return premium
     for name in cfg.get("order", []):
-        if name == premium or name not in idx["accounts"]:
+        if name in (premium, exclude) or name not in idx["accounts"]:
             continue
         # Fresh readings: a cached Premium may be the seat this machine saw before it moved.
         status, tier = _seat_tier(idx, name, live, force=True)
@@ -1162,9 +1163,11 @@ def _find_premium_holder(cfg, idx, live, force=False):
 def _follow_premium_seat(cfg, idx, cur, args):
     """Point the config and this session at the account holding Premium. Return True if done for this check."""
     premium = cfg.get("premiumAccount")
-    if time.time() - cfg.get("rotatedAt", 0) < FOLLOW_GRACE:
-        return cur != premium
-    holder = _find_premium_holder(cfg, idx, cur or current_name(idx), force=args.force)
+    # Right after this machine moved the seat, the profile API may still show the account it left as
+    # Premium: never follow the seat back there. A move to any other account is followed at once.
+    recent = time.time() - (cfg.get("rotatedAt") or 0) < FOLLOW_GRACE
+    holder = _find_premium_holder(cfg, idx, cur or current_name(idx), force=args.force,
+                                  exclude=cfg.get("rotatedFrom") if recent else None)
     save_index(idx)
     if holder is None:
         # Rotating would ask the Members page to demote an account that is not Premium.
@@ -1269,6 +1272,7 @@ def _cmd_auto_check_locked(args):
     cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
     cfg["premiumAccount"] = new_name
     cfg["rotatedAt"] = time.time()
+    cfg["rotatedFrom"] = old_name
     cfg.pop("rotationHold", None)
     save_rotation(cfg)
     idx = load_index()  # cmd_switch saved its own copy; the cached seats of both members are now wrong
