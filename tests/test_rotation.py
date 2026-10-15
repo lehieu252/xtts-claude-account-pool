@@ -71,16 +71,24 @@ class RotationCandidateTests(unittest.TestCase):
         self.assertEqual(skipped, ["sales (usage unavailable)", "xtts (usage unavailable)"])
 
 
-class DailyOnlyThresholdTests(unittest.TestCase):
+class ThresholdTests(unittest.TestCase):
     def pick(self, idx, cfg):
         with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
              patch.object(acct, "token_state", return_value="ok"), \
              patch.object(acct, "refresh_usage", return_value="cache"):
             return acct._next_eligible_rotation_account(cfg, idx, 75)
 
-    def test_weekly_usage_alone_does_not_trigger_rotation(self):
-        usage = account(10, 99)["usage"]["data"]
-        self.assertFalse(acct._usage_reached_threshold(usage, 75))
+    def test_weekly_usage_below_threshold_does_not_trigger_rotation(self):
+        usage = account(10, 89)["usage"]["data"]
+        self.assertFalse(acct._usage_reached_threshold(usage, 75, 90))
+
+    def test_weekly_threshold_triggers_rotation(self):
+        usage = account(10, 90)["usage"]["data"]
+        self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
+
+    def test_weekly_threshold_defaults_to_90_for_existing_configs(self):
+        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 90)
+        self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
 
     def test_daily_threshold_triggers_rotation(self):
         usage = account(75, 0)["usage"]["data"]
@@ -90,11 +98,27 @@ class DailyOnlyThresholdTests(unittest.TestCase):
         usage = account(10, 100)["usage"]["data"]
         self.assertTrue(acct._usage_reached_threshold(usage, 75))
 
-    def test_destination_weekly_usage_is_ignored(self):
+    def test_destination_weekly_usage_ranks_but_does_not_exclude(self):
         idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
         name, skipped = self.pick(idx, {"order": ["info", "sales", "xtts"], "premiumAccount": "sales"})
-        self.assertEqual(name, "xtts")
+        self.assertEqual(name, "xtts")  # both at 100% 7-day: lower 5-hour wins
         self.assertEqual(skipped, [])
+
+    def test_picks_lowest_weekly_usage_not_next_in_order(self):
+        idx = {"accounts": {"sales": account(95, 84), "contact": account(0, 27), "careers": account(0, 100),
+                            "hieunx": account(0, 0), "truongnv": account(42, 93)}}
+        cfg = {"order": ["sales", "contact", "careers", "hieunx", "truongnv"], "premiumAccount": "sales"}
+        self.assertEqual(self.pick(idx, cfg)[0], "hieunx")
+
+    def test_equal_weekly_usage_prefers_lower_five_hour(self):
+        idx = {"accounts": {"sales": account(95, 50), "contact": account(40, 10), "careers": account(5, 10)}}
+        cfg = {"order": ["sales", "contact", "careers"], "premiumAccount": "sales"}
+        self.assertEqual(self.pick(idx, cfg)[0], "careers")
+
+    def test_full_tie_follows_order_after_current_premium(self):
+        idx = {"accounts": {"a": account(0, 0), "b": account(0, 0), "c": account(95, 50)}}
+        cfg = {"order": ["a", "b", "c"], "premiumAccount": "c"}
+        self.assertEqual(self.pick(idx, cfg)[0], "a")
 
     def test_account_used_up_as_premium_is_skipped_until_reset(self):
         idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
@@ -110,6 +134,13 @@ class DailyOnlyThresholdTests(unittest.TestCase):
         usage = {"five_hour": {"utilization": 100, "resets_at": "2026-10-12T15:00:00+00:00"},
                  "seven_day": {"utilization": 100, "resets_at": "2026-10-15T10:00:00+00:00"}}
         acct._mark_used_up(cfg, "sales", usage)
+        self.assertEqual(cfg["usedUpUntil"]["sales"], acct._parse_reset("2026-10-15T10:00:00+00:00"))
+
+    def test_weekly_threshold_marks_until_weekly_reset(self):
+        cfg = {}
+        usage = {"five_hour": {"utilization": 30, "resets_at": "2026-10-12T15:00:00+00:00"},
+                 "seven_day": {"utilization": 91, "resets_at": "2026-10-15T10:00:00+00:00"}}
+        acct._mark_used_up(cfg, "sales", usage, 90)
         self.assertEqual(cfg["usedUpUntil"]["sales"], acct._parse_reset("2026-10-15T10:00:00+00:00"))
 
     def test_daily_threshold_alone_does_not_mark_used_up(self):

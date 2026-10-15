@@ -799,6 +799,11 @@ def _rotation_threshold(cfg):
     return cfg.get("dailyThreshold", cfg.get("threshold", 90))
 
 
+def _weekly_threshold(cfg):
+    # Not set by `configure`, so configs written by earlier versions get it without re-running anything.
+    return cfg.get("weeklyThreshold", 90)
+
+
 def _usage_window_values(usage):
     result = {}
     for key in ("five_hour", "seven_day"):
@@ -808,15 +813,15 @@ def _usage_window_values(usage):
     return result
 
 
-def _usage_reached_threshold(usage, daily_threshold):
-    """Only the 5-hour window triggers rotation, plus any window that is actually used up.
+def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100):
+    """Rotate the Premium account at the 5-hour or 7-day threshold, or when any window is used up.
 
-    The 7-day reading of a Standard member is measured against Standard limits, so it says
-    nothing about the account once it holds the Premium seat; a used-up window still means
-    the Premium account cannot continue.
+    Only applied to the account holding Premium: its 7-day reading is measured against Premium
+    limits. A Standard member's reading is not, so it never disqualifies a destination.
     """
     values = _usage_window_values(usage)
-    return values.get("five_hour", -1) >= daily_threshold or any(v >= 100 for v in values.values())
+    return (values.get("five_hour", -1) >= daily_threshold or values.get("seven_day", -1) >= weekly_threshold
+            or any(v >= 100 for v in values.values()))
 
 
 def cmd_auto_configure(args):
@@ -840,8 +845,8 @@ def cmd_auto_configure(args):
         "browserProfile": os.path.abspath(os.path.expanduser(args.browser_profile)),
     }
     save_rotation(cfg)
-    print("Rotation configured: %s (Premium) → %s. Daily (5-hour) threshold: %d%%; the 7-day window only triggers at 100%%. Rotation is OFF; run `acct auto enable` after setup."
-          % (premium, " → ".join(order[order.index(premium) + 1:] + order[:order.index(premium)]), daily_threshold))
+    print("Rotation configured: Premium %s; pool %s. Thresholds: 5-hour %d%%, 7-day %d%%. The next Premium is the pool account with the lowest 7-day, then 5-hour usage. Rotation is OFF; run `acct auto enable` after setup."
+          % (premium, ", ".join(order), daily_threshold, _weekly_threshold(cfg)))
 
 
 def cmd_auto_enable(args):
@@ -867,7 +872,8 @@ def cmd_auto_status(args):
         return
     print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
     print("Daily (5-hour) threshold: %s%%" % _rotation_threshold(cfg))
-    print("Weekly (7-day): not a trigger; rotates only when a window is used up (100%)")
+    print("Weekly (7-day) threshold: %s%%" % _weekly_threshold(cfg))
+    print("Next Premium: the least-used account (lowest 7-day, then 5-hour usage); ties follow the order")
     print("Rotation order: %s" % " → ".join(cfg["order"]))
     print("Current Premium account: %s" % cfg.get("premiumAccount", "?"))
     print("Browser profile: %s" % cfg.get("browserProfile", "(CDP)"))
@@ -897,23 +903,28 @@ def _parse_reset(value):
         return None
 
 
-def _mark_used_up(cfg, name, usage):
-    """Remember until when a Premium account left with a used-up window cannot take the seat back."""
+def _mark_used_up(cfg, name, usage, weekly_threshold=100):
+    """Remember until when a Premium account left with a used-up (or 7-day threshold) window cannot take the seat back."""
+    limits = {"five_hour": 100, "seven_day": min(weekly_threshold, 100)}
     resets = [_parse_reset((usage.get(k) or {}).get("resets_at"))
-              for k, v in _usage_window_values(usage).items() if v >= 100]
+              for k, v in _usage_window_values(usage).items() if v >= limits[k]]
     resets = [r for r in resets if r]
     if resets:
         cfg.setdefault("usedUpUntil", {})[name] = max(resets)
 
 
 def _next_eligible_rotation_account(cfg, idx, daily_threshold):
-    """Pick the next Standard account only after checking its live status and usage."""
+    """Pick the least-used Standard account after checking the live status and usage of each.
+
+    Standard members share the same limits, so their 7-day percentages compare actual use:
+    lowest 7-day first, then lowest 5-hour, then the configured order after the current Premium.
+    """
     order = cfg.get("order", [])
     current = cfg.get("premiumAccount")
     start = order.index(current)
     used_up = {n: t for n, t in (cfg.get("usedUpUntil") or {}).items() if t > time.time()}
     cfg["usedUpUntil"] = used_up
-    skipped = []
+    skipped, candidates = [], []
     for offset in range(1, len(order)):
         name = order[(start + offset) % len(order)]
         meta = idx["accounts"].get(name)
@@ -942,12 +953,14 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold):
         if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
-        # Its 7-day reading counts against Standard limits, so only the 5-hour window decides.
+        # Its 7-day reading counts against Standard limits, so it ranks but never excludes.
         if values["five_hour"] >= daily_threshold:
             skipped.append("%s (already at threshold)" % name)
             continue
-        return name, skipped
-    return None, skipped
+        candidates.append((values.get("seven_day", 100), values["five_hour"], offset, name))
+    if not candidates:
+        return None, skipped
+    return min(candidates)[3], skipped
 
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1063,8 +1076,9 @@ def cmd_doctor(args):
         check("Rotation", False, "not configured",
               "Configure rotation: /acct:auto configure --premium <current Premium account> --order <premium>,<next>,...")
     else:
-        check("Rotation", True, "%s, Premium: %s, 5-hour threshold %s%%, order %s" % (
-            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _rotation_threshold(cfg), " → ".join(cfg["order"])))
+        check("Rotation", True, "%s, Premium: %s, 5-hour threshold %s%%, 7-day threshold %s%%, next Premium: least used of %s" % (
+            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _rotation_threshold(cfg), _weekly_threshold(cfg),
+            ", ".join(cfg["order"])))
         if not os.path.isdir(cfg.get("browserProfile") or ""):
             todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
         if not cfg.get("enabled"):
@@ -1129,17 +1143,18 @@ def _cmd_auto_check_locked(args):
         return
     usage = (meta.get("usage") or {}).get("data") or {}
     daily_threshold = _rotation_threshold(cfg)
+    weekly_threshold = _weekly_threshold(cfg)
     values = _usage_window_values(usage)
     save_index(idx)
     if cfg.get("rotationHold") == premium:
-        if not values or _usage_reached_threshold(usage, daily_threshold):
+        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
             return
         cfg.pop("rotationHold", None)
         save_rotation(cfg)
-    if not values or not _usage_reached_threshold(usage, daily_threshold):
+    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
         return
     old_name = premium
-    _mark_used_up(cfg, premium, usage)
+    _mark_used_up(cfg, premium, usage, weekly_threshold)
     new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold)
     save_rotation(cfg)
     save_index(idx)
@@ -1152,7 +1167,9 @@ def _cmd_auto_check_locked(args):
         reached = []
         if values.get("five_hour", -1) >= daily_threshold:
             reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
-        if values.get("seven_day", -1) >= 100:
+        if values.get("seven_day", -1) >= weekly_threshold:
+            reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
+        elif values.get("seven_day", -1) >= 100:
             reached.append("7-day %d%% (used up)" % round(values["seven_day"]))
         print("Usage threshold reached for %s. Transferring Premium from %s to %s..." % (" and ".join(reached), old_name, new_name))
     _set_premium_seat(old_name, new_name, cfg, idx)
