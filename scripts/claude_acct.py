@@ -28,6 +28,7 @@ import getpass
 import hashlib
 import json
 import os
+import random
 import shutil
 import ssl
 import subprocess
@@ -428,7 +429,7 @@ def refresh_stored_token(name, meta, creds):
             pass
 
 
-def refresh_usage(meta, creds, force=False, refresh_name=None):
+def refresh_usage(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_TTL):
     """Update meta['usage'] if the access token is still valid. Return a status string.
 
     With `refresh_name` (a saved account that is not the live login), an expired access token is
@@ -436,7 +437,7 @@ def refresh_usage(meta, creds, force=False, refresh_name=None):
     """
     cache = meta.get("usage")
     now = time.time()
-    if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
+    if cache and not force and now - cache.get("fetchedAt", 0) < ttl:
         return "cache"
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
@@ -460,14 +461,14 @@ def refresh_usage(meta, creds, force=False, refresh_name=None):
     return "ok"
 
 
-def refresh_seat(meta, creds, force=False, refresh_name=None):
+def refresh_seat(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_TTL):
     """Update meta['seat'] with the organization seat tier, under the same rules as refresh_usage.
 
     Return "ok", "cache", or why the seat could not be read (the last known seat is kept).
     """
     cache = meta.get("seat")
     now = time.time()
-    if cache and not force and now - cache.get("fetchedAt", 0) < USAGE_CACHE_TTL:
+    if cache and not force and now - cache.get("fetchedAt", 0) < ttl:
         return "cache"
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
@@ -805,11 +806,15 @@ def save_rotation(cfg):
     write_json_atomic(auto_config_path(), cfg, private=True)
 
 
-# Rotation: 5-hour >= DAILY_THRESHOLD, or (7-day >= WEEKLY_THRESHOLD and 5-hour < WEEKLY_MAX_FIVE_HOUR).
-DAILY_THRESHOLD = 15
-WEEKLY_THRESHOLD = 85
-WEEKLY_MAX_FIVE_HOUR = 20
+# Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
+DAILY_THRESHOLD = 5
+WEEKLY_THRESHOLD = 5
 LEGACY_DAILY_DEFAULT = 90  # written by `configure` before 0.9.1 when no --threshold was given
+# A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro, per the Team plan help page),
+# so a percentage read on one seat is about PREMIUM_FACTOR times the same usage read on the other.
+PREMIUM_FACTOR = 5
+PREMIUM_CHECK_TTL = 30  # seconds; how stale the Premium account's seat and usage may be in a check
+ROTATION_JITTER = 5  # seconds; machines that reach the threshold together do not move the seat at once
 
 
 def _rotation_threshold(cfg):
@@ -823,10 +828,6 @@ def _weekly_threshold(cfg):
     return cfg.get("weeklyThreshold", WEEKLY_THRESHOLD)
 
 
-def _weekly_max_five_hour(cfg):
-    return cfg.get("weeklyMaxFiveHour", WEEKLY_MAX_FIVE_HOUR)
-
-
 def _usage_window_values(usage):
     result = {}
     for key in ("five_hour", "seven_day"):
@@ -836,17 +837,13 @@ def _usage_window_values(usage):
     return result
 
 
-def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100, weekly_max_five_hour=100):
-    """Rotate the Premium account at the 5-hour threshold, at the 7-day threshold while its 5-hour
-    usage is below `weekly_max_five_hour`, or when any window is used up.
+def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100):
+    """Rotate the Premium account at the 5-hour or 7-day threshold, or when any window is used up.
 
-    Only applied to the account holding Premium: its 7-day reading is measured against Premium
-    limits. A Standard member's reading is not, so it never disqualifies a destination.
+    Readings of the account holding Premium are measured against Premium limits.
     """
     values = _usage_window_values(usage)
-    five_hour = values.get("five_hour", -1)
-    return (five_hour >= daily_threshold
-            or (values.get("seven_day", -1) >= weekly_threshold and five_hour < weekly_max_five_hour)
+    return (values.get("five_hour", -1) >= daily_threshold or values.get("seven_day", -1) >= weekly_threshold
             or any(v >= 100 for v in values.values()))
 
 
@@ -877,8 +874,8 @@ def cmd_auto_configure(args):
 
 
 def _trigger_text(cfg):
-    return "5-hour >= %s%%, or 7-day >= %s%% while 5-hour < %s%%, or any window at 100%%" % (
-        _rotation_threshold(cfg), _weekly_threshold(cfg), _weekly_max_five_hour(cfg))
+    return "5-hour >= %s%% or 7-day >= %s%% (or any window at 100%%)" % (
+        _rotation_threshold(cfg), _weekly_threshold(cfg))
 
 
 def cmd_auto_enable(args):
@@ -944,11 +941,13 @@ def _mark_used_up(cfg, name, usage, weekly_threshold=100):
         cfg.setdefault("usedUpUntil", {})[name] = max(resets)
 
 
-def _next_eligible_rotation_account(cfg, idx, daily_threshold):
+def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=100):
     """Pick the least-used Standard account after checking the live status and usage of each.
 
     Standard members share the same limits, so their 7-day percentages compare actual use:
     lowest 7-day first, then lowest 5-hour, then the configured order after the current Premium.
+    An account whose usage would already be at a threshold once read against Premium limits
+    (Standard reading / PREMIUM_FACTOR) is skipped: it would hand the seat on at once.
     """
     order = cfg.get("order", [])
     current = cfg.get("premiumAccount")
@@ -984,8 +983,8 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold):
         if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
-        # Its 7-day reading counts against Standard limits, so it ranks but never excludes.
-        if values["five_hour"] >= daily_threshold:
+        if (values["five_hour"] / PREMIUM_FACTOR >= daily_threshold
+                or values.get("seven_day", 0) / PREMIUM_FACTOR >= weekly_threshold):
             skipped.append("%s (already at threshold)" % name)
             continue
         candidates.append((values.get("seven_day", 100), values["five_hour"], offset, name))
@@ -1128,14 +1127,14 @@ def cmd_doctor(args):
 FOLLOW_GRACE = 300  # seconds after this machine moved the seat; see _follow_premium_seat
 
 
-def _seat_tier(idx, name, live, force=False):
+def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
     """Return (status, tier) of a saved account's seat. The live login's token is never refreshed here."""
     try:
         creds = read_stored_creds(name)
     except AcctError:
         return "credentials unavailable", None
     meta = idx["accounts"][name]
-    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name)
+    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name, ttl=ttl)
     return status, (meta.get("seat") or {}).get("tier")
 
 
@@ -1147,7 +1146,7 @@ def _find_premium_holder(cfg, idx, live, force=False, exclude=None):
     taken as the holder.
     """
     premium = cfg.get("premiumAccount")
-    status, tier = _seat_tier(idx, premium, live, force)
+    status, tier = _seat_tier(idx, premium, live, force, ttl=PREMIUM_CHECK_TTL)
     if status not in ("ok", "cache") or tier == PREMIUM_TIER:
         return premium
     for name in cfg.get("order", []):
@@ -1158,6 +1157,15 @@ def _find_premium_holder(cfg, idx, live, force=False, exclude=None):
         if status == "ok" and tier == PREMIUM_TIER:
             return name
     return None
+
+
+def _forget_seat_readings(idx, *names):
+    """Drop cached seat and usage of accounts whose seat changed: a percentage read against Standard
+    limits would be taken for a Premium one (5x too high) and trigger another rotation."""
+    for name in names:
+        meta = idx["accounts"].get(name) or {}
+        meta.pop("seat", None)
+        meta.pop("usage", None)
 
 
 def _follow_premium_seat(cfg, idx, cur, args):
@@ -1179,6 +1187,10 @@ def _follow_premium_seat(cfg, idx, cur, args):
         cfg["premiumAccount"] = holder
         cfg.pop("rotationHold", None)
         save_rotation(cfg)
+        holder_seat = idx["accounts"][holder].get("seat")
+        _forget_seat_readings(idx, premium, holder)
+        idx["accounts"][holder]["seat"] = holder_seat  # just read fresh: it is Premium
+        save_index(idx)
         print("The Premium seat moved from %s to %s outside this machine." % (premium, holder))
     if cur == holder:
         return False
@@ -1229,7 +1241,7 @@ def _cmd_auto_check_locked(args):
     except AcctError as e:
         raise AcctError("Automatic rotation could not read the Premium account: %s" % e)
     meta = idx["accounts"][premium]
-    status = refresh_usage(meta, creds, force=args.force)
+    status = refresh_usage(meta, creds, force=args.force, ttl=PREMIUM_CHECK_TTL)
     if status not in ("ok", "cache"):
         save_index(idx)
         if args.manual:
@@ -1238,19 +1250,18 @@ def _cmd_auto_check_locked(args):
     usage = (meta.get("usage") or {}).get("data") or {}
     daily_threshold = _rotation_threshold(cfg)
     weekly_threshold = _weekly_threshold(cfg)
-    weekly_max_five_hour = _weekly_max_five_hour(cfg)
     values = _usage_window_values(usage)
     save_index(idx)
     if cfg.get("rotationHold") == premium:
-        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold, weekly_max_five_hour):
+        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
             return
         cfg.pop("rotationHold", None)
         save_rotation(cfg)
-    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold, weekly_max_five_hour):
+    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
         return
     old_name = premium
     _mark_used_up(cfg, premium, usage, weekly_threshold)
-    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold)
+    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
     save_rotation(cfg)
     save_index(idx)
     if not new_name:
@@ -1262,11 +1273,19 @@ def _cmd_auto_check_locked(args):
         reached = []
         if values.get("five_hour", -1) >= daily_threshold:
             reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
-        if values.get("seven_day", -1) >= weekly_threshold and values.get("five_hour", -1) < weekly_max_five_hour:
+        if values.get("seven_day", -1) >= weekly_threshold:
             reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
         elif values.get("seven_day", -1) >= 100:
             reached.append("7-day %d%% (used up)" % round(values["seven_day"]))
         print("Usage threshold reached for %s. Transferring Premium from %s to %s..." % (" and ".join(reached), old_name, new_name))
+    # Other machines may reach the threshold at the same moment. Wait a random moment, then confirm
+    # with a fresh reading that the seat has not moved meanwhile; if it has, follow it instead.
+    time.sleep(random.uniform(0, ROTATION_JITTER))
+    status, tier = _seat_tier(idx, premium, cur, force=True)
+    if status == "ok" and tier != PREMIUM_TIER:
+        save_index(idx)
+        _follow_premium_seat(cfg, idx, cur, argparse.Namespace(force=True, manual=args.manual))
+        return
     _set_premium_seat(old_name, new_name, cfg, idx)
     # Change credentials only after the Members page confirms the tier change.
     cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
@@ -1275,9 +1294,8 @@ def _cmd_auto_check_locked(args):
     cfg["rotatedFrom"] = old_name
     cfg.pop("rotationHold", None)
     save_rotation(cfg)
-    idx = load_index()  # cmd_switch saved its own copy; the cached seats of both members are now wrong
-    for name in (old_name, new_name):
-        idx["accounts"][name].pop("seat", None)
+    idx = load_index()  # cmd_switch saved its own copy
+    _forget_seat_readings(idx, old_name, new_name)
     save_index(idx)
 
 
@@ -1384,7 +1402,7 @@ def main(argv=None):
     autos = p.add_subparsers(dest="auto_cmd", required=True)
     q = autos.add_parser("configure", help="set account rotation order and organization page")
     q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
-    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 15%%)")
+    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 5%%)")
     q.add_argument("--threshold", type=int, help="same as --daily-threshold")
     q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
     q.add_argument("--cdp-url", default="http://127.0.0.1:9222")

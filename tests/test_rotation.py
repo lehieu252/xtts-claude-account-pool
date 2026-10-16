@@ -35,7 +35,7 @@ class RotationCandidateTests(unittest.TestCase):
     def setUp(self):
         self.idx = {"accounts": {
             "info": account(10, 20),
-            "sales": account(92, 40),
+            "sales": account(80, 40),  # 80% Standard ≈ 16% Premium
             "xtts": account(30, 45),
         }}
 
@@ -45,18 +45,18 @@ class RotationCandidateTests(unittest.TestCase):
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90)
+                self.idx, 15, 15)
         self.assertEqual(name, "xtts")
         self.assertEqual(skipped, ["sales (already at threshold)"])
 
     def test_returns_no_candidate_when_all_accounts_are_over_threshold(self):
-        self.idx["accounts"]["xtts"] = account(95, 20)
+        self.idx["accounts"]["xtts"] = account(10, 100)  # 7-day ≈ 20% Premium
         with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
              patch.object(acct, "token_state", return_value="ok"), \
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90)
+                self.idx, 15, 15)
         self.assertIsNone(name)
         self.assertEqual(len(skipped), 2)
 
@@ -66,7 +66,7 @@ class RotationCandidateTests(unittest.TestCase):
              patch.object(acct, "refresh_usage", return_value="error: timeout"):
             name, skipped = acct._next_eligible_rotation_account(
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 90)
+                self.idx, 15, 15)
         self.assertIsNone(name)
         self.assertEqual(skipped, ["sales (usage unavailable)", "xtts (usage unavailable)"])
 
@@ -87,28 +87,35 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
 
     def test_weekly_threshold_defaults_for_existing_configs(self):
-        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 85)
+        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 5)
         self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
 
     def test_old_default_daily_threshold_follows_the_new_default(self):
-        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 15)
-        self.assertEqual(acct._rotation_threshold({}), 15)
+        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 5)
+        self.assertEqual(acct._rotation_threshold({}), 5)
         self.assertEqual(acct._rotation_threshold({"dailyThreshold": 75}), 75)
 
     def check(self, five_hour, seven_day):
         cfg = {"dailyThreshold": 90}  # as saved by `configure` before 0.9.1
         return acct._usage_reached_threshold(account(five_hour, seven_day)["usage"]["data"],
-                                             acct._rotation_threshold(cfg), acct._weekly_threshold(cfg),
-                                             acct._weekly_max_five_hour(cfg))
+                                             acct._rotation_threshold(cfg), acct._weekly_threshold(cfg))
 
     def test_default_rule(self):
-        # 5-hour >= 15%, or (7-day >= 85% and 5-hour < 20%), or any window used up.
-        self.assertFalse(self.check(14, 84))
-        self.assertTrue(self.check(15, 0))
-        self.assertTrue(self.check(0, 85))
-        self.assertTrue(self.check(19, 85))
-        self.assertTrue(self.check(60, 90))  # caught by the 5-hour rule
-        self.assertTrue(self.check(0, 100))
+        # 5-hour >= 5% or 7-day >= 5% (or any window used up).
+        self.assertFalse(self.check(4, 4))
+        self.assertTrue(self.check(5, 0))
+        self.assertTrue(self.check(0, 5))
+        self.assertTrue(self.check(100, 0))
+
+    def test_destination_is_judged_by_its_premium_equivalent_usage(self):
+        idx = {"accounts": {"sales": account(20, 5), "a": account(74, 10), "b": account(10, 75), "c": account(0, 80)}}
+        cfg = {"order": ["sales", "a", "b", "c"], "premiumAccount": "sales"}
+        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_usage", return_value="cache"):
+            name, skipped = acct._next_eligible_rotation_account(cfg, idx, 15, 15)
+        self.assertEqual(name, "a")  # 74% Standard 5-hour ≈ 14.8% Premium: still below 15%
+        self.assertEqual(skipped, ["b (already at threshold)", "c (already at threshold)"])
 
     def test_daily_threshold_triggers_rotation(self):
         usage = account(75, 0)["usage"]["data"]
@@ -284,7 +291,7 @@ class FollowPremiumSeatTests(unittest.TestCase):
         idx = {"accounts": {n: account(0, 0) for n in ("info", "sales", "hieunx", "personal")}}
         statuses = statuses or {}
 
-        def seat(meta, creds, force=False, refresh_name=None):
+        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
             name = creds["name"]
             if name in tiers:
                 meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[name]}
@@ -309,6 +316,21 @@ class FollowPremiumSeatTests(unittest.TestCase):
         self.assertEqual(cfg["premiumAccount"], "hieunx")
         self.assertEqual(switched, ["hieunx"])
         self.assertFalse(rotated)
+
+    def test_usage_read_as_standard_is_dropped_when_following(self):
+        idx = {"accounts": {"sales": account(0, 0), "hieunx": account(0, 17)}}
+        tiers = {"sales": "team_standard", "hieunx": "team_tier_1"}
+        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
+            meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[creds["name"]]}
+            return "ok"
+        cfg = {"order": ["sales", "hieunx"], "premiumAccount": "sales"}
+        with patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
+             patch.object(acct, "refresh_seat", side_effect=seat), \
+             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
+             patch.object(acct, "cmd_switch"), patch.object(acct.sys, "stdout", io.StringIO()):
+            acct._follow_premium_seat(cfg, idx, "sales", argparse.Namespace(force=False, manual=False))
+        self.assertNotIn("usage", idx["accounts"]["hieunx"])  # its 17% 7-day was a Standard reading
+        self.assertEqual(idx["accounts"]["hieunx"]["seat"]["tier"], "team_tier_1")
 
     def test_pool_account_that_is_not_premium_switches_to_the_holder(self):
         cfg, switched, _ = self.run_check("info", {"sales": "team_tier_1"})
@@ -358,6 +380,51 @@ class FollowPremiumSeatTests(unittest.TestCase):
                "rotatedAt": time.time() - acct.FOLLOW_GRACE - 1, "rotatedFrom": "sales"}
         cfg, switched, _ = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
         self.assertEqual(switched, ["sales"])
+
+    def rotate_check(self, tiers_after_wait):
+        """Premium sales is over the threshold; return (cfg, switched, rotated) when the fresh
+        seat reading taken right before the transfer shows `tiers_after_wait`."""
+        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
+        idx = {"accounts": {"info": account(0, 0), "sales": account(20, 5), "hieunx": account(0, 0)}}
+        reads = {"n": 0}
+
+        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
+            name = creds["name"]
+            reads["n"] += 1
+            tiers = {"sales": "team_tier_1"} if not force or name != "sales" else tiers_after_wait
+            if name in tiers:
+                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[name]}
+            elif force:
+                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers_after_wait.get(name, "team_standard")}
+            return "ok"
+
+        switched = []
+        with patch.object(acct, "load_rotation", return_value=cfg), \
+             patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
+             patch.object(acct, "sync_current", return_value="sales"), \
+             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_seat", side_effect=seat), \
+             patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct.random, "uniform", return_value=0), \
+             patch.object(acct, "_set_premium_seat") as rotate, \
+             patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)), \
+             patch.object(acct.sys, "stdout", io.StringIO()):
+            acct._cmd_auto_check_locked(argparse.Namespace(force=False, manual=False))
+        return cfg, switched, rotate.called
+
+    def test_rotates_when_the_fresh_reading_still_shows_premium(self):
+        cfg, switched, rotated = self.rotate_check({"sales": "team_tier_1"})
+        self.assertTrue(rotated)
+        self.assertEqual(switched, ["hieunx"])  # tie with info: the order after sales decides
+        self.assertEqual(cfg["premiumAccount"], "hieunx")
+
+    def test_seat_moved_by_another_machine_meanwhile_is_followed_not_moved_again(self):
+        cfg, switched, rotated = self.rotate_check({"sales": "team_standard", "info": "team_tier_1"})
+        self.assertFalse(rotated)
+        self.assertEqual(switched, ["info"])  # another machine chose info; this one follows
+        self.assertEqual(cfg["premiumAccount"], "info")
 
     def test_seat_refresh_renews_the_token_of_an_idle_account_only(self):
         expired = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 1, "refreshToken": "r"}}
