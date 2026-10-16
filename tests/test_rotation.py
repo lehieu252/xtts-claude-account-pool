@@ -87,7 +87,7 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
 
     def test_weekly_threshold_defaults_for_existing_configs(self):
-        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 5)
+        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 10)
         self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
 
     def test_old_default_daily_threshold_follows_the_new_default(self):
@@ -101,11 +101,22 @@ class ThresholdTests(unittest.TestCase):
                                              acct._rotation_threshold(cfg), acct._weekly_threshold(cfg))
 
     def test_default_rule(self):
-        # 5-hour >= 5% or 7-day >= 5% (or any window used up).
-        self.assertFalse(self.check(4, 4))
+        # 5-hour >= 5% or 7-day >= 10% (or any window used up).
+        self.assertFalse(self.check(4, 9))
         self.assertTrue(self.check(5, 0))
-        self.assertTrue(self.check(0, 5))
+        self.assertTrue(self.check(0, 10))
         self.assertTrue(self.check(100, 0))
+
+    def test_default_destination_limits_are_25_and_50_percent_standard(self):
+        idx = {"accounts": {"p": account(10, 0), "a": account(24, 49), "b": account(25, 0), "c": account(0, 50)}}
+        cfg = {"order": ["p", "a", "b", "c"], "premiumAccount": "p"}
+        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_usage", return_value="cache"):
+            name, skipped = acct._next_eligible_rotation_account(
+                cfg, idx, acct._rotation_threshold({}), acct._weekly_threshold({}))
+        self.assertEqual(name, "a")
+        self.assertEqual(skipped, ["b (already at threshold)", "c (already at threshold)"])
 
     def test_destination_is_judged_by_its_premium_equivalent_usage(self):
         idx = {"accounts": {"sales": account(20, 5), "a": account(74, 10), "b": account(10, 75), "c": account(0, 80)}}

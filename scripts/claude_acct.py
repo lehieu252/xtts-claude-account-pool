@@ -808,7 +808,7 @@ def save_rotation(cfg):
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 5
-WEEKLY_THRESHOLD = 5
+WEEKLY_THRESHOLD = 10
 LEGACY_DAILY_DEFAULT = 90  # written by `configure` before 0.9.1 when no --threshold was given
 # A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro, per the Team plan help page),
 # so a percentage read on one seat is about PREMIUM_FACTOR times the same usage read on the other.
