@@ -23,6 +23,7 @@ SPEC.loader.exec_module(acct)
 # Keep the rotation log and its state out of the real ~/.claude-acct while tests run.
 os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_LOG_URL", None)
+acct.LOG_URL = ""  # never upload test events to the shared sheet
 
 
 def account(five_hour, seven_day):
