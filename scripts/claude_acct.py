@@ -28,6 +28,7 @@ import getpass
 import hashlib
 import json
 import os
+import platform
 import random
 import shutil
 import ssl
@@ -806,6 +807,112 @@ def save_rotation(cfg):
     write_json_atomic(auto_config_path(), cfg, private=True)
 
 
+# Rotation log: one JSON line per decision or failure in ~/.claude-acct/rotation.log, mirrored to
+# a shared Google Sheet (an Apps Script web app) so the machines of the pool can be compared.
+LOG_URL = "https://script.google.com/macros/s/AKfycbzYV_mDP8TZfoxRNThhyiqdzHpIiBdINEizW1RNVp1C1pBRkShhaoEai1w0RfAihJ_9TA/exec"  # Apps Script web app (scripts/log_sheet.gs); empty keeps the log local
+LOG_MAX_BYTES = 5_000_000
+HEARTBEAT_EVERY = 600  # seconds; at most one heartbeat per machine
+QUIET_EVERY = 1800  # seconds; repeated states (no destination, unreadable usage) are logged at most this often
+_hook = None  # the hook event that started this process, set by main()
+
+
+def _log_url():
+    return os.environ.get("CLAUDE_ACCT_LOG_URL") or load_rotation().get("logUrl") or LOG_URL
+
+
+def plugin_version():
+    return (read_json(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
+
+
+def machine_name():
+    try:
+        r = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True, timeout=3)
+        name = r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        name = ""
+    return name or platform.node()
+
+
+def log_event(event, message="", every=None, key=None, **fields):
+    """Record one rotation event. `every` (seconds) throttles events sharing `key`. Never raises."""
+    try:
+        os.makedirs(store_dir(), exist_ok=True)
+        now = time.time()
+        if every:
+            state_path = os.path.join(store_dir(), "log-state.json")
+            state = read_json(state_path, {}) or {}
+            key = key or event
+            if now - state.get(key, 0) < every:
+                return
+            state[key] = now
+            write_json_atomic(state_path, state)
+        rec = {"ts": dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), "machine": machine_name(),
+               "host": platform.node(), "version": plugin_version(), "hook": _hook or "manual", "event": event}
+        rec.update({k: v for k, v in fields.items() if v is not None})
+        rec["message"] = message
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
+        path = os.path.join(store_dir(), "rotation.log")
+        if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+        if _log_url():
+            with open(os.path.join(store_dir(), "log-outbox.jsonl"), "a", encoding="utf-8") as f:
+                f.write(line)
+            _spawn_log_flush()
+    except Exception:  # the log must never break a hook
+        pass
+
+
+def _spawn_log_flush():
+    """Upload the outbox in a detached process, so a slow network never delays a prompt or tool call."""
+    subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "log-flush"],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def cmd_log_flush(args):
+    url = _log_url()
+    if not url:
+        return
+    lock_path = os.path.join(store_dir(), "log-flush.lock")
+    if not _acquire_lock(lock_path):
+        return  # the running flush, or the next one, sends these events too
+    try:
+        outbox = os.path.join(store_dir(), "log-outbox.jsonl")
+        sending = outbox + ".sending"  # left over when a previous upload failed: send it first
+        if not os.path.exists(sending):
+            if not os.path.exists(outbox):
+                return
+            os.replace(outbox, sending)
+        events = []
+        with open(sending, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    pass
+        if events:
+            body = json.dumps({"events": events}, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(req, timeout=20) as r:
+                if r.read(16).decode("utf-8", "replace").strip() != "ok":
+                    return
+        os.unlink(sending)
+    except Exception:
+        pass
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+
+
+def _usage_fields(meta):
+    values = _usage_window_values(((meta or {}).get("usage") or {}).get("data") or {})
+    return {"p5h": values.get("five_hour"), "p7d": values.get("seven_day")}
+
+
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 5
 WEEKLY_THRESHOLD = 10
@@ -1179,6 +1286,8 @@ def _follow_premium_seat(cfg, idx, cur, args):
     save_index(idx)
     if holder is None:
         # Rotating would ask the Members page to demote an account that is not Premium.
+        log_event("no_holder", "%s is not Premium and no saved pool account holds the seat" % premium,
+                  every=QUIET_EVERY, live=cur, premium=premium)
         if args.manual:
             raise AcctError("%s no longer holds the Premium seat, and no saved account in the rotation order does. "
                             "No seat or account was changed." % premium)
@@ -1192,10 +1301,21 @@ def _follow_premium_seat(cfg, idx, cur, args):
         idx["accounts"][holder]["seat"] = holder_seat  # just read fresh: it is Premium
         save_index(idx)
         print("The Premium seat moved from %s to %s outside this machine." % (premium, holder))
+        log_event("follow", "seat moved outside this machine", live=cur, premium=premium, target=holder)
     if cur == holder:
         return False
-    cmd_switch(argparse.Namespace(name=holder, force=False, no_wait=False))
+    _logged_switch(cur, holder)
     return True
+
+
+def _logged_switch(cur, target):
+    try:
+        cmd_switch(argparse.Namespace(name=target, force=False, no_wait=False))
+    except Exception as e:
+        log_event("switch_fail", str(e)[-500:], live=cur, target=target)
+        e.logged = True
+        raise
+    log_event("switch_ok", "", live=cur, target=target)
 
 
 def _set_premium_seat(old_name, new_name, cfg, idx):
@@ -1243,6 +1363,7 @@ def _cmd_auto_check_locked(args):
     meta = idx["accounts"][premium]
     status = refresh_usage(meta, creds, force=args.force, ttl=PREMIUM_CHECK_TTL)
     if status not in ("ok", "cache"):
+        log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, live=cur, premium=premium)
         save_index(idx)
         if args.manual:
             raise AcctError("Cannot check Premium usage (%s); rotation did not run." % status)
@@ -1264,7 +1385,9 @@ def _cmd_auto_check_locked(args):
     new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
     save_rotation(cfg)
     save_index(idx)
+    fields = dict(live=cur, premium=premium, **_usage_fields(meta))
     if not new_name:
+        log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
         if args.manual:
             raise AcctError("No eligible account for Premium: every other account is at the usage threshold or has an expired login / unavailable usage. "
                             "No seat or account was changed. Checked: %s" % (", ".join(skipped) or "none"))
@@ -1283,12 +1406,21 @@ def _cmd_auto_check_locked(args):
     time.sleep(random.uniform(0, ROTATION_JITTER))
     status, tier = _seat_tier(idx, premium, cur, force=True)
     if status == "ok" and tier != PREMIUM_TIER:
+        log_event("move_skipped", "seat moved by another machine during the wait", target=new_name, **fields)
         save_index(idx)
         _follow_premium_seat(cfg, idx, cur, argparse.Namespace(force=True, manual=args.manual))
         return
-    _set_premium_seat(old_name, new_name, cfg, idx)
+    log_event("move_start", "threshold reached", target=new_name, **fields)
+    started = time.time()
+    try:
+        _set_premium_seat(old_name, new_name, cfg, idx)
+    except Exception as e:
+        log_event("move_fail", "%ds: %s" % (time.time() - started, str(e)[-800:]), target=new_name, **fields)
+        e.logged = True
+        raise
+    log_event("move_ok", "%ds" % (time.time() - started), target=new_name, **fields)
     # Change credentials only after the Members page confirms the tier change.
-    cmd_switch(argparse.Namespace(name=new_name, force=False, no_wait=False))
+    _logged_switch(cur, new_name)
     cfg["premiumAccount"] = new_name
     cfg["rotatedAt"] = time.time()
     cfg["rotatedFrom"] = old_name
@@ -1319,8 +1451,22 @@ def _acquire_lock(lock_path, wait=0):
         time.sleep(2)
 
 
+def _heartbeat(cfg):
+    try:
+        idx = load_index()
+        premium = cfg.get("premiumAccount")
+        log_event("heartbeat", "rotation %s; %s" % ("ON" if cfg.get("enabled") else "OFF", _trigger_text(cfg)),
+                  every=HEARTBEAT_EVERY, live=current_name(idx), premium=premium,
+                  **_usage_fields(idx["accounts"].get(premium)))
+    except Exception:
+        pass
+
+
 def cmd_auto_check(args, lock_wait=0):
-    if not load_rotation().get("enabled"):
+    cfg = load_rotation()
+    if cfg.get("order"):
+        _heartbeat(cfg)
+    if not cfg.get("enabled"):
         return
     lock_path = os.path.join(store_dir(), "rotation.lock")
     os.makedirs(store_dir(), exist_ok=True)
@@ -1328,6 +1474,10 @@ def cmd_auto_check(args, lock_wait=0):
         return
     try:
         _cmd_auto_check_locked(args)
+    except Exception as e:
+        if not getattr(e, "logged", False):
+            log_event("error", ("%s: %s" % (type(e).__name__, e))[-800:])
+        raise
     finally:
         try:
             os.unlink(lock_path)
@@ -1361,8 +1511,13 @@ def cmd_auto_recover(args):
     # Reuse normal checks: live usage must confirm the configured threshold, and
     # the destination must have fresh usage below both thresholds. Wait for a
     # check that is already rotating instead of skipping it.
-    cmd_auto_check(argparse.Namespace(force=True, manual=False), lock_wait=240)
-    after = current_name(load_index())
+    try:
+        cmd_auto_check(argparse.Namespace(force=True, manual=False), lock_wait=240)
+    finally:
+        after = current_name(load_index())
+        log_event("recover", "usage-limit stop; %s" % ("switched, task continues" if before and after and after != before
+                                                        else "no switch, session stays stopped"),
+                  live=before, target=after)
     if before and after and after != before:
         sys.stderr.write(REWAKE_MESSAGE % (before, after))
         sys.exit(REWAKE_EXIT)
@@ -1414,10 +1569,14 @@ def main(argv=None):
     q = autos.add_parser("browser", help="open the persistent admin browser profile for one-time sign-in"); q.set_defaults(fn=cmd_auto_browser)
     q = autos.add_parser("check", help="check usage and rotate if threshold is reached")
     q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
+    q.add_argument("--hook", help=argparse.SUPPRESS)
     q.set_defaults(fn=cmd_auto_check)
     q = autos.add_parser("recover", help=argparse.SUPPRESS)
-    q.set_defaults(fn=cmd_auto_recover)
+    q.set_defaults(fn=cmd_auto_recover, hook="StopFailure")
+    p = sub.add_parser("log-flush", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_log_flush)
     args = ap.parse_args(argv)
+    global _hook
+    _hook = getattr(args, "hook", None)
     try:
         if hasattr(args, "name") and not args.name:
             hint = {"login": "/acct:login", "save": "/acct:save", "switch": "/acct:switch", "remove": "/acct:logout"}[args.cmd]

@@ -20,6 +20,10 @@ acct = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = acct
 SPEC.loader.exec_module(acct)
 
+# Keep the rotation log and its state out of the real ~/.claude-acct while tests run.
+os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
+os.environ.pop("CLAUDE_ACCT_LOG_URL", None)
+
 
 def account(five_hour, seven_day):
     return {
@@ -444,6 +448,101 @@ class FollowPremiumSeatTests(unittest.TestCase):
             refresh.assert_not_called()
             self.assertEqual(acct.refresh_seat({}, dict(expired), refresh_name="b"), "revoked")
             refresh.assert_called_once()
+
+
+class RotationLogTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = patch.dict(os.environ, {"CLAUDE_ACCT_HOME": self.dir})
+        self.env.start()
+        self.machine = patch.object(acct, "machine_name", return_value="Tester")
+        self.machine.start()
+
+    def tearDown(self):
+        self.machine.stop()
+        self.env.stop()
+        shutil.rmtree(self.dir)
+
+    def lines(self, name="rotation.log"):
+        path = os.path.join(self.dir, name)
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(l) for l in f]
+
+    def test_writes_one_json_line_with_machine_version_and_fields(self):
+        acct.log_event("move_ok", "12s", live="a@x.vn", target="b@x.vn", p5h=6.0)
+        (rec,) = self.lines()
+        self.assertEqual((rec["event"], rec["machine"], rec["live"], rec["target"], rec["p5h"], rec["message"]),
+                         ("move_ok", "Tester", "a@x.vn", "b@x.vn", 6.0, "12s"))
+        self.assertIn("version", rec)
+        self.assertEqual(self.lines("log-outbox.jsonl"), [])  # no URL: local only
+
+    def test_throttled_events_are_logged_once_per_period(self):
+        for _ in range(3):
+            acct.log_event("no_destination", "x", every=1800)
+        acct.log_event("heartbeat", "y", every=600)
+        self.assertEqual([r["event"] for r in self.lines()], ["no_destination", "heartbeat"])
+
+    def test_with_url_events_go_to_the_outbox_and_a_flush_starts(self):
+        with patch.dict(os.environ, {"CLAUDE_ACCT_LOG_URL": "https://example.invalid/exec"}), \
+             patch.object(acct, "_spawn_log_flush") as spawn:
+            acct.log_event("follow", "seat moved")
+        self.assertEqual(len(self.lines("log-outbox.jsonl")), 1)
+        spawn.assert_called_once()
+
+    def flush(self, reply):
+        class Resp(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        sent = []
+        def fake_urlopen(req, timeout):
+            sent.append(json.loads(req.data.decode("utf-8")))
+            if isinstance(reply, Exception):
+                raise reply
+            return Resp(reply)
+        with patch.dict(os.environ, {"CLAUDE_ACCT_LOG_URL": "https://example.invalid/exec"}), \
+             patch.object(acct, "_spawn_log_flush"), patch.object(acct, "urlopen", side_effect=fake_urlopen):
+            acct.log_event("a", "1")
+            acct.log_event("b", "2")
+            acct.cmd_log_flush(None)
+        return sent
+
+    def test_flush_sends_the_outbox_in_one_batch_and_clears_it(self):
+        sent = self.flush(b"ok")
+        self.assertEqual([e["event"] for e in sent[0]["events"]], ["a", "b"])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "log-outbox.jsonl.sending")))
+
+    def test_failed_upload_keeps_the_events_for_the_next_flush(self):
+        self.flush(OSError("offline"))
+        self.assertEqual(len(self.lines("log-outbox.jsonl.sending")), 2)
+
+    def test_logging_never_raises(self):
+        with patch.object(acct, "store_dir", side_effect=OSError("read-only")):
+            acct.log_event("error", "x")
+
+    def test_failed_seat_move_is_logged_once(self):
+        cfg = {"enabled": True, "order": ["info", "sales"], "premiumAccount": "sales"}
+        idx = {"accounts": {"info": account(0, 0), "sales": account(20, 5)}}
+        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
+            meta["seat"] = {"fetchedAt": time.time(), "tier": "team_tier_1" if creds["name"] == "sales" else "team_standard"}
+            return "ok"
+        with patch.object(acct, "load_rotation", return_value=cfg), \
+             patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
+             patch.object(acct, "sync_current", return_value="sales"), \
+             patch.object(acct, "current_name", return_value="sales"), \
+             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_seat", side_effect=seat), \
+             patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct.random, "uniform", return_value=0), \
+             patch.object(acct, "_set_premium_seat", side_effect=acct.AcctError("not signed in")):
+            with self.assertRaises(acct.AcctError):
+                acct.cmd_auto_check(argparse.Namespace(force=False, manual=False))
+        events = [r["event"] for r in self.lines()]
+        self.assertEqual(events, ["heartbeat", "move_start", "move_fail"])
+        self.assertIn("not signed in", self.lines()[-1]["message"])
 
 
 class StopFailureRecoveryTests(unittest.TestCase):
