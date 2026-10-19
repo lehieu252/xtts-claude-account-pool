@@ -760,6 +760,7 @@ def cmd_list(args):
               % ((live_profile or {}).get("emailAddress") or "(unknown)"))
     else:
         print("\n▶ = current account.")
+    print("acct plugin %s" % plugin_version())
 
 
 def cmd_switch(args):
@@ -1011,8 +1012,10 @@ def cmd_auto_disable(args):
 def cmd_auto_status(args):
     cfg = load_rotation()
     if not cfg.get("order"):
+        print("acct plugin %s" % plugin_version())
         print("Automatic Premium rotation is not configured.")
         return
+    print("acct plugin %s" % plugin_version())
     print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
     print("Rotates at: %s" % _trigger_text(cfg))
     print("Next Premium: the least-used account (lowest 7-day, then 5-hour usage); ties follow the order")
@@ -1167,6 +1170,7 @@ def cmd_doctor(args):
         if not ok and fix:
             todo.append(fix)
 
+    check("acct plugin", True, plugin_version())
     check("Python", True, "%d.%d" % sys.version_info[:2])
     node = shutil.which(os.environ.get("CLAUDE_ACCT_NODE", "node"))
     node_version = None
