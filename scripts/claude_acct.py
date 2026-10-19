@@ -908,6 +908,13 @@ def cmd_log_flush(args):
             pass
 
 
+def _logged_error(message):
+    """An AcctError for a state that was just logged under its own event, so it is not logged again as an error."""
+    e = AcctError(message)
+    e.logged = True
+    return e
+
+
 def _usage_fields(meta):
     values = _usage_window_values(((meta or {}).get("usage") or {}).get("data") or {})
     return {"p5h": values.get("five_hour"), "p7d": values.get("seven_day")}
@@ -1289,7 +1296,7 @@ def _follow_premium_seat(cfg, idx, cur, args):
         log_event("no_holder", "%s is not Premium and no saved pool account holds the seat" % premium,
                   every=QUIET_EVERY, live=cur, premium=premium)
         if args.manual:
-            raise AcctError("%s no longer holds the Premium seat, and no saved account in the rotation order does. "
+            raise _logged_error("%s no longer holds the Premium seat, and no saved account in the rotation order does. "
                             "No seat or account was changed." % premium)
         return True
     if holder != premium:
@@ -1366,7 +1373,7 @@ def _cmd_auto_check_locked(args):
         log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, live=cur, premium=premium)
         save_index(idx)
         if args.manual:
-            raise AcctError("Cannot check Premium usage (%s); rotation did not run." % status)
+            raise _logged_error("Cannot check Premium usage (%s); rotation did not run." % status)
         return
     usage = (meta.get("usage") or {}).get("data") or {}
     daily_threshold = _rotation_threshold(cfg)
@@ -1389,7 +1396,7 @@ def _cmd_auto_check_locked(args):
     if not new_name:
         log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
         if args.manual:
-            raise AcctError("No eligible account for Premium: every other account is at the usage threshold or has an expired login / unavailable usage. "
+            raise _logged_error("No eligible account for Premium: every other account is at the usage threshold or has an expired login / unavailable usage. "
                             "No seat or account was changed. Checked: %s" % (", ".join(skipped) or "none"))
         return
     if args.manual:
