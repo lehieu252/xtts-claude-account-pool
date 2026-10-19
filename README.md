@@ -6,7 +6,7 @@ A Claude Code plugin for people with more than one Claude account (claude.ai log
 |---|---|
 | `/acct:login <email>` or `/acct:login <name> [email]` | Log in to any account (new, or again) and save it. With just an email, the email is the account name, and the script checks that you signed in with that email in the browser. Opens a terminal window to finish the login; **your current account is not changed** |
 | `/acct:save <name>` | Save the account you are **currently logged in** with, no new login needed |
-| `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, organization seat (Premium / Standard / No seat), 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account |
+| `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, organization seat (Premium / Standard / No seat), 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account. With rotation configured, it also shows whether the Premium account has reached its threshold and which account would take the seat next, or why each account is skipped |
 | `/acct:switch <name> [--no-wait]` | Switch to another saved account and **keep working in the same chat**. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
 | `/acct:auto <configure|enable|disable|status|check>` | Move the organization's Premium seat to the least-used saved account when the active Premium account reaches its usage threshold |
 | `/acct:logout <name>` | Remove an account from the list (deletes its saved token) |

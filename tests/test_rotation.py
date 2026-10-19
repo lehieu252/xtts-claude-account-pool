@@ -52,7 +52,7 @@ class RotationCandidateTests(unittest.TestCase):
                 {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
                 self.idx, 15, 15)
         self.assertEqual(name, "xtts")
-        self.assertEqual(skipped, ["sales (already at threshold)"])
+        self.assertEqual(skipped, ["sales (already at threshold: 5-hour 80% ≥ 75%)"])
 
     def test_returns_no_candidate_when_all_accounts_are_over_threshold(self):
         self.idx["accounts"]["xtts"] = account(10, 100)  # 7-day ≈ 20% Premium
@@ -121,7 +121,7 @@ class ThresholdTests(unittest.TestCase):
             name, skipped = acct._next_eligible_rotation_account(
                 cfg, idx, acct._rotation_threshold({}), acct._weekly_threshold({}))
         self.assertEqual(name, "a")
-        self.assertEqual(skipped, ["b (already at threshold)", "c (already at threshold)"])
+        self.assertEqual(skipped, ["b (already at threshold: 5-hour 25% ≥ 25%)", "c (already at threshold: 7-day 50% ≥ 50%)"])
 
     def test_destination_is_judged_by_its_premium_equivalent_usage(self):
         idx = {"accounts": {"sales": account(20, 5), "a": account(74, 10), "b": account(10, 75), "c": account(0, 80)}}
@@ -131,7 +131,7 @@ class ThresholdTests(unittest.TestCase):
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(cfg, idx, 15, 15)
         self.assertEqual(name, "a")  # 74% Standard 5-hour ≈ 14.8% Premium: still below 15%
-        self.assertEqual(skipped, ["b (already at threshold)", "c (already at threshold)"])
+        self.assertEqual(skipped, ["b (already at threshold: 7-day 75% ≥ 75%)", "c (already at threshold: 7-day 80% ≥ 75%)"])
 
     def test_daily_threshold_triggers_rotation(self):
         usage = account(75, 0)["usage"]["data"]
@@ -449,6 +449,35 @@ class FollowPremiumSeatTests(unittest.TestCase):
             refresh.assert_not_called()
             self.assertEqual(acct.refresh_seat({}, dict(expired), refresh_name="b"), "revoked")
             refresh.assert_called_once()
+
+
+class RotationPreviewTests(unittest.TestCase):
+    def preview(self, accounts):
+        cfg = {"enabled": True, "order": ["sales", "a", "b"], "premiumAccount": "sales"}
+        idx = {"accounts": accounts}
+        with patch.object(acct, "load_rotation", return_value=cfg), \
+             patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
+             patch.object(acct, "token_state", return_value="ok"), \
+             patch.object(acct, "refresh_usage", return_value="cache") as usage, \
+             patch.object(acct.sys, "stdout", io.StringIO()) as out:
+            acct._print_rotation_preview(idx, live="a")
+        return out.getvalue(), usage
+
+    def test_names_the_next_premium(self):
+        out, _ = self.preview({"sales": account(70, 46), "a": account(0, 10), "b": account(0, 5)})
+        self.assertIn("threshold reached", out)
+        self.assertIn("Next Premium: **b**", out)
+
+    def test_explains_why_no_account_is_eligible(self):
+        out, _ = self.preview({"sales": account(70, 46), "a": account(100, 10), "b": account(0, 53)})
+        self.assertIn("Next Premium: none eligible; sales keeps the seat", out)
+        self.assertIn("- a (already at threshold: 5-hour 100% ≥ 25%)", out)
+        self.assertIn("- b (already at threshold: 7-day 53% ≥ 50%)", out)
+
+    def test_never_refreshes_the_token_of_the_live_login(self):
+        _, usage = self.preview({"sales": account(70, 46), "a": account(0, 10), "b": account(0, 5)})
+        refresh_names = {c.kwargs.get("refresh_name") for c in usage.call_args_list}
+        self.assertNotIn("a", refresh_names)
 
 
 class RotationLogTests(unittest.TestCase):

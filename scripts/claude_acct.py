@@ -760,7 +760,35 @@ def cmd_list(args):
               % ((live_profile or {}).get("emailAddress") or "(unknown)"))
     else:
         print("\n▶ = current account.")
+    _print_rotation_preview(idx, live)
     print("acct plugin %s" % plugin_version())
+
+
+def _print_rotation_preview(idx, live):
+    """Where the Premium seat would go next, or why no account can take it. Changes nothing."""
+    cfg = load_rotation()
+    premium = cfg.get("premiumAccount")
+    if not cfg.get("order") or premium not in idx["accounts"] or premium not in cfg["order"]:
+        return
+    daily, weekly = _rotation_threshold(cfg), _weekly_threshold(cfg)
+    usage = ((idx["accounts"][premium].get("usage") or {}).get("data")) or {}
+    values = _usage_window_values(usage)
+    state = ("reached" if values and _usage_reached_threshold(usage, daily, weekly) else "not reached") if values else "unknown"
+    print("\nRotation %s, rotates at %s." % ("ON" if cfg.get("enabled") else "OFF", _trigger_text(cfg)))
+    print("Premium %s: 5-hour %s, 7-day %s; threshold %s." % (
+        premium, "%d%%" % round(values["five_hour"]) if "five_hour" in values else "?",
+        "%d%%" % round(values["seven_day"]) if "seven_day" in values else "?", state))
+    try:
+        name, skipped = _next_eligible_rotation_account(dict(cfg), idx, daily, weekly, live=live)
+    except Exception as e:
+        print("Next Premium: could not be determined (%s)." % e)
+        return
+    if name:
+        print("Next Premium: **%s**" % name)
+    else:
+        print("Next Premium: none eligible; %s keeps the seat. Why each account is skipped:" % premium)
+    for reason in skipped:
+        print("- %s" % reason)
 
 
 def cmd_switch(args):
@@ -1058,7 +1086,7 @@ def _mark_used_up(cfg, name, usage, weekly_threshold=100):
         cfg.setdefault("usedUpUntil", {})[name] = max(resets)
 
 
-def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=100):
+def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=100, live=None):
     """Pick the least-used Standard account after checking the live status and usage of each.
 
     Standard members share the same limits, so their 7-day percentages compare actual use:
@@ -1091,8 +1119,8 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=
         if token_state(meta, creds) == "relogin":
             skipped.append("%s (login expired/revoked)" % name)
             continue
-        # Destinations are never the live login (rotation only runs while that is the Premium account).
-        status = refresh_usage(meta, creds, refresh_name=name)
+        # Never refresh the token of the live login: Claude Code owns it.
+        status = refresh_usage(meta, creds, refresh_name=None if name == live else name)
         usage = (meta.get("usage") or {}).get("data") or {}
         values = _usage_window_values(usage)
         # Fail closed: do not move Premium onto an account without a fresh 5-hour
@@ -1100,9 +1128,11 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=
         if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
-        if (values["five_hour"] / PREMIUM_FACTOR >= daily_threshold
-                or values.get("seven_day", 0) / PREMIUM_FACTOR >= weekly_threshold):
-            skipped.append("%s (already at threshold)" % name)
+        over = ["%s %d%% ≥ %d%%" % (label, round(values.get(key, 0)), limit * PREMIUM_FACTOR)
+                for key, label, limit in (("five_hour", "5-hour", daily_threshold), ("seven_day", "7-day", weekly_threshold))
+                if values.get(key, 0) / PREMIUM_FACTOR >= limit]
+        if over:
+            skipped.append("%s (already at threshold: %s)" % (name, ", ".join(over)))
             continue
         candidates.append((values.get("seven_day", 100), values["five_hour"], offset, name))
     if not candidates:
