@@ -539,6 +539,47 @@ class JoinAndServiceTests(unittest.TestCase):
         self.assertEqual(seen[1][1].get("x-pool-mover-key"), "mk")
 
 
+class WindowsServiceTests(unittest.TestCase):
+    """Machine 2 on Windows: a Task Scheduler task runs a loop that calls `auto serve-once` every 30 seconds."""
+
+    def test_launcher_is_valid_python_and_runs_serve_once_every_interval(self):
+        import ast
+        path = acct._write_windows_mover_launcher()
+        text = open(path, encoding="utf-8").read()
+        ast.parse(text)
+        self.assertIn('"auto", "serve-once"', text)
+        self.assertIn("INTERVAL = 30", text)
+        self.assertIn("installed_plugins.json", text)
+        self.assertIn(repr(os.path.abspath(acct.__file__)), text)
+
+    def test_task_runs_at_logon_in_the_interactive_session_and_starts_now(self):
+        seen = []
+        with Patches(patch.object(acct, "_is_windows", return_value=True),
+                     patch.object(acct, "_ps", side_effect=lambda script: seen.append(script) or argparse.Namespace(returncode=0, stdout="", stderr=""))):
+            acct._install_mover_service()
+        script = seen[0]
+        for part in ("-AtLogOn", "-LogonType Interactive", "-MultipleInstances IgnoreNew", "Register-ScheduledTask -TaskName 'XTTS_Acct_Mover'",
+                     "Start-ScheduledTask -TaskName 'XTTS_Acct_Mover'", "acct-mover.py"):
+            self.assertIn(part, script)
+
+    def test_task_failure_is_reported(self):
+        with Patches(patch.object(acct, "_is_windows", return_value=True),
+                     patch.object(acct, "_ps", return_value=argparse.Namespace(returncode=1, stdout="", stderr="Access is denied"))):
+            with self.assertRaises(acct.AcctError) as e:
+                acct._install_mover_service()
+        self.assertIn("Access is denied", str(e.exception))
+
+    def test_service_state_and_removal(self):
+        with Patches(patch.object(acct, "_is_windows", return_value=True),
+                     patch.object(acct, "_ps", return_value=argparse.Namespace(returncode=0, stdout="Running\n", stderr=""))):
+            self.assertTrue(acct._mover_service_loaded())
+        seen = []
+        with Patches(patch.object(acct, "_is_windows", return_value=True),
+                     patch.object(acct, "_ps", side_effect=lambda script: seen.append(script))):
+            acct._uninstall_mover_service()
+        self.assertIn("Unregister-ScheduledTask -TaskName 'XTTS_Acct_Mover'", seen[0])
+
+
 class LoginAllTests(unittest.TestCase):
     def test_logs_in_only_the_missing_or_expired_pool_accounts_in_one_terminal(self):
         idx = pool_index()

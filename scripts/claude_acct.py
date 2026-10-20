@@ -708,7 +708,9 @@ def open_terminal(script):
             return r.returncode == 0
         if sys.platform.startswith("win") or os.environ.get("MSYSTEM"):
             # Git for Windows puts only git.exe on the Windows PATH; use the bash Claude Code runs with.
-            bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash") or "bash"
+            bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash") or next(
+                (b for b in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe")
+                 if os.path.isfile(b)), "bash")
             subprocess.Popen(["cmd.exe", "/c", "start", "", bash, script])
             return True
         for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"], ["konsole", "-e"], ["xterm", "-e"]):
@@ -941,7 +943,8 @@ POOL_URL = "https://xtts.xtgroup.vn/pool"
 STATE_TTL = 5  # seconds a machine reuses the state it last fetched
 PREPARE_TIMEOUT = 120  # seconds machine 2 waits for the working machines to switch to the backup account
 MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move before it tries again
-MOVER_LABEL = "vn.xtgroup.acct-mover"
+MOVER_LABEL = "vn.xtgroup.acct-mover"  # launchd label (macOS)
+MOVER_TASK = "XTTS_Acct_Mover"  # Task Scheduler name (Windows)
 MOVER_INTERVAL = 30  # seconds between two runs of the seat-moving service
 
 LOG_MAX_BYTES = 5_000_000
@@ -1459,9 +1462,94 @@ def _write_mover_launcher():
     return path
 
 
+def _is_windows():
+    return sys.platform.startswith("win") or bool(os.environ.get("MSYSTEM"))
+
+
+_WINDOWS_LAUNCHER = r'''"""Seat-moving service of the acct plugin (machine 2, Windows). Started by Task Scheduler at logon."""
+import json, os, subprocess, sys, time
+
+STORE = os.environ.get("CLAUDE_ACCT_HOME") or os.path.join(os.path.expanduser("~"), ".claude-acct")
+FALLBACK = __FALLBACK__
+INTERVAL = __INTERVAL__
+PYTHON = os.path.join(os.path.dirname(sys.executable), "python.exe")
+if not os.path.isfile(PYTHON):
+    PYTHON = sys.executable
+
+
+def script():
+    """The installed plugin version, so plugin updates apply without reinstalling the task."""
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude", "plugins", "installed_plugins.json"), encoding="utf-8") as f:
+            plugins = json.load(f).get("plugins") or {}
+        for key, entries in plugins.items():
+            if key.startswith("acct@") and entries:
+                s = os.path.join(entries[0].get("installPath", ""), "scripts", "claude_acct.py")
+                if os.path.isfile(s):
+                    return s
+    except Exception:
+        pass
+    return FALLBACK
+
+
+log_path = os.path.join(STORE, "mover.out.log")
+while True:
+    try:
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 5000000:
+            os.replace(log_path, log_path + ".1")
+        with open(log_path, "a", encoding="utf-8") as log:
+            subprocess.run([PYTHON, "-I", script(), "auto", "serve-once"], stdout=log, stderr=log,
+                           stdin=subprocess.DEVNULL, timeout=600, creationflags=0x08000000)  # CREATE_NO_WINDOW
+    except Exception as e:
+        try:
+            with open(log_path, "a", encoding="utf-8") as log:
+                log.write("launcher: %s\n" % e)
+        except Exception:
+            pass
+    time.sleep(INTERVAL)
+'''
+
+
+def _write_windows_mover_launcher():
+    """A loop for Task Scheduler, which cannot repeat a task faster than once a minute."""
+    path = os.path.join(store_dir(), "bin", "acct-mover.py")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    text = _WINDOWS_LAUNCHER.replace("__FALLBACK__", repr(os.path.abspath(__file__))).replace("__INTERVAL__", str(MOVER_INTERVAL))
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return path
+
+
+def _ps(script):
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                          capture_output=True, text=True, timeout=120)
+
+
+def _install_windows_mover_service():
+    launcher = _write_windows_mover_launcher()
+    exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    exe = exe if os.path.isfile(exe) else sys.executable
+    user = "%s\\%s" % (os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", getpass.getuser()))
+    q = lambda v: "'" + v.replace("'", "''") + "'"
+    r = _ps("; ".join([
+        "$a = New-ScheduledTaskAction -Execute %s -Argument %s" % (q(exe), q('"%s"' % launcher)),
+        "$t = New-ScheduledTaskTrigger -AtLogOn -User %s" % q(user),
+        "$s = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) "
+        "-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+        # Interactive: the task runs in the logged-on session, where the admin Chrome profile and the logins live.
+        "$p = New-ScheduledTaskPrincipal -UserId %s -LogonType Interactive -RunLevel Limited" % q(user),
+        "Register-ScheduledTask -TaskName %s -Action $a -Trigger $t -Settings $s -Principal $p -Force | Out-Null" % q(MOVER_TASK),
+        "Start-ScheduledTask -TaskName %s" % q(MOVER_TASK),
+    ]))
+    if r.returncode != 0:
+        raise AcctError("Task Scheduler could not create %s: %s" % (MOVER_TASK, (r.stderr or r.stdout).strip()[-600:]))
+
+
 def _install_mover_service():
+    if _is_windows():
+        return _install_windows_mover_service()
     if sys.platform != "darwin":
-        raise AcctError("The seat-moving service is set up for macOS (launchd) only.")
+        raise AcctError("The seat-moving service is set up for macOS (launchd) and Windows (Task Scheduler) only.")
     import plistlib
     launcher = _write_mover_launcher()
     plist = {"Label": MOVER_LABEL, "ProgramArguments": ["/bin/bash", launcher], "StartInterval": MOVER_INTERVAL,
@@ -1479,6 +1567,10 @@ def _install_mover_service():
 
 
 def _uninstall_mover_service():
+    if _is_windows():
+        _ps("Stop-ScheduledTask -TaskName '%s' -ErrorAction SilentlyContinue; "
+            "Unregister-ScheduledTask -TaskName '%s' -Confirm:$false -ErrorAction SilentlyContinue" % (MOVER_TASK, MOVER_TASK))
+        return
     path = _launch_agent_path()
     if sys.platform == "darwin" and os.path.exists(path):
         subprocess.run(["launchctl", "bootout", "gui/%d" % os.getuid(), path], capture_output=True)
@@ -1486,6 +1578,12 @@ def _uninstall_mover_service():
 
 
 def _mover_service_loaded():
+    if _is_windows():
+        try:
+            r = _ps("(Get-ScheduledTask -TaskName '%s' -ErrorAction Stop).State" % MOVER_TASK)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return r.returncode == 0 and r.stdout.strip() in ("Running", "Ready")
     if sys.platform != "darwin":
         return False
     r = subprocess.run(["launchctl", "print", "gui/%d/%s" % (os.getuid(), MOVER_LABEL)], capture_output=True)
@@ -1525,9 +1623,10 @@ def cmd_auto_mover(args):
     save_pool_settings(st)
     pool_call("POST", "/api/machine", _machine_report(None, False), mover=True)  # proves the key works
     _install_mover_service()
-    print("This machine now moves the Premium seat: a launchd service (%s) checks every %ds. Keep it awake and logged in, "
-          "with every pool account logged in (/acct:login) and the admin browser signed in (/acct:auto browser)."
-          % (MOVER_LABEL, MOVER_INTERVAL))
+    print("This machine now moves the Premium seat: %s checks every %ds. Keep it awake and the user logged in "
+          "(on Windows Server: disconnect RDP, never sign out), with every pool account logged in (/acct:login) "
+          "and the admin browser signed in (/acct:auto browser)."
+          % ("the scheduled task " + MOVER_TASK if _is_windows() else "the launchd service " + MOVER_LABEL, MOVER_INTERVAL))
 
 
 def cmd_auto_enable(args):
@@ -1694,7 +1793,7 @@ def cmd_doctor(args):
     check("Account switching", bool(load_rotation().get("enabled")), "ON" if load_rotation().get("enabled") else "OFF",
           "Turn it on: /acct:auto enable")
     if mover:
-        check("Seat-moving service", _mover_service_loaded(), "launchd %s" % MOVER_LABEL,
+        check("Seat-moving service", _mover_service_loaded(), ("task %s" % MOVER_TASK) if _is_windows() else ("launchd %s" % MOVER_LABEL),
               "Reinstall it: /acct:auto mover <mover key>")
         if not os.path.isdir(load_rotation().get("browserProfile") or os.path.join(store_dir(), "browser-profile")):
             todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
