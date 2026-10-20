@@ -589,6 +589,9 @@ def claude_bin():
         found = shutil.which(n)
         if found:
             return found
+    for path in (os.path.expanduser("~/.local/bin/claude.exe"), os.path.expanduser("~/.local/bin/claude")):
+        if os.path.isfile(path):  # the native installer's location, before a new session has it on PATH
+            return path
     raise AcctError("Could not find the claude executable. Run this inside Claude Code, or add claude to PATH.")
 
 
