@@ -32,6 +32,10 @@ const startRegularChrome = async () => {
     `--remote-debugging-port=${cdp.port || "9222"}`,
     "--no-first-run",
     "--new-window",
+    // Keep rendering when the window is covered or the RDP session is disconnected.
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     membersUrl,
   ];
   let command, commandArgs;
@@ -67,63 +71,78 @@ const context = browser.contexts()[0];
     await new Promise((resolve) => browser.on("disconnected", resolve));
     process.exit(0);
   }
-  await page.getByText(/Members/i).first().waitFor({ timeout: 15000 });
+  // Machine 2 may run with its RDP session disconnected or its window hidden: the page is then
+  // "hidden" and never paints, so Playwright's actionability checks (visible, stable) never pass.
+  // Everything below reads and clicks through the DOM, which works whether or not the page paints.
+  await page.getByText(/Members/i).first().waitFor({ state: "attached", timeout: 15000 });
   if (/login|signin/i.test(page.url())) {
     throw new Error("The connected browser is not signed in to Claude. Sign in as an organization owner or admin and retry.");
   }
   // The sidebar includes a Members label before the member table finishes loading.
   // Wait for both target emails so subsequent row lookups don't race the table render.
-  await page.getByText(oldEmail, { exact: true }).waitFor({ state: "visible", timeout: 30000 });
-  await page.getByText(newEmail, { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+  await page.getByText(oldEmail, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
+  await page.getByText(newEmail, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
 
+  const triggerFor = (email) => page.locator(`[role="combobox"][aria-label="Tier for ${email}"]`);
   const rowFor = async (email) => {
-    const byRole = page.getByRole("row").filter({ hasText: email });
+    const byRole = page.getByRole("row", { includeHidden: true }).filter({ hasText: email });
     if (await byRole.count()) return byRole.first();
     const text = page.getByText(email, { exact: true }).first();
     if (await text.count()) return text.locator("xpath=ancestor::tr[1]");
     throw new Error(`Could not find member ${email} on the Members page.`);
   };
-  const tierOf = async (row) => {
-    const selects = row.getByRole("combobox");
-    // Organization members can have both a role selector and a seat-tier selector.
-    if (await selects.count()) {
-      const text = await selects.last().innerText();
-      const tier = text.match(/\b(Premium|Standard)\b/i);
-      if (tier) return tier[1];
+  const tierControl = async (email) => {
+    const trigger = triggerFor(email);
+    if (await trigger.count()) return trigger.first();
+    // Older page: the seat tier is the last combobox (or a Standard/Premium button) of the member's row.
+    const row = await rowFor(email);
+    const combos = row.locator('[role="combobox"]');
+    if (await combos.count()) return combos.last();
+    const button = row.locator("button").filter({ hasText: /^(Standard|Premium)$/i });
+    if (await button.count()) return button.first();
+    throw new Error(`Could not locate the seat tier control of ${email}.`);
+  };
+  const tierOf = async (email) => {
+    const text = await (await tierControl(email)).evaluate((el) => el.textContent || "");
+    const tier = text.match(/\b(Premium|Standard)\b/i) || (/no seat/i.test(text) ? ["", "No seat"] : null);
+    if (!tier) throw new Error(`Could not read the seat tier of ${email} ("${text.trim()}").`);
+    return tier[1];
+  };
+  const chooseTier = async (control, tier) => {
+    // Open the tier picker and click the "<tier> seat" option, all through the DOM.
+    await control.evaluate((el) => el.click());
+    let picked = false;
+    for (let attempt = 0; attempt < 20 && !picked; attempt++) {
+      await page.waitForTimeout(250);
+      picked = await control.evaluate((el, wanted) => {
+        const popup = document.getElementById(el.getAttribute("aria-controls") || "") || document;
+        const option = [...popup.querySelectorAll('[role="option"]')]
+          .find((o) => new RegExp("^\\s*" + wanted + " seat", "i").test(o.textContent || ""));
+        if (!option) return false;
+        option.scrollIntoView({ block: "nearest" });
+        option.click();
+        return true;
+      }, tier);
     }
-    const buttons = row.getByRole("button", { name: /^(Standard|Premium)$/i });
-    if (await buttons.count()) {
-      const text = await buttons.first().innerText();
-      const tier = text.match(/\b(Premium|Standard)\b/i);
-      if (tier) return tier[1];
+    if (!picked) {
+      await page.keyboard.press("Escape").catch(() => {});
+      throw new Error(`The seat picker did not offer "${tier} seat".`);
     }
-    throw new Error("Could not locate a seat tier control for a member row.");
   };
   const setTier = async (email, tier) => {
-    let row = await rowFor(email);
-    const current = await tierOf(row);
-    if (new RegExp(`^${tier}$`, "i").test(current)) return;
-    const combo = row.getByRole("combobox");
-    const control = await combo.count()
-      ? combo.last()
-      : row.getByRole("button", { name: /^(Standard|Premium)$/i }).first();
-    await control.click();
-    const option = page.getByRole("option", { name: new RegExp(`^${tier} seat\\b`, "i") }).last();
-    await option.click();
+    if (new RegExp(`^${tier}$`, "i").test(await tierOf(email))) return;
+    await chooseTier(await tierControl(email), tier);
     let actual;
     for (let attempt = 0; attempt < 40; attempt++) {
-      row = await rowFor(email);
-      actual = await tierOf(row);
+      actual = await tierOf(email);
       if (new RegExp(`^${tier}$`, "i").test(actual)) return;
       await page.waitForTimeout(500);
     }
     throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
   };
 
-  const oldRow = await rowFor(oldEmail);
-  const newRow = await rowFor(newEmail);
-  const oldTier = await tierOf(oldRow);
-  const newTier = await tierOf(newRow);
+  const oldTier = await tierOf(oldEmail);
+  const newTier = await tierOf(newEmail);
   if (!/^Premium$/i.test(oldTier)) throw new Error(`${oldEmail} is not currently Premium (${oldTier}).`);
   if (!/^Standard$/i.test(newTier)) throw new Error(`${newEmail} must be Standard before rotation (${newTier}).`);
 
