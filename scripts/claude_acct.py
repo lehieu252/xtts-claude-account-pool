@@ -1415,7 +1415,7 @@ def cmd_auto_serve(args):
     """One run of the seat-moving service on machine 2 (launchd starts it every MOVER_INTERVAL seconds)."""
     lock_path = os.path.join(store_dir(), "mover.lock")
     os.makedirs(store_dir(), exist_ok=True)
-    if not _acquire_lock(lock_path):
+    if not _acquire_lock(lock_path, stale=600):  # a seat move can take about 4.5 minutes
         return
     try:
         _mover_once(args)
@@ -1829,8 +1829,9 @@ def _set_premium_seat(old_name, new_name, cfg, idx):
         print(r.stdout.strip())
 
 
-def _acquire_lock(lock_path, wait=0):
-    """Return True once this process holds the lock file, False if it stays busy for `wait` seconds."""
+def _acquire_lock(lock_path, wait=0, stale=300):
+    """Return True once this process holds the lock file, False if it stays busy for `wait` seconds.
+    A lock older than `stale` seconds is taken over: its holder died."""
     deadline = time.time() + wait
     while True:
         try:
@@ -1839,7 +1840,7 @@ def _acquire_lock(lock_path, wait=0):
         except FileExistsError:
             pass
         try:
-            if time.time() - os.path.getmtime(lock_path) > 300:
+            if time.time() - os.path.getmtime(lock_path) > stale:
                 os.unlink(lock_path)
                 continue
         except FileNotFoundError:
