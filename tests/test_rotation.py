@@ -163,33 +163,23 @@ class ThresholdTests(unittest.TestCase):
         cfg = {"order": ["a", "b", "c"], "premiumAccount": "c"}
         self.assertEqual(self.pick(idx, cfg)[0], "a")
 
-    def test_account_used_up_as_premium_is_skipped_until_reset(self):
-        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
+    def test_account_used_up_as_premium_is_not_skipped(self):
+        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 90), "info": account(6, 100)}}
         cfg = {"order": ["info", "sales", "xtts"], "premiumAccount": "sales",
-               "usedUpUntil": {"xtts": time.time() + 3600, "info": time.time() - 1}}
+               "usedUpUntil": {"xtts": time.time() + 3600}}
         name, skipped = self.pick(idx, cfg)
-        self.assertEqual(name, "info")
-        self.assertTrue(skipped[0].startswith("xtts (used up as Premium until"))
-        self.assertNotIn("info", cfg["usedUpUntil"])  # expired entries are dropped
+        self.assertEqual((name, skipped), ("xtts", []))
+        self.assertNotIn("usedUpUntil", cfg)  # left by earlier versions; dropped
 
-    def test_marks_used_up_premium_until_latest_reset(self):
-        cfg = {}
-        usage = {"five_hour": {"utilization": 100, "resets_at": "2026-10-12T15:00:00+00:00"},
-                 "seven_day": {"utilization": 100, "resets_at": "2026-10-15T10:00:00+00:00"}}
-        acct._mark_used_up(cfg, "sales", usage)
-        self.assertEqual(cfg["usedUpUntil"]["sales"], acct._parse_reset("2026-10-15T10:00:00+00:00"))
-
-    def test_weekly_threshold_marks_until_weekly_reset(self):
-        cfg = {}
-        usage = {"five_hour": {"utilization": 30, "resets_at": "2026-10-12T15:00:00+00:00"},
-                 "seven_day": {"utilization": 91, "resets_at": "2026-10-15T10:00:00+00:00"}}
-        acct._mark_used_up(cfg, "sales", usage, 90)
-        self.assertEqual(cfg["usedUpUntil"]["sales"], acct._parse_reset("2026-10-15T10:00:00+00:00"))
-
-    def test_daily_threshold_alone_does_not_mark_used_up(self):
-        cfg = {}
-        acct._mark_used_up(cfg, "sales", account(80, 40)["usage"]["data"])
-        self.assertEqual(cfg, {})
+    def test_tie_goes_to_the_earliest_weekly_reset(self):
+        def acc(reset):
+            a = account(0, 100)
+            a["usage"]["data"]["seven_day"]["resets_at"] = reset
+            return a
+        idx = {"accounts": {"p": account(80, 0), "a": acc("2026-10-24T07:00:00+00:00"),
+                            "b": acc("2026-10-22T03:59:00+00:00"), "c": account(0, 100)}}
+        cfg = {"order": ["p", "a", "b", "c"], "premiumAccount": "p"}
+        self.assertEqual(self.pick(idx, cfg)[0], "b")
 
 
 class TokenRefreshTests(unittest.TestCase):
@@ -257,6 +247,7 @@ class TokenRefreshTests(unittest.TestCase):
         calls = []
         with patch.object(acct, "load_index", return_value=idx), \
              patch.object(acct, "save_index"), \
+             patch.object(acct, "current_name", return_value="a"), \
              patch.object(acct, "sync_current", return_value="a"), \
              patch.object(acct, "read_live_profile", return_value={}), \
              patch.object(acct, "refresh_seat"), \
@@ -264,6 +255,34 @@ class TokenRefreshTests(unittest.TestCase):
              patch.object(acct.sys, "stdout", io.StringIO()):
             acct.cmd_list(argparse.Namespace(refresh=False))
         self.assertEqual(calls, [None, "b"])
+
+    def test_list_marks_the_live_account_even_when_its_token_sync_fails(self):
+        idx = {"accounts": {"a": {"profile": {"emailAddress": "a@x.com"}}}}
+        self.store["a"] = {"claudeAiOauth": {"accessToken": "live", "refreshToken": "ra", "expiresAt": 1}}
+        with patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), \
+             patch.object(acct, "current_name", return_value="a"), \
+             patch.object(acct, "sync_current", side_effect=acct.AcctError("keychain locked")), \
+             patch.object(acct, "read_live_profile", return_value={"emailAddress": "a@x.com"}), \
+             patch.object(acct, "refresh_seat"), \
+             patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct.sys, "stdout", io.StringIO()) as out:
+            acct.cmd_list(argparse.Namespace(refresh=False))
+        self.assertIn("▶ a", out.getvalue())
+        self.assertNotIn("not saved", out.getvalue())
+        self.assertIn("keychain locked", out.getvalue())
+
+    def test_list_names_the_saved_account_with_the_same_email_but_another_id(self):
+        idx = {"accounts": {"a": {"profile": {"emailAddress": "a@x.com", "accountUuid": "old"}}}}
+        self.store["a"] = {"claudeAiOauth": {"accessToken": "t", "refreshToken": "ra", "expiresAt": 1}}
+        with patch.object(acct, "load_index", return_value=idx), \
+             patch.object(acct, "save_index"), \
+             patch.object(acct, "read_live_profile", return_value={"emailAddress": "A@x.com", "accountUuid": "new"}), \
+             patch.object(acct, "refresh_seat"), \
+             patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct.sys, "stdout", io.StringIO()) as out:
+            acct.cmd_list(argparse.Namespace(refresh=False))
+        self.assertIn("matches saved account a by email", out.getvalue())
 
 
 class CertificateFallbackTests(unittest.TestCase):

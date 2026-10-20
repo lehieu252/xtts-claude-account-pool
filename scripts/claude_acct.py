@@ -708,11 +708,14 @@ def cmd_list(args):
     if not idx["accounts"]:
         print("No saved accounts. Run /acct:login <email> to log in, or /acct:save <name> to save the current account.")
         return
-    try:
-        cur = sync_current(idx)
-    except AcctError:
-        cur = None
-    live = cur or current_name(idx)  # by identity: never refresh the token Claude Code is using
+    # By identity: a failed token sync must not make the live login look unsaved.
+    cur = live = current_name(idx)  # never refresh the token Claude Code is using
+    sync_error = None
+    if cur:
+        try:
+            sync_current(idx)
+        except AcctError as e:
+            sync_error = str(e)
     live_profile = read_live_profile()
     rows, need_login = [], []
     for name in sorted(idx["accounts"]):
@@ -756,10 +759,18 @@ def cmd_list(args):
         print("\n🔴 %d account(s) need a new login: %s" % (len(need_login), ", ".join(
             "`/acct:login %s`" % n for n in need_login)))
     if not cur:
-        print("\nLogged in as %s, but this account is not saved. Run /acct:save <name> to save it."
-              % ((live_profile or {}).get("emailAddress") or "(unknown)"))
+        email = (live_profile or {}).get("emailAddress") or "(unknown)"
+        same_email = [n for n in sorted(idx["accounts"])
+                      if ((idx["accounts"][n].get("profile") or {}).get("emailAddress") or "").lower() == email.lower()]
+        if same_email:
+            print("\nLogged in as %s, which matches saved account %s by email but not by account/organization ID. "
+                  "Run /acct:login %s to save this login again." % (email, same_email[0], same_email[0]))
+        else:
+            print("\nLogged in as %s, but this account is not saved. Run /acct:save <name> to save it." % email)
     else:
         print("\n▶ = current account.")
+        if sync_error:
+            print("Could not copy the latest token of %s into the store: %s" % (cur, sync_error))
     _print_rotation_preview(idx, live)
     print("acct plugin %s" % plugin_version())
 
@@ -1071,45 +1082,30 @@ def cmd_auto_browser(args):
 
 def _parse_reset(value):
     try:
-        return dt.datetime.fromisoformat(value).timestamp()
-    except (TypeError, ValueError):
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, TypeError, ValueError):
         return None
-
-
-def _mark_used_up(cfg, name, usage, weekly_threshold=100):
-    """Remember until when a Premium account left with a used-up (or 7-day threshold) window cannot take the seat back."""
-    limits = {"five_hour": 100, "seven_day": min(weekly_threshold, 100)}
-    resets = [_parse_reset((usage.get(k) or {}).get("resets_at"))
-              for k, v in _usage_window_values(usage).items() if v >= limits[k]]
-    resets = [r for r in resets if r]
-    if resets:
-        cfg.setdefault("usedUpUntil", {})[name] = max(resets)
 
 
 def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=100, live=None):
     """Pick the least-used Standard account after checking the live status and usage of each.
 
     Standard members share the same limits, so their 7-day percentages compare actual use:
-    lowest 7-day first, then lowest 5-hour, then the configured order after the current Premium.
+    lowest 7-day first, then lowest 5-hour, then the earliest 7-day reset, then the configured
+    order after the current Premium.
     An account whose usage would already be at a threshold once read against Premium limits
     (Standard reading / PREMIUM_FACTOR) is skipped: it would hand the seat on at once.
     """
     order = cfg.get("order", [])
     current = cfg.get("premiumAccount")
     start = order.index(current)
-    used_up = {n: t for n, t in (cfg.get("usedUpUntil") or {}).items() if t > time.time()}
-    cfg["usedUpUntil"] = used_up
+    cfg.pop("usedUpUntil", None)  # saved by 0.9.9 and earlier, which skipped accounts used up as Premium
     skipped, candidates = [], []
     for offset in range(1, len(order)):
         name = order[(start + offset) % len(order)]
         meta = idx["accounts"].get(name)
         if not meta:
             skipped.append("%s (not saved)" % name)
-            continue
-        if name in used_up:
-            # It ran out as Premium; taking the seat back before the reset would bounce straight off again.
-            skipped.append("%s (used up as Premium until %s)" % (
-                name, dt.datetime.fromtimestamp(used_up[name]).strftime("%d/%m %H:%M")))
             continue
         try:
             creds = read_stored_creds(name)
@@ -1134,10 +1130,11 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=
         if over:
             skipped.append("%s (already at threshold: %s)" % (name, ", ".join(over)))
             continue
-        candidates.append((values.get("seven_day", 100), values["five_hour"], offset, name))
+        reset = _parse_reset((usage.get("seven_day") or {}).get("resets_at")) or float("inf")
+        candidates.append((values.get("seven_day", 100), values["five_hour"], reset, offset, name))
     if not candidates:
         return None, skipped
-    return min(candidates)[3], skipped
+    return min(candidates)[-1], skipped
 
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1422,7 +1419,6 @@ def _cmd_auto_check_locked(args):
     if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
         return
     old_name = premium
-    _mark_used_up(cfg, premium, usage, weekly_threshold)
     new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
     save_rotation(cfg)
     save_index(idx)
