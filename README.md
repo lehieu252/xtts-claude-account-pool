@@ -85,7 +85,7 @@ $ACCT list --refresh
 
 Every account should be listed without "🔴 Log in again", and the Seat column shows which one holds Premium now.
 
-**5. Configure rotation.** Use the account whose Seat is Premium as `--premium`, and put it first in `--order`, followed by the other accounts in the order the user wants them to take over. The default thresholds are 5% of the 5-hour usage or 10% of the 7-day usage; add `--threshold <1-99>` only if the user asks for another value.
+**5. Configure rotation.** Use the account whose Seat is Premium as `--premium`, and put it first in `--order`, followed by the other accounts in the order the user wants them to take over. The default thresholds are 80% of the 5-hour usage or 90% of the 7-day usage; add `--threshold <1-99>` only if the user asks for another value.
 
 ```bash
 $ACCT auto configure --premium <premium email> --order <premium email>,<next email>,<next email>
@@ -156,7 +156,7 @@ From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the
 
 ### Automatic Premium seat rotation
 
-The rotation is opt-in. It triggers when the Premium account reaches **5% of its 5-hour usage** or **10% of its 7-day usage**, or when any window is used up (100%). The low thresholds keep the account that gives up the seat usable: a Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro), so 5% of the 5-hour window as Premium is about 25% once it is Standard again, and 10% of the 7-day window about 50%. Configure the current Premium account and the pool of accounts that can take the seat:
+The rotation is opt-in. It triggers when the Premium account reaches **80% of its 5-hour usage** or **90% of its 7-day usage**, or when any window is used up (100%). A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro), so the account that gives up the seat reads about 5x higher once it is Standard again: 80% of the 5-hour window as Premium is over 100% as Standard, so that account is usually rate-limited until its window resets. Configure the current Premium account and the pool of accounts that can take the seat:
 
 ```
 /acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com
@@ -173,7 +173,7 @@ To change the threshold, for example for a test at 75%:
 
 `--daily-threshold 75` is the same. Run `/acct:auto status` to see the active value. Re-running `configure` keeps rotation off until you enable it again.
 
-**How the 7-day window is used.** A member's 7-day usage is measured against the limits of the seat it holds. On the Premium account it is a real measure of what is left, so the plugin rotates at 10% of it, and does not give that account the seat back until its 7-day window resets. On a Standard account it is divided by 5 to estimate the reading once the account holds Premium: an account whose 5-hour or 7-day usage would already be at a threshold that way (25% or more of the 5-hour window, or 50% or more of the 7-day window, as Standard) is skipped, since it would hand the seat on at once. All Standard members share the same limits, so their readings also say which one has used least: the next Premium is the account with the **lowest 7-day usage, then the lowest 5-hour usage**; on a tie, the one that comes first in `--order` after the current Premium. These thresholds need no configuration: configs written by earlier versions, which saved the old 90% default, pick them up after the plugin update. Only an explicit `--threshold` overrides the 5-hour value.
+**How the 7-day window is used.** A member's 7-day usage is measured against the limits of the seat it holds. On the Premium account it is a real measure of what is left, so the plugin rotates at 90% of it, and does not give that account the seat back until its 7-day window resets. On a Standard account it is divided by 5 to estimate the reading once the account holds Premium: an account whose 5-hour or 7-day usage would already be at a threshold that way (5x the threshold as Standard) is skipped, since it would hand the seat on at once. With the default 80% / 90% thresholds no Standard reading can reach that, so this only matters with a low `--threshold`. All Standard members share the same limits, so their readings also say which one has used least: the next Premium is the account with the **lowest 7-day usage, then the lowest 5-hour usage**; on a tie, the one that comes first in `--order` after the current Premium. These thresholds need no configuration: configs written by earlier versions, which saved the old 90% default, pick them up after the plugin update. Only an explicit `--threshold` overrides the 5-hour value.
 
 The plugin checks the active Premium account before each prompt and tool call. When its usage reaches the threshold, it changes the old member to Standard, promotes the least-used eligible member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If Claude Code reports a usage-related `rate_limit` failure, a `StopFailure` hook makes one best-effort rotation attempt using the same fresh-usage and seat checks. It ignores ordinary API throttling and other errors. Use `/acct:auto disable` to stop rotation.
 

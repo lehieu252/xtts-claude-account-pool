@@ -950,8 +950,8 @@ def _usage_fields(meta):
 
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
-DAILY_THRESHOLD = 5
-WEEKLY_THRESHOLD = 10
+DAILY_THRESHOLD = 80
+WEEKLY_THRESHOLD = 90
 LEGACY_DAILY_DEFAULT = 90  # written by `configure` before 0.9.1 when no --threshold was given
 # A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro, per the Team plan help page),
 # so a percentage read on one seat is about PREMIUM_FACTOR times the same usage read on the other.
@@ -1598,7 +1598,7 @@ def main(argv=None):
     autos = p.add_subparsers(dest="auto_cmd", required=True)
     q = autos.add_parser("configure", help="set account rotation order and organization page")
     q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
-    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 5%%)")
+    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 80%%)")
     q.add_argument("--threshold", type=int, help="same as --daily-threshold")
     q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
     q.add_argument("--cdp-url", default="http://127.0.0.1:9222")

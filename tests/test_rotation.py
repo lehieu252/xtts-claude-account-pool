@@ -92,12 +92,12 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
 
     def test_weekly_threshold_defaults_for_existing_configs(self):
-        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 10)
+        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 90)
         self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
 
     def test_old_default_daily_threshold_follows_the_new_default(self):
-        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 5)
-        self.assertEqual(acct._rotation_threshold({}), 5)
+        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 80)
+        self.assertEqual(acct._rotation_threshold({}), 80)
         self.assertEqual(acct._rotation_threshold({"dailyThreshold": 75}), 75)
 
     def check(self, five_hour, seven_day):
@@ -106,20 +106,20 @@ class ThresholdTests(unittest.TestCase):
                                              acct._rotation_threshold(cfg), acct._weekly_threshold(cfg))
 
     def test_default_rule(self):
-        # 5-hour >= 5% or 7-day >= 10% (or any window used up).
-        self.assertFalse(self.check(4, 9))
-        self.assertTrue(self.check(5, 0))
-        self.assertTrue(self.check(0, 10))
+        # 5-hour >= 80% or 7-day >= 90% (or any window used up).
+        self.assertFalse(self.check(79, 89))
+        self.assertTrue(self.check(80, 0))
+        self.assertTrue(self.check(0, 90))
         self.assertTrue(self.check(100, 0))
 
-    def test_default_destination_limits_are_25_and_50_percent_standard(self):
+    def test_destination_limits_are_5x_the_thresholds_on_standard(self):
         idx = {"accounts": {"p": account(10, 0), "a": account(24, 49), "b": account(25, 0), "c": account(0, 50)}}
         cfg = {"order": ["p", "a", "b", "c"], "premiumAccount": "p"}
         with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
              patch.object(acct, "token_state", return_value="ok"), \
              patch.object(acct, "refresh_usage", return_value="cache"):
             name, skipped = acct._next_eligible_rotation_account(
-                cfg, idx, acct._rotation_threshold({}), acct._weekly_threshold({}))
+                cfg, idx, 5, 10)
         self.assertEqual(name, "a")
         self.assertEqual(skipped, ["b (already at threshold: 5-hour 25% ≥ 25%)", "c (already at threshold: 7-day 50% ≥ 50%)"])
 
@@ -401,7 +401,7 @@ class FollowPremiumSeatTests(unittest.TestCase):
         """Premium sales is over the threshold; return (cfg, switched, rotated) when the fresh
         seat reading taken right before the transfer shows `tiers_after_wait`."""
         cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
-        idx = {"accounts": {"info": account(0, 0), "sales": account(20, 5), "hieunx": account(0, 0)}}
+        idx = {"accounts": {"info": account(0, 0), "sales": account(85, 5), "hieunx": account(0, 0)}}
         reads = {"n": 0}
 
         def seat(meta, creds, force=False, refresh_name=None, ttl=None):
@@ -453,7 +453,8 @@ class FollowPremiumSeatTests(unittest.TestCase):
 
 class RotationPreviewTests(unittest.TestCase):
     def preview(self, accounts):
-        cfg = {"enabled": True, "order": ["sales", "a", "b"], "premiumAccount": "sales"}
+        cfg = {"enabled": True, "order": ["sales", "a", "b"], "premiumAccount": "sales",
+               "dailyThreshold": 5, "weeklyThreshold": 10}
         idx = {"accounts": accounts}
         with patch.object(acct, "load_rotation", return_value=cfg), \
              patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
@@ -553,7 +554,7 @@ class RotationLogTests(unittest.TestCase):
 
     def test_failed_seat_move_is_logged_once(self):
         cfg = {"enabled": True, "order": ["info", "sales"], "premiumAccount": "sales"}
-        idx = {"accounts": {"info": account(0, 0), "sales": account(20, 5)}}
+        idx = {"accounts": {"info": account(0, 0), "sales": account(85, 5)}}
         def seat(meta, creds, force=False, refresh_name=None, ttl=None):
             meta["seat"] = {"fetchedAt": time.time(), "tier": "team_tier_1" if creds["name"] == "sales" else "team_standard"}
             return "ok"
