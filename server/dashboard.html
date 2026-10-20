@@ -156,7 +156,7 @@ function render(d) {
   const accounts = d.accounts || [];
   $("accounts").innerHTML = accounts.length ? accounts.map((a) => {
     const premium = a.seat === "Premium";
-    const tag = a.role === "backup" ? `<span class="chip backup">tạm (info)</span>`
+    const tag = a.role === "backup" ? `<span class="chip backup">account tạm</span>`
       : premium ? `<span class="chip premium">Premium</span>` : "";
     return `<tr class="${premium ? "is-premium" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>

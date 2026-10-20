@@ -926,7 +926,7 @@ def save_rotation(cfg):
 # ---------------------------------------------------------------- the XTGroup pool (fixed)
 
 # The plugin serves one organization, so its accounts are fixed here: no `configure`, no order.
-BACKUP_EMAIL = "info@xtgroup.vn"  # Standard, never Premium: where every machine waits while the seat moves
+BACKUP_EMAIL = "hieule252uet@gmail.com"  # never Premium: where every machine waits while the seat moves (info@xtgroup.vn until 1.0.4)
 ROTATION_EMAILS = (  # the accounts that take turns holding Premium; the order breaks the last tie
     "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn", "careers@xtgroup.vn",
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",

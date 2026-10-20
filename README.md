@@ -154,7 +154,7 @@ The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `info@xtgroup.vn` | Backup, always Standard, never Premium: where every working machine waits while the seat moves |
+| — | `hieule252uet@gmail.com` (was `info@xtgroup.vn` until 1.0.4) | Backup, never Premium: where every working machine waits while the seat moves. Every working machine must be logged in to it |
 | 1–8 | `xtts@`, `sales@`, `contact@`, `careers@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; the order only breaks the last tie |
 
 ```
@@ -170,7 +170,7 @@ No target:                      P keeps the seat, the reason is logged
 
 1. Machine 2 (every 30 s, launchd): reads the usage of P. Below the thresholds, nothing happens.
 2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
-3. Every working machine, before its next request: sees `PREPARING`, **switches account to `info@xtgroup.vn`** and reports it.
+3. Every working machine, before its next request: sees `PREPARING`, **switches account to the backup account** and reports it.
 4. Machine 2 waits until every machine seen in the last 5 minutes reports `info` (at most 120 s; idle machines are not waited for).
 5. Machine 2 writes `MOVING`, reads the seat of P again, and **moves the seat** in Chrome: P down to Standard, the target up to Premium, both checked on the page. A failure rolls both back.
 6. Machine 2 writes `STABLE, premium = target`.

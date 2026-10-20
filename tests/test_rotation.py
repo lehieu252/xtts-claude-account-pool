@@ -133,7 +133,7 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(self.reached(100, 0))
 
     def test_pool_is_fixed(self):
-        self.assertEqual(INFO, "info@xtgroup.vn")
+        self.assertEqual(INFO, "hieule252uet@gmail.com")
         self.assertNotIn(INFO, acct.ROTATION_EMAILS)
         self.assertEqual(len(acct.ROTATION_EMAILS), 8)
         self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
