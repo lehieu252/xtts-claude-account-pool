@@ -1381,6 +1381,7 @@ def _mover_once(args):
     state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
     if time.time() < _mover_state().get("backoff_until", 0) and not args.force:
         return
+    _publish_accounts(idx, live, state.get("premium"))
     missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
     if missing:
         log_event("not_logged_in", "machine 2 is missing: %s (run /acct:login)" % ", ".join(missing), every=QUIET_EVERY)
@@ -1412,6 +1413,55 @@ def _mover_once(args):
     if args.manual:
         print("Threshold reached on %s: moving the Premium seat to %s..." % (holder, target))
     _move_seat(idx, holder, target, live, fields)
+
+
+ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the dashboard
+
+
+def _account_rows(idx, live, premium=None):
+    """The usage of every pool account, as /acct:list shows it, for the dashboard."""
+    rows = []
+    for email in POOL_EMAILS:
+        name = _saved_name(idx, email)
+        row = {"email": email, "role": "backup" if email == BACKUP_EMAIL else "rotation"}
+        if not name:
+            rows.append(dict(row, status="not logged in on machine 2"))
+            continue
+        meta = idx["accounts"][name]
+        try:
+            creds = read_stored_creds(name)
+            status = refresh_usage(meta, creds, refresh_name=None if name == live else name)
+            refresh_seat(meta, creds, refresh_name=None if name == live else name)
+            state = token_state(meta, creds)
+        except AcctError as e:
+            status, state = str(e), "relogin"
+        usage = (meta.get("usage") or {}).get("data") or {}
+        tier = (meta.get("seat") or {}).get("tier")
+        row.update(seat=SEAT_LABELS.get(tier, tier) if tier else None,
+                   five_hour=(usage.get("five_hour") or {}).get("utilization"),
+                   five_hour_reset=(usage.get("five_hour") or {}).get("resets_at"),
+                   seven_day=(usage.get("seven_day") or {}).get("utilization"),
+                   seven_day_reset=(usage.get("seven_day") or {}).get("resets_at"),
+                   read_at=(meta.get("usage") or {}).get("fetchedAt"),
+                   status="log in again" if state == "relogin" else (None if status in ("ok", "cache", "expired") else status))
+        rows.append(row)
+    return rows
+
+
+def _publish_accounts(idx, live, premium=None, force=False):
+    ms = _mover_state()
+    if not force and time.time() - ms.get("accounts_at", 0) < ACCOUNTS_EVERY:
+        return
+    try:
+        rows = _account_rows(idx, live, premium)
+        save_index(idx)
+        pool_call("POST", "/api/accounts", {"accounts": rows}, mover=True, timeout=10)
+    except Exception as e:  # the usage table is a convenience: never stop a seat move for it
+        log_event("read_fail", "usage table: %s" % e, every=QUIET_EVERY, key="accounts-table")
+        return
+    ms = _mover_state()
+    ms["accounts_at"] = time.time()
+    _save_mover_state(ms)
 
 
 def cmd_auto_serve(args):

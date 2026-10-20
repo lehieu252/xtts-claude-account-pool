@@ -44,6 +44,14 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 td.wrap { white-space: normal; min-width: 260px; }
 th { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
 tr:last-child td { border-bottom: 0; }
+.bar { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.bar .track { flex: 0 0 70px; height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; }
+.bar .fill { height: 100%; background: var(--ok); }
+.bar .fill.mid { background: var(--warn); } .bar .fill.high { background: var(--bad); }
+.bar .pct { font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+.reset { color: var(--muted); font-size: 12px; }
+tr.is-premium td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.chip.premium { color: var(--ok); font-weight: 600; } .chip.backup { color: var(--warn); font-weight: 600; }
 .chip { display: inline-block; background: var(--chip); border-radius: 4px; padding: 0 6px; font-size: 12px; }
 .chip.mover { color: var(--accent); font-weight: 600; }
 .mismatch { color: var(--warn); font-weight: 600; }
@@ -70,6 +78,14 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
   <div class="muted" id="statemsg"></div>
 
   <div class="alerts" id="alerts"></div>
+
+  <div class="panel">
+      <h2>Account <span class="muted" style="font-weight:400;font-size:13px" id="accounts-note"></span></h2>
+      <div class="tbl"><table>
+        <thead><tr><th>Account</th><th>Seat</th><th>5 giờ</th><th>7 ngày</th><th>Trạng thái</th></tr></thead>
+        <tbody id="accounts"><tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr></tbody>
+      </table></div>
+  </div>
 
   <div class="panel">
       <h2>Các máy</h2>
@@ -137,6 +153,20 @@ function render(d) {
       <td>${ago(now - m.last_seen)}</td></tr>`;
   }).join("") : `<tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
 
+  const accounts = d.accounts || [];
+  $("accounts").innerHTML = accounts.length ? accounts.map((a) => {
+    const premium = a.seat === "Premium";
+    const tag = a.role === "backup" ? `<span class="chip backup">tạm (info)</span>`
+      : premium ? `<span class="chip premium">Premium</span>` : "";
+    return `<tr class="${premium ? "is-premium" : ""}">
+      <td class="mono">${esc(a.email)} ${tag}</td>
+      <td>${esc(a.seat || "—")}</td>
+      <td>${usageCell(a.five_hour, a.five_hour_reset)}</td>
+      <td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
+      <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || "ok")}</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
+  $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
+
   $("transitions").innerHTML = d.transitions.length ? d.transitions.map((t) => `<tr>
       <td>${clock(t.at)}</td><td><span class="pill ${esc(t.phase)}">${esc(t.phase)}</span></td>
       <td class="mono">${esc(t.premium || "—")}${t.target && t.phase !== "STABLE" ? " → " + esc(t.target) : ""}</td>
@@ -147,6 +177,14 @@ function render(d) {
   $("updated").textContent = "Làm mới lúc " + new Date().toLocaleTimeString("vi-VN", { hour12: false }) + " · mỗi 5 giây";
 }
 
+
+function usageCell(pct, reset) {
+  if (pct === null || pct === undefined) return `<span class="muted">—</span>`;
+  const p = Math.round(pct), level = p >= 90 ? "high" : p >= 70 ? "mid" : "";
+  const when = reset ? new Date(reset).toLocaleString("vi-VN", { hour12: false, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  return `<div class="bar"><span class="track"><span class="fill ${level}" style="width:${Math.min(100, p)}%;display:block"></span></span>`
+    + `<span class="pct">${p}%</span>${when ? `<span class="reset">reset ${when}</span>` : ""}</div>`;
+}
 
 async function refresh() {
   const q = new URLSearchParams({ limit: "50" });  // only for the "seat move failed" alert

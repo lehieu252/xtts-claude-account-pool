@@ -10,6 +10,7 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
                                      answers with the state, so a follower needs one request per check
   GET  /api/machines                 X-Pool-Key
   POST /api/log                      X-Pool-Key: {"events": [...]}; answers "ok"
+  POST /api/accounts                 X-Pool-Mover-Key: usage of every pool account, read by machine 2
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
   GET  /api/dashboard                Basic auth: state, machines, transitions, log (filters: machine, event)
 
@@ -31,6 +32,8 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
+ACCOUNT_FIELDS = ("email", "role", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
+                  "status", "read_at")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
 
@@ -66,6 +69,8 @@ class Store:
                     ts TEXT, machine TEXT, host TEXT, version TEXT, hook TEXT, event TEXT, live TEXT,
                     premium TEXT, target TEXT, p5h REAL, p7d REAL, message TEXT);
                 CREATE INDEX IF NOT EXISTS log_received ON log(received);
+                CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, position INTEGER, data TEXT NOT NULL,
+                    updated REAL NOT NULL);
             """)
             if not self.db.execute("SELECT 1 FROM state").fetchone():
                 self.db.execute("INSERT INTO state VALUES (1, 'STABLE', NULL, NULL, 'not set yet', ?, NULL)", (time.time(),))
@@ -116,6 +121,19 @@ class Store:
         sql += " ORDER BY id DESC LIMIT ?"; args.append(limit)
         with self.lock:
             return [dict(r) for r in self.db.execute(sql, args)]
+
+    def set_accounts(self, accounts):
+        """Replace the usage table machine 2 publishes (one row per pool account)."""
+        now = time.time()
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM accounts")
+            self.db.executemany("INSERT INTO accounts (email, position, data, updated) VALUES (?,?,?,?)",
+                                [(a["email"], i, json.dumps(a, ensure_ascii=False), now) for i, a in enumerate(accounts)])
+
+    def accounts(self):
+        with self.lock:
+            rows = self.db.execute("SELECT data, updated FROM accounts ORDER BY position").fetchall()
+        return [dict(json.loads(r["data"]), published=r["updated"]) for r in rows]
 
     def transitions(self, limit=30):
         with self.lock:
@@ -224,6 +242,7 @@ def make_handler(cfg, store):
                     "state": self._state_payload(),
                     "machines": store.machines(),
                     "transitions": store.transitions(),
+                    "accounts": store.accounts(),
                     "log": store.log(limit, first("machine"), first("event")),
                     "active_sec": ACTIVE_SEC, "mover_stale_sec": MOVER_STALE_SEC,
                 })
@@ -251,7 +270,7 @@ def make_handler(cfg, store):
 
         def do_POST(self):
             path = self._path()
-            if path not in ("/api/machine", "/api/log"):
+            if path not in ("/api/machine", "/api/log", "/api/accounts"):
                 return self._send(404, {"error": "not found"})
             if not self._is_machine():
                 return self._send(403, {"error": "key required"})
@@ -259,6 +278,15 @@ def make_handler(cfg, store):
                 b = self._body()
             except (ValueError, json.JSONDecodeError) as e:
                 return self._send(400, {"error": str(e)})
+            if path == "/api/accounts":
+                if not self._is_mover():
+                    return self._send(403, {"error": "mover key required"})
+                accounts = b.get("accounts")
+                if not isinstance(accounts, list):
+                    return self._send(400, {"error": "accounts must be a list"})
+                store.set_accounts([{k: a.get(k) for k in ACCOUNT_FIELDS} for a in accounts[:50]
+                                    if isinstance(a, dict) and _text(a.get("email"))])
+                return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/machine":
                 if not _text(b.get("machine_id")):
                     return self._send(400, {"error": "machine_id required"})

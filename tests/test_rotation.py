@@ -367,6 +367,9 @@ class FakePool:
             return [dict(w) for w in self.workers]
         if path == "/api/state":
             return dict(self.state)
+        if path == "/api/accounts":
+            self.accounts = body["accounts"]
+            return "ok"
         raise AssertionError(path)
 
 
@@ -474,6 +477,18 @@ class MoverTests(unittest.TestCase):
         pool = FakePool("MOVING", SALES)
         self.run_once(pool_index(**{CONTACT: (1, 1)}, premium=CONTACT), pool)
         self.assertEqual(pool.puts, [("STABLE", CONTACT, None)])
+
+    def test_publishes_the_usage_of_every_pool_account(self):
+        pool = FakePool()
+        idx = pool_index(**{SALES: (50, 40)}, premium=SALES)
+        del idx["accounts"][KIENLT]
+        with patch.object(acct, "_mover_state", return_value={}):
+            self.run_once(idx, pool)
+        rows = {r["email"]: r for r in pool.accounts}
+        self.assertEqual(len(rows), 9)
+        self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
+        self.assertEqual(rows[INFO]["role"], "backup")
+        self.assertEqual(rows[KIENLT]["status"], "not logged in on machine 2")
 
     def test_needs_the_mover_key(self):
         acct.save_pool_settings({"api_key": "k", "machine_id": "w"})
