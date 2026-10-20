@@ -1535,15 +1535,16 @@ def _install_windows_mover_service():
     launcher = _write_windows_mover_launcher()
     exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = exe if os.path.isfile(exe) else sys.executable
-    user = "%s\\%s" % (os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", getpass.getuser()))
     q = lambda v: "'" + v.replace("'", "''") + "'"
     r = _ps("; ".join([
+        # The account running this command, as Windows names it (USERDOMAIN can be WORKGROUP over ssh).
+        "$u = [Security.Principal.WindowsIdentity]::GetCurrent().Name",
         "$a = New-ScheduledTaskAction -Execute %s -Argument %s" % (q(exe), q('"%s"' % launcher)),
-        "$t = New-ScheduledTaskTrigger -AtLogOn -User %s" % q(user),
+        "$t = New-ScheduledTaskTrigger -AtLogOn -User $u",
         "$s = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) "
         "-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
         # Interactive: the task runs in the logged-on session, where the admin Chrome profile and the logins live.
-        "$p = New-ScheduledTaskPrincipal -UserId %s -LogonType Interactive -RunLevel Limited" % q(user),
+        "$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited",
         "Register-ScheduledTask -TaskName %s -Action $a -Trigger $t -Settings $s -Principal $p -Force | Out-Null" % q(MOVER_TASK),
         "Start-ScheduledTask -TaskName %s" % q(MOVER_TASK),
     ]))
