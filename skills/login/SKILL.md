@@ -1,7 +1,7 @@
 ---
 name: login
-description: Log in to any Claude account (new or again) and save it. Opens a terminal window to finish the login; your current account is not changed.
-argument-hint: "<email | name> [email]"
+description: Log in to the pool accounts this machine lacks (no argument), or to one account (new or again), and save them. Opens a terminal window to finish the login; your current account is not changed.
+argument-hint: "[<email | name> [email]]"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---

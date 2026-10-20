@@ -20,166 +20,123 @@ acct = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = acct
 SPEC.loader.exec_module(acct)
 
-# Keep the rotation log and its state out of the real ~/.claude-acct while tests run.
+
+# Keep the rotation log, the pool settings and their state out of the real ~/.claude-acct while tests run.
 os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
-os.environ.pop("CLAUDE_ACCT_LOG_URL", None)
-acct.LOG_URL = ""  # never upload test events to the shared sheet
+os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
+
+INFO = acct.BACKUP_EMAIL
+XTTS, SALES, CONTACT, CAREERS, HIEUNX, TRUONGNV, THANGLT, KIENLT = acct.ROTATION_EMAILS
+CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 
 
-def account(five_hour, seven_day):
+def account(five_hour, seven_day, email="member@example.com", tier="team_standard", reset=None):
+    seven = {"utilization": seven_day}
+    if reset:
+        seven["resets_at"] = reset
     return {
-        "profile": {"emailAddress": "member@example.com"},
-        "usage": {"fetchedAt": 1, "data": {
-            "five_hour": {"utilization": five_hour},
-            "seven_day": {"utilization": seven_day},
-        }},
+        "profile": {"emailAddress": email},
+        "usage": {"fetchedAt": time.time(), "data": {"five_hour": {"utilization": five_hour}, "seven_day": seven}},
+        "seat": {"fetchedAt": time.time(), "tier": tier},
     }
 
 
-class RotationCandidateTests(unittest.TestCase):
-    def setUp(self):
-        self.idx = {"accounts": {
-            "info": account(10, 20),
-            "sales": account(80, 40),  # 80% Standard ≈ 16% Premium
-            "xtts": account(30, 45),
-        }}
+def pool_index(**usage):
+    """Every pool account saved under its email; usage={email: (5h, 7d)} and premium=<email>."""
+    premium = usage.pop("premium", None)
+    idx = {"accounts": {}}
+    for email in acct.POOL_EMAILS:
+        five, seven = usage.get(email, (0, 0))
+        idx["accounts"][email] = account(five, seven, email, acct.PREMIUM_TIER if email == premium else "team_standard")
+    return idx
 
-    def test_skips_over_threshold_account_and_selects_next_healthy_one(self):
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache"):
-            name, skipped = acct._next_eligible_rotation_account(
-                {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 15, 15)
-        self.assertEqual(name, "xtts")
-        self.assertEqual(skipped, ["sales (already at threshold: 5-hour 80% ≥ 75%)"])
 
-    def test_returns_no_candidate_when_all_accounts_are_over_threshold(self):
-        self.idx["accounts"]["xtts"] = account(10, 100)  # 7-day ≈ 20% Premium
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache"):
-            name, skipped = acct._next_eligible_rotation_account(
-                {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 15, 15)
-        self.assertIsNone(name)
-        self.assertEqual(len(skipped), 2)
+def stored(**extra):
+    """Patches for reading saved logins without a Keychain or the network."""
+    return [patch.object(acct, "read_stored_creds", return_value=CREDS),
+            patch.object(acct, "token_state", return_value="ok"),
+            patch.object(acct, "refresh_usage", return_value="cache"),
+            patch.object(acct, "refresh_seat", return_value="cache")]
 
-    def test_skips_destination_when_usage_cannot_be_confirmed(self):
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
+
+class Patches:
+    """Start several patches; named ones are returned by name (`with Patches(a, out=b) as m: m["out"]`)."""
+
+    def __init__(self, *ps, **named):
+        self.ps = list(ps) + list(named.values())
+        self.names = list(named)
+
+    def __enter__(self):
+        started = [p.start() for p in self.ps]
+        return dict(zip(self.names, started[len(self.ps) - len(self.names):]))
+
+    def __exit__(self, *a):
+        for p in reversed(self.ps):
+            p.stop()
+
+
+class CandidateTests(unittest.TestCase):
+    def pick(self, idx, premium, live=None):
+        with Patches(*stored()):
+            return acct._next_eligible_rotation_account(idx, premium, live=live)
+
+    def test_lowest_weekly_then_five_hour_wins(self):
+        idx = pool_index(**{SALES: (0, 30), CONTACT: (40, 10), CAREERS: (5, 10), HIEUNX: (0, 60)}, premium=XTTS)
+        for e in (TRUONGNV, THANGLT, KIENLT):
+            idx["accounts"][e] = account(0, 70, e)
+        self.assertEqual(self.pick(idx, XTTS)[0], CAREERS)
+
+    def test_backup_account_and_premium_are_never_candidates(self):
+        idx = pool_index(premium=XTTS)
+        idx["accounts"][INFO] = account(0, 0, INFO)
+        name, _ = self.pick(idx, XTTS)
+        self.assertNotIn(name, (INFO, XTTS))
+        self.assertEqual(name, SALES)  # full tie: the fixed order after the Premium account
+
+    def test_tie_goes_to_the_earliest_weekly_reset(self):
+        idx = pool_index(premium=XTTS)
+        for e in acct.ROTATION_EMAILS[1:]:
+            idx["accounts"][e] = account(0, 10, e, reset="2026-10-25T00:00:00+00:00")
+        idx["accounts"][THANGLT] = account(0, 10, THANGLT, reset="2026-10-21T00:00:00+00:00")
+        self.assertEqual(self.pick(idx, XTTS)[0], THANGLT)
+
+    def test_unsaved_expired_and_unreadable_accounts_are_skipped(self):
+        idx = pool_index(premium=XTTS)
+        del idx["accounts"][KIENLT]
+        with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
+                     patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == SALES else "ok"),
+                     patch.object(acct, "refresh_usage", side_effect=lambda m, c, **k: "http 429" if m["profile"]["emailAddress"] == CONTACT else "cache")):
+            name, skipped = acct._next_eligible_rotation_account(idx, XTTS)
+        self.assertEqual(name, CAREERS)
+        self.assertIn("%s (not logged in on this machine)" % KIENLT, skipped)
+        self.assertIn("%s (login expired/revoked)" % SALES, skipped)
+        self.assertIn("%s (usage unavailable)" % CONTACT, skipped)
+
+    def test_never_refreshes_the_token_of_the_live_login(self):
+        idx = pool_index(premium=XTTS)
+        with patch.object(acct, "read_stored_creds", return_value=CREDS), \
              patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="error: timeout"):
-            name, skipped = acct._next_eligible_rotation_account(
-                {"order": ["info", "sales", "xtts"], "premiumAccount": "info"},
-                self.idx, 15, 15)
-        self.assertIsNone(name)
-        self.assertEqual(skipped, ["sales (usage unavailable)", "xtts (usage unavailable)"])
+             patch.object(acct, "refresh_usage", return_value="cache") as usage:
+            acct._next_eligible_rotation_account(idx, XTTS, live=SALES)
+        self.assertNotIn(SALES, {c.kwargs.get("refresh_name") for c in usage.call_args_list})
 
 
 class ThresholdTests(unittest.TestCase):
-    def pick(self, idx, cfg):
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache"):
-            return acct._next_eligible_rotation_account(cfg, idx, 75)
-
-    def test_weekly_usage_below_threshold_does_not_trigger_rotation(self):
-        usage = account(10, 89)["usage"]["data"]
-        self.assertFalse(acct._usage_reached_threshold(usage, 75, 90))
-
-    def test_weekly_threshold_triggers_rotation(self):
-        usage = account(10, 90)["usage"]["data"]
-        self.assertTrue(acct._usage_reached_threshold(usage, 75, 90))
-
-    def test_weekly_threshold_defaults_for_existing_configs(self):
-        self.assertEqual(acct._weekly_threshold({"dailyThreshold": 90, "order": ["a", "b"]}), 90)
-        self.assertEqual(acct._weekly_threshold({"weeklyThreshold": 80}), 80)
-
-    def test_old_default_daily_threshold_follows_the_new_default(self):
-        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 90}), 80)
-        self.assertEqual(acct._rotation_threshold({}), 80)
-        self.assertEqual(acct._rotation_threshold({"dailyThreshold": 75}), 75)
-
-    def check(self, five_hour, seven_day):
-        cfg = {"dailyThreshold": 90}  # as saved by `configure` before 0.9.1
-        return acct._usage_reached_threshold(account(five_hour, seven_day)["usage"]["data"],
-                                             acct._rotation_threshold(cfg), acct._weekly_threshold(cfg))
+    def reached(self, five, seven):
+        return acct._usage_reached_threshold(account(five, seven)["usage"]["data"])
 
     def test_default_rule(self):
         # 5-hour >= 80% or 7-day >= 90% (or any window used up).
-        self.assertFalse(self.check(79, 89))
-        self.assertTrue(self.check(80, 0))
-        self.assertTrue(self.check(0, 90))
-        self.assertTrue(self.check(100, 0))
+        self.assertFalse(self.reached(79, 89))
+        self.assertTrue(self.reached(80, 0))
+        self.assertTrue(self.reached(0, 90))
+        self.assertTrue(self.reached(100, 0))
 
-    def test_destination_limits_are_5x_the_thresholds_on_standard(self):
-        idx = {"accounts": {"p": account(10, 0), "a": account(24, 49), "b": account(25, 0), "c": account(0, 50)}}
-        cfg = {"order": ["p", "a", "b", "c"], "premiumAccount": "p"}
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache"):
-            name, skipped = acct._next_eligible_rotation_account(
-                cfg, idx, 5, 10)
-        self.assertEqual(name, "a")
-        self.assertEqual(skipped, ["b (already at threshold: 5-hour 25% ≥ 25%)", "c (already at threshold: 7-day 50% ≥ 50%)"])
-
-    def test_destination_is_judged_by_its_premium_equivalent_usage(self):
-        idx = {"accounts": {"sales": account(20, 5), "a": account(74, 10), "b": account(10, 75), "c": account(0, 80)}}
-        cfg = {"order": ["sales", "a", "b", "c"], "premiumAccount": "sales"}
-        with patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache"):
-            name, skipped = acct._next_eligible_rotation_account(cfg, idx, 15, 15)
-        self.assertEqual(name, "a")  # 74% Standard 5-hour ≈ 14.8% Premium: still below 15%
-        self.assertEqual(skipped, ["b (already at threshold: 7-day 75% ≥ 75%)", "c (already at threshold: 7-day 80% ≥ 75%)"])
-
-    def test_daily_threshold_triggers_rotation(self):
-        usage = account(75, 0)["usage"]["data"]
-        self.assertTrue(acct._usage_reached_threshold(usage, 75))
-
-    def test_used_up_weekly_window_still_triggers_rotation(self):
-        usage = account(10, 100)["usage"]["data"]
-        self.assertTrue(acct._usage_reached_threshold(usage, 75))
-
-    def test_destination_weekly_usage_ranks_but_does_not_exclude(self):
-        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 100), "info": account(6, 100)}}
-        name, skipped = self.pick(idx, {"order": ["info", "sales", "xtts"], "premiumAccount": "sales"})
-        self.assertEqual(name, "xtts")  # both at 100% 7-day: lower 5-hour wins
-        self.assertEqual(skipped, [])
-
-    def test_picks_lowest_weekly_usage_not_next_in_order(self):
-        idx = {"accounts": {"sales": account(95, 84), "contact": account(0, 27), "careers": account(0, 100),
-                            "hieunx": account(0, 0), "truongnv": account(42, 93)}}
-        cfg = {"order": ["sales", "contact", "careers", "hieunx", "truongnv"], "premiumAccount": "sales"}
-        self.assertEqual(self.pick(idx, cfg)[0], "hieunx")
-
-    def test_equal_weekly_usage_prefers_lower_five_hour(self):
-        idx = {"accounts": {"sales": account(95, 50), "contact": account(40, 10), "careers": account(5, 10)}}
-        cfg = {"order": ["sales", "contact", "careers"], "premiumAccount": "sales"}
-        self.assertEqual(self.pick(idx, cfg)[0], "careers")
-
-    def test_full_tie_follows_order_after_current_premium(self):
-        idx = {"accounts": {"a": account(0, 0), "b": account(0, 0), "c": account(95, 50)}}
-        cfg = {"order": ["a", "b", "c"], "premiumAccount": "c"}
-        self.assertEqual(self.pick(idx, cfg)[0], "a")
-
-    def test_account_used_up_as_premium_is_not_skipped(self):
-        idx = {"accounts": {"sales": account(80, 0), "xtts": account(0, 90), "info": account(6, 100)}}
-        cfg = {"order": ["info", "sales", "xtts"], "premiumAccount": "sales",
-               "usedUpUntil": {"xtts": time.time() + 3600}}
-        name, skipped = self.pick(idx, cfg)
-        self.assertEqual((name, skipped), ("xtts", []))
-        self.assertNotIn("usedUpUntil", cfg)  # left by earlier versions; dropped
-
-    def test_tie_goes_to_the_earliest_weekly_reset(self):
-        def acc(reset):
-            a = account(0, 100)
-            a["usage"]["data"]["seven_day"]["resets_at"] = reset
-            return a
-        idx = {"accounts": {"p": account(80, 0), "a": acc("2026-10-24T07:00:00+00:00"),
-                            "b": acc("2026-10-22T03:59:00+00:00"), "c": account(0, 100)}}
-        cfg = {"order": ["p", "a", "b", "c"], "premiumAccount": "p"}
-        self.assertEqual(self.pick(idx, cfg)[0], "b")
+    def test_pool_is_fixed(self):
+        self.assertEqual(INFO, "info@xtgroup.vn")
+        self.assertNotIn(INFO, acct.ROTATION_EMAILS)
+        self.assertEqual(len(acct.ROTATION_EMAILS), 8)
+        self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
 
 
 class TokenRefreshTests(unittest.TestCase):
@@ -317,187 +274,327 @@ class CertificateFallbackTests(unittest.TestCase):
         self.assertEqual(acct.net_error(urllib.error.URLError("timed out")), "timed out")
 
 
-class FollowPremiumSeatTests(unittest.TestCase):
-    """The seat can move outside this machine; the session follows it instead of rotating a Standard account."""
 
-    def run_check(self, cur, tiers, cfg=None, statuses=None, manual=False):
-        """Run one check with `cur` live and `tiers` {name: seat tier}. Return (cfg, switched_to, rotated)."""
-        self.cfg = cfg or {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
-        idx = {"accounts": {n: account(0, 0) for n in ("info", "sales", "hieunx", "personal")}}
-        statuses = statuses or {}
+class WorkerTests(unittest.TestCase):
+    """Hooks on every working machine switch account; they never move the seat."""
 
-        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
-            name = creds["name"]
-            if name in tiers:
-                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[name]}
-            return statuses.get(name, "ok")
+    def run_check(self, cur, state=None, error=None, idx=None, manual=False):
+        idx = idx or pool_index(premium=SALES)
+        switched, reports = [], []
 
-        switched = []
-        with patch.object(acct, "load_rotation", return_value=self.cfg), \
-             patch.object(acct, "load_index", return_value=idx), \
-             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
-             patch.object(acct, "sync_current", return_value=cur), \
-             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
-             patch.object(acct, "refresh_seat", side_effect=seat), \
-             patch.object(acct, "refresh_usage", return_value="cache"), \
-             patch.object(acct, "_set_premium_seat") as rotate, \
-             patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)), \
-             patch.object(acct.sys, "stdout", io.StringIO()):
-            acct._cmd_auto_check_locked(argparse.Namespace(force=False, manual=manual))
-        return self.cfg, switched, rotate.called
+        def fake_state(account, force=False):
+            reports.append((account, force))
+            if error:
+                raise acct.AcctError(error)
+            return state
 
-    def test_follows_seat_moved_by_hand(self):
-        cfg, switched, rotated = self.run_check("sales", {"sales": "team_standard", "hieunx": "team_tier_1"})
-        self.assertEqual(cfg["premiumAccount"], "hieunx")
-        self.assertEqual(switched, ["hieunx"])
-        self.assertFalse(rotated)
+        with Patches(*stored(),
+                     patch.object(acct, "load_index", return_value=idx), patch.object(acct, "save_index"),
+                     patch.object(acct, "sync_current", return_value=cur),
+                     patch.object(acct, "pool_state", side_effect=fake_state),
+                     patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)),
+                     patch.object(acct.sys, "stdout", io.StringIO()),
+                     move=patch.object(acct, "_set_premium_seat")) as _p:
+            move = _p["move"]
+            acct._worker_check(argparse.Namespace(force=False, manual=manual))
+        move.assert_not_called()
+        return switched, reports
 
-    def test_usage_read_as_standard_is_dropped_when_following(self):
-        idx = {"accounts": {"sales": account(0, 0), "hieunx": account(0, 17)}}
-        tiers = {"sales": "team_standard", "hieunx": "team_tier_1"}
-        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
-            meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[creds["name"]]}
-            return "ok"
-        cfg = {"order": ["sales", "hieunx"], "premiumAccount": "sales"}
-        with patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
-             patch.object(acct, "refresh_seat", side_effect=seat), \
-             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
-             patch.object(acct, "cmd_switch"), patch.object(acct.sys, "stdout", io.StringIO()):
-            acct._follow_premium_seat(cfg, idx, "sales", argparse.Namespace(force=False, manual=False))
-        self.assertNotIn("usage", idx["accounts"]["hieunx"])  # its 17% 7-day was a Standard reading
-        self.assertEqual(idx["accounts"]["hieunx"]["seat"]["tier"], "team_tier_1")
+    def test_stable_switches_to_the_premium_account(self):
+        switched, reports = self.run_check(XTTS, {"phase": "STABLE", "premium": SALES})
+        self.assertEqual(switched, [SALES])
+        self.assertEqual(reports[-1], (SALES, True))  # reports the new account at once
 
-    def test_pool_account_that_is_not_premium_switches_to_the_holder(self):
-        cfg, switched, _ = self.run_check("info", {"sales": "team_tier_1"})
-        self.assertEqual(cfg["premiumAccount"], "sales")
-        self.assertEqual(switched, ["sales"])
+    def test_preparing_switches_to_the_backup_account_and_reports_it(self):
+        switched, reports = self.run_check(SALES, {"phase": "PREPARING", "premium": SALES, "target": CAREERS})
+        self.assertEqual(switched, [INFO])
+        self.assertEqual(reports[-1], (INFO, True))
 
-    def test_session_already_on_the_holder_stays(self):
-        _, switched, rotated = self.run_check("sales", {"sales": "team_tier_1"})
+    def test_moving_keeps_the_backup_account(self):
+        switched, _ = self.run_check(INFO, {"phase": "MOVING", "premium": SALES, "target": CAREERS})
         self.assertEqual(switched, [])
-        self.assertFalse(rotated)  # usage is 0%: no rotation either
+
+    def test_after_the_move_the_backup_account_switches_to_the_new_premium(self):
+        switched, _ = self.run_check(INFO, {"phase": "STABLE", "premium": CAREERS})
+        self.assertEqual(switched, [CAREERS])
+
+    def test_already_on_premium_stays(self):
+        switched, _ = self.run_check(SALES, {"phase": "STABLE", "premium": SALES})
+        self.assertEqual(switched, [])
 
     def test_login_outside_the_pool_is_left_alone(self):
-        _, switched, _ = self.run_check("personal", {"sales": "team_standard", "hieunx": "team_tier_1"})
+        idx = pool_index(premium=SALES)
+        idx["accounts"]["personal"] = account(0, 0, "me@gmail.com")
+        switched, reports = self.run_check("personal", {"phase": "PREPARING", "premium": SALES, "target": XTTS}, idx=idx)
+        self.assertEqual((switched, reports), ([], []))
+
+    def test_server_down_follows_the_seat_on_claude_ai(self):
+        switched, _ = self.run_check(XTTS, error="pool server unreachable: timed out")
+        self.assertEqual(switched, [SALES])
+
+    def test_server_down_and_no_confirmed_holder_changes_nothing(self):
+        switched, _ = self.run_check(XTTS, error="pool server unreachable", idx=pool_index())
         self.assertEqual(switched, [])
 
-    def test_unreadable_seat_keeps_the_configured_premium(self):
-        cfg, switched, _ = self.run_check("sales", {}, statuses={"sales": "error: timeout"})
-        self.assertEqual(cfg["premiumAccount"], "sales")
+    def test_wanted_account_not_logged_in_here_is_reported_not_switched(self):
+        idx = pool_index(premium=SALES)
+        del idx["accounts"][CAREERS]
+        switched, _ = self.run_check(SALES, {"phase": "STABLE", "premium": CAREERS}, idx=idx)
         self.assertEqual(switched, [])
+        with self.assertRaises(acct.AcctError):
+            self.run_check(SALES, {"phase": "STABLE", "premium": CAREERS}, idx=idx, manual=True)
 
-    def test_no_saved_holder_changes_nothing_and_does_not_rotate(self):
-        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
-        cfg, switched, rotated = self.run_check(
-            "sales", {"sales": "team_standard", "info": "team_standard", "hieunx": "team_standard"}, cfg=cfg)
-        self.assertEqual(cfg["premiumAccount"], "sales")
-        self.assertEqual(switched, [])
-        self.assertFalse(rotated)
 
-    def test_right_after_own_rotation_never_follows_back_to_the_account_it_left(self):
-        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
-               "rotatedAt": time.time(), "rotatedFrom": "sales"}
-        cfg, switched, rotated = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
-        self.assertEqual(cfg["premiumAccount"], "hieunx")
-        self.assertEqual(switched, [])
-        self.assertFalse(rotated)
+class FakePool:
+    """The pool server as machine 2 sees it."""
 
-    def test_right_after_own_rotation_still_follows_a_move_to_another_account(self):
-        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
-               "rotatedAt": time.time(), "rotatedFrom": "sales"}
-        cfg, switched, _ = self.run_check(
-            "hieunx", {"hieunx": "team_standard", "sales": "team_tier_1", "info": "team_tier_1"}, cfg=cfg)
-        self.assertEqual(cfg["premiumAccount"], "info")
-        self.assertEqual(switched, ["info"])
+    def __init__(self, phase="STABLE", premium=None, workers=()):
+        self.state = {"phase": phase, "premium": premium, "target": None, "updated_at": 100.0}
+        self.workers = list(workers)
+        self.puts = []
 
-    def test_follow_back_is_allowed_once_the_grace_period_is_over(self):
-        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "hieunx",
-               "rotatedAt": time.time() - acct.FOLLOW_GRACE - 1, "rotatedFrom": "sales"}
-        cfg, switched, _ = self.run_check("hieunx", {"hieunx": "team_standard", "sales": "team_tier_1"}, cfg=cfg)
-        self.assertEqual(switched, ["sales"])
+    def __call__(self, method, path, body=None, mover=False, timeout=4):
+        if path == "/api/machine":
+            return dict(self.state)
+        if path == "/api/state" and method == "PUT":
+            self.puts.append((body["phase"], body["premium"], body.get("target")))
+            self.state.update(phase=body["phase"], premium=body["premium"], target=body.get("target"), updated_at=200.0)
+            for w in self.workers:  # every working machine reaches the backup account after PREPARING
+                if body["phase"] == "PREPARING":
+                    w.update(at_info=True, last_seen=201.0)
+            return dict(self.state)
+        if path == "/api/machines":
+            return [dict(w) for w in self.workers]
+        if path == "/api/state":
+            return dict(self.state)
+        raise AssertionError(path)
 
-    def rotate_check(self, tiers_after_wait):
-        """Premium sales is over the threshold; return (cfg, switched, rotated) when the fresh
-        seat reading taken right before the transfer shows `tiers_after_wait`."""
-        cfg = {"enabled": True, "order": ["info", "sales", "hieunx"], "premiumAccount": "sales"}
-        idx = {"accounts": {"info": account(0, 0), "sales": account(85, 5), "hieunx": account(0, 0)}}
-        reads = {"n": 0}
 
-        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
-            name = creds["name"]
-            reads["n"] += 1
-            tiers = {"sales": "team_tier_1"} if not force or name != "sales" else tiers_after_wait
-            if name in tiers:
-                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers[name]}
-            elif force:
-                meta["seat"] = {"fetchedAt": time.time(), "tier": tiers_after_wait.get(name, "team_standard")}
+class MoverTests(unittest.TestCase):
+    """The service on machine 2 moves the seat; it never switches account."""
+
+    def setUp(self):
+        acct.save_pool_settings({"mover_key": "mk", "machine_id": "m2"})
+        for f in ("mover-state.json",):
+            try:
+                os.unlink(os.path.join(acct.store_dir(), f))
+            except FileNotFoundError:
+                pass
+
+    def tearDown(self):
+        acct.save_pool_settings({})
+
+    def run_once(self, idx, pool, seat_after=None, move_error=None):
+        """seat_after: tiers read after MOVING ({email: tier}), to simulate a seat moved by hand."""
+        reads = {"moving": False}
+
+        def tier(meta, creds, force=False, refresh_name=None, ttl=None):
+            if force and seat_after and pool.state["phase"] in ("MOVING", "STABLE") and pool.puts:
+                meta["seat"] = {"fetchedAt": time.time(), "tier": seat_after.get(meta["profile"]["emailAddress"], "team_standard")}
             return "ok"
 
-        switched = []
-        with patch.object(acct, "load_rotation", return_value=cfg), \
-             patch.object(acct, "load_index", return_value=idx), \
-             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
-             patch.object(acct, "sync_current", return_value="sales"), \
-             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_seat", side_effect=seat), \
-             patch.object(acct, "refresh_usage", return_value="cache"), \
-             patch.object(acct.random, "uniform", return_value=0), \
-             patch.object(acct, "_set_premium_seat") as rotate, \
-             patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)), \
-             patch.object(acct.sys, "stdout", io.StringIO()):
-            acct._cmd_auto_check_locked(argparse.Namespace(force=False, manual=False))
-        return cfg, switched, rotate.called
+        with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
+                     patch.object(acct, "token_state", return_value="ok"),
+                     patch.object(acct, "refresh_usage", return_value="cache"),
+                     patch.object(acct, "refresh_seat", side_effect=tier),
+                     patch.object(acct, "load_index", return_value=idx), patch.object(acct, "save_index"),
+                     patch.object(acct, "current_name", return_value=None),
+                     patch.object(acct, "pool_call", side_effect=pool),
+                     patch.object(acct.time, "sleep"),
+                     patch.object(acct.sys, "stdout", io.StringIO()),
+                     move=patch.object(acct, "_set_premium_seat", side_effect=move_error),
+                     switch=patch.object(acct, "cmd_switch")) as _p:
+            move = _p["move"]
+            switch = _p["switch"]
+            acct._mover_once(argparse.Namespace(force=False, manual=False))
+        switch.assert_not_called()
+        return move
 
-    def test_rotates_when_the_fresh_reading_still_shows_premium(self):
-        cfg, switched, rotated = self.rotate_check({"sales": "team_tier_1"})
-        self.assertTrue(rotated)
-        self.assertEqual(switched, ["hieunx"])  # tie with info: the order after sales decides
-        self.assertEqual(cfg["premiumAccount"], "hieunx")
+    def test_below_threshold_only_publishes_the_premium_account(self):
+        pool = FakePool()
+        move = self.run_once(pool_index(**{SALES: (50, 40)}, premium=SALES), pool)
+        self.assertEqual(pool.puts, [("STABLE", SALES, None)])
+        move.assert_not_called()
 
-    def test_seat_moved_by_another_machine_meanwhile_is_followed_not_moved_again(self):
-        cfg, switched, rotated = self.rotate_check({"sales": "team_standard", "info": "team_tier_1"})
-        self.assertFalse(rotated)
-        self.assertEqual(switched, ["info"])  # another machine chose info; this one follows
-        self.assertEqual(cfg["premiumAccount"], "info")
+    def test_full_move_goes_through_preparing_moving_stable(self):
+        pool = FakePool("STABLE", SALES, workers=[{"name": "Hiếu", "role": "worker", "active": True, "at_info": False, "last_seen": 150.0}])
+        idx = pool_index(**{SALES: (85, 40), CONTACT: (0, 5)}, premium=SALES)
+        for e in (XTTS, CAREERS, HIEUNX, TRUONGNV, THANGLT, KIENLT):
+            idx["accounts"][e] = account(0, 60, e)
+        move = self.run_once(idx, pool)
+        self.assertEqual(pool.puts, [("PREPARING", SALES, CONTACT), ("MOVING", SALES, CONTACT), ("STABLE", CONTACT, None)])
+        self.assertEqual(move.call_args.args[:2], (SALES, CONTACT))
 
-    def test_seat_refresh_renews_the_token_of_an_idle_account_only(self):
-        expired = {"claudeAiOauth": {"accessToken": "old", "expiresAt": 1, "refreshToken": "r"}}
-        with patch.object(acct, "refresh_stored_token", return_value="revoked") as refresh:
-            self.assertEqual(acct.refresh_seat({}, dict(expired)), "expired")
-            refresh.assert_not_called()
-            self.assertEqual(acct.refresh_seat({}, dict(expired), refresh_name="b"), "revoked")
-            refresh.assert_called_once()
+    def test_waits_for_working_machines_then_gives_up_after_the_timeout(self):
+        pool = FakePool("STABLE", SALES)
+        pool.workers = [{"name": "Thắng", "role": "worker", "active": True, "at_info": False, "last_seen": 150.0}]
+        pool.__class__ = type("Stuck", (FakePool,), {})  # this worker never reports the backup account
+
+        def no_update(self_, method, path, body=None, mover=False, timeout=4):
+            if path == "/api/state" and method == "PUT":
+                self_.puts.append((body["phase"], body["premium"], body.get("target")))
+                self_.state.update(phase=body["phase"], premium=body["premium"], updated_at=200.0)
+                return dict(self_.state)
+            return FakePool.__call__(self_, method, path, body, mover, timeout)
+
+        pool.__class__.__call__ = no_update
+        with patch.object(acct, "PREPARE_TIMEOUT", 0):
+            self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool)
+        self.assertEqual([p[0] for p in pool.puts], ["PREPARING", "MOVING", "STABLE"])
+        events = [json.loads(l)["event"] for l in open(os.path.join(acct.store_dir(), "rotation.log"), encoding="utf-8")]
+        self.assertIn("prepare_timeout", events)
+
+    def test_failed_move_returns_everyone_to_the_old_premium_and_backs_off(self):
+        pool = FakePool("STABLE", SALES)
+        move = self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool, move_error=acct.AcctError("not signed in"))
+        self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
+        self.assertGreater(acct._mover_state()["backoff_until"], time.time())
+        move.reset_mock()
+        pool.puts.clear()
+        move = self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool)
+        self.assertEqual(pool.puts, [])
+        move.assert_not_called()
+
+    def test_seat_moved_by_hand_during_the_move_is_published_not_moved_again(self):
+        pool = FakePool("STABLE", SALES)
+        move = self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool, seat_after={KIENLT: acct.PREMIUM_TIER})
+        move.assert_not_called()
+        self.assertEqual(pool.puts[-1], ("STABLE", KIENLT, None))
+
+    def test_no_destination_does_not_start_a_move(self):
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (85, 40)}, premium=SALES)
+        for e in acct.ROTATION_EMAILS:
+            if e != SALES:
+                del idx["accounts"][e]
+        self.run_once(idx, pool)
+        self.assertEqual(pool.puts, [])
+
+    def test_a_move_cut_short_is_reset_to_where_the_seat_is(self):
+        pool = FakePool("MOVING", SALES)
+        self.run_once(pool_index(**{CONTACT: (1, 1)}, premium=CONTACT), pool)
+        self.assertEqual(pool.puts, [("STABLE", CONTACT, None)])
+
+    def test_needs_the_mover_key(self):
+        acct.save_pool_settings({"api_key": "k", "machine_id": "w"})
+        with self.assertRaises(acct.AcctError):
+            acct._mover_once(argparse.Namespace(force=False, manual=False))
+
+
+class JoinAndServiceTests(unittest.TestCase):
+    def tearDown(self):
+        acct.save_pool_settings({})
+
+    def test_join_saves_the_key_and_turns_switching_on(self):
+        with Patches(patch.object(acct, "pool_call", return_value={"phase": "STABLE", "premium": SALES}),
+                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
+            out = _p["out"]
+            acct.cmd_auto_join(argparse.Namespace(key=" k1 ", url="http://10.0.0.1:5680/"))
+        st = acct.pool_settings()
+        self.assertEqual((st["api_key"], st["url"]), ("k1", "http://10.0.0.1:5680"))
+        self.assertTrue(acct.load_rotation()["enabled"])
+        self.assertIn(SALES, out.getvalue())
+
+    def test_join_with_a_rejected_key_says_so(self):
+        with patch.object(acct, "pool_call", side_effect=acct.AcctError("pool server answered HTTP 403 for /api/state")):
+            with self.assertRaises(acct.AcctError):
+                acct.cmd_auto_join(argparse.Namespace(key="bad", url=None))
+
+    def test_launcher_runs_the_installed_plugin_version_once(self):
+        path = acct._write_mover_launcher()
+        text = open(path, encoding="utf-8").read()
+        self.assertIn("installed_plugins.json", text)
+        self.assertIn("auto serve-once", text)
+        self.assertTrue(os.access(path, os.X_OK))
+
+    def test_mover_service_is_a_launch_agent_every_30_seconds(self):
+        import plistlib
+        plist = os.path.join(acct.store_dir(), "agent.plist")
+        with Patches(patch.object(acct.sys, "platform", "darwin"),
+                     patch.object(acct, "_launch_agent_path", return_value=plist),
+                     patch.object(acct.subprocess, "run", return_value=argparse.Namespace(returncode=0, stdout="", stderr=""))):
+            acct._install_mover_service()
+        with open(plist, "rb") as f:
+            p = plistlib.load(f)
+        self.assertEqual((p["Label"], p["StartInterval"], p["RunAtLoad"]), (acct.MOVER_LABEL, 30, True))
+
+    def test_pool_requests_carry_the_right_key(self):
+        acct.save_pool_settings({"api_key": "k", "mover_key": "mk", "machine_id": "x", "url": "http://pool"})
+        seen = []
+
+        class Resp(io.BytesIO):
+            headers = argparse.Namespace(get_content_type=lambda: "application/json")
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake(req, timeout):
+            seen.append((req.full_url, {k.lower(): v for k, v in req.header_items()}))
+            return Resp(b"{}")
+
+        with patch.object(acct, "urlopen", side_effect=fake):
+            acct.pool_call("GET", "/api/state")
+            acct.pool_call("PUT", "/api/state", {"phase": "STABLE"}, mover=True)
+        self.assertEqual(seen[0][0], "http://pool/api/state")
+        self.assertEqual(seen[0][1].get("x-pool-key"), "k")
+        self.assertEqual(seen[1][1].get("x-pool-mover-key"), "mk")
+
+
+class LoginAllTests(unittest.TestCase):
+    def test_logs_in_only_the_missing_or_expired_pool_accounts_in_one_terminal(self):
+        idx = pool_index()
+        del idx["accounts"][KIENLT]
+        with Patches(patch.object(acct, "load_index", return_value=idx),
+                     patch.object(acct, "read_stored_creds", return_value=CREDS),
+                     patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == XTTS else "ok"),
+                     patch.object(acct, "claude_bin", return_value="/bin/claude"),
+                     patch.object(acct.sys, "stdout", io.StringIO()),
+                     term=patch.object(acct, "open_terminal", return_value=True)) as _p:
+            term = _p["term"]
+            acct.cmd_login(argparse.Namespace(name=None, email=None))
+        script = open(term.call_args.args[0], encoding="utf-8").read()
+        self.assertIn("--email kienlt@xtgroup.vn", script.replace("'", ""))
+        self.assertIn("--email xtts@xtgroup.vn", script.replace("'", ""))
+        self.assertNotIn("sales@xtgroup.vn", script)
+        self.assertIn("(1/2)", script)
+
+    def test_nothing_to_do_when_every_pool_account_is_logged_in(self):
+        with Patches(*stored(), patch.object(acct, "load_index", return_value=pool_index()),
+                     term=patch.object(acct, "open_terminal"),
+                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
+            term = _p["term"]
+            out = _p["out"]
+            acct.cmd_login(argparse.Namespace(name=None, email=None))
+        term.assert_not_called()
+        self.assertIn("All 9 pool accounts", out.getvalue())
 
 
 class RotationPreviewTests(unittest.TestCase):
-    def preview(self, accounts):
-        cfg = {"enabled": True, "order": ["sales", "a", "b"], "premiumAccount": "sales",
-               "dailyThreshold": 5, "weeklyThreshold": 10}
-        idx = {"accounts": accounts}
-        with patch.object(acct, "load_rotation", return_value=cfg), \
-             patch.object(acct, "read_stored_creds", return_value={"claudeAiOauth": {"refreshToken": "r"}}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache") as usage, \
-             patch.object(acct.sys, "stdout", io.StringIO()) as out:
-            acct._print_rotation_preview(idx, live="a")
-        return out.getvalue(), usage
+    def test_explains_why_no_account_is_eligible(self):
+        idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
+        for e in acct.ROTATION_EMAILS:
+            if e not in (SALES, CONTACT):
+                del idx["accounts"][e]
+        with Patches(*stored(), patch.object(acct, "load_rotation", return_value={"enabled": True}),
+                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
+            out = _p["out"]
+            idx["accounts"][CONTACT]["usage"]["data"]["five_hour"] = {"utilization": 100}
+            with patch.object(acct, "PREMIUM_FACTOR", 1):  # make the Premium-equivalent filter bite
+                acct._print_rotation_preview(idx, live=CONTACT)
+        text = out.getvalue()
+        self.assertIn("Premium %s: 5-hour 85%%, 7-day 46%%; threshold reached" % SALES, text)
+        self.assertIn("Next Premium: none eligible", text)
+        self.assertIn("%s (not logged in on this machine)" % XTTS, text)
 
     def test_names_the_next_premium(self):
-        out, _ = self.preview({"sales": account(70, 46), "a": account(0, 10), "b": account(0, 5)})
-        self.assertIn("threshold reached", out)
-        self.assertIn("Next Premium: **b**", out)
-
-    def test_explains_why_no_account_is_eligible(self):
-        out, _ = self.preview({"sales": account(70, 46), "a": account(100, 10), "b": account(0, 53)})
-        self.assertIn("Next Premium: none eligible; sales keeps the seat", out)
-        self.assertIn("- a (already at threshold: 5-hour 100% ≥ 25%)", out)
-        self.assertIn("- b (already at threshold: 7-day 53% ≥ 50%)", out)
-
-    def test_never_refreshes_the_token_of_the_live_login(self):
-        _, usage = self.preview({"sales": account(70, 46), "a": account(0, 10), "b": account(0, 5)})
-        refresh_names = {c.kwargs.get("refresh_name") for c in usage.call_args_list}
-        self.assertNotIn("a", refresh_names)
+        idx = pool_index(**{SALES: (85, 46), CAREERS: (0, 1)}, premium=SALES)
+        for e in acct.ROTATION_EMAILS:
+            if e not in (SALES, CAREERS):
+                idx["accounts"][e] = account(0, 50, e)
+        with Patches(*stored(), patch.object(acct, "load_rotation", return_value={"enabled": True}),
+                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
+            out = _p["out"]
+            acct._print_rotation_preview(idx, live=None)
+        self.assertIn("Next Premium: **%s**" % CAREERS, out.getvalue())
 
 
 class RotationLogTests(unittest.TestCase):
@@ -520,13 +617,12 @@ class RotationLogTests(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             return [json.loads(l) for l in f]
 
-    def test_writes_one_json_line_with_machine_version_and_fields(self):
+    def test_writes_one_json_line_and_stays_local_before_joining(self):
         acct.log_event("move_ok", "12s", live="a@x.vn", target="b@x.vn", p5h=6.0)
         (rec,) = self.lines()
         self.assertEqual((rec["event"], rec["machine"], rec["live"], rec["target"], rec["p5h"], rec["message"]),
                          ("move_ok", "Tester", "a@x.vn", "b@x.vn", 6.0, "12s"))
-        self.assertIn("version", rec)
-        self.assertEqual(self.lines("log-outbox.jsonl"), [])  # no URL: local only
+        self.assertEqual(self.lines("log-outbox.jsonl"), [])
 
     def test_throttled_events_are_logged_once_per_period(self):
         for _ in range(3):
@@ -534,65 +630,42 @@ class RotationLogTests(unittest.TestCase):
         acct.log_event("heartbeat", "y", every=600)
         self.assertEqual([r["event"] for r in self.lines()], ["no_destination", "heartbeat"])
 
-    def test_with_url_events_go_to_the_outbox_and_a_flush_starts(self):
-        with patch.dict(os.environ, {"CLAUDE_ACCT_LOG_URL": "https://example.invalid/exec"}), \
-             patch.object(acct, "_spawn_log_flush") as spawn:
+    def test_joined_machines_queue_events_and_start_an_upload(self):
+        acct.save_pool_settings({"api_key": "k", "machine_id": "x"})
+        with patch.object(acct, "_spawn_log_flush") as spawn:
             acct.log_event("follow", "seat moved")
         self.assertEqual(len(self.lines("log-outbox.jsonl")), 1)
         spawn.assert_called_once()
 
     def flush(self, reply):
-        class Resp(io.BytesIO):
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
+        acct.save_pool_settings({"api_key": "k", "machine_id": "x"})
         sent = []
-        def fake_urlopen(req, timeout):
-            sent.append(json.loads(req.data.decode("utf-8")))
+
+        def fake(method, path, body=None, mover=False, timeout=4):
+            sent.append((path, body))
             if isinstance(reply, Exception):
                 raise reply
-            return Resp(reply)
-        with patch.dict(os.environ, {"CLAUDE_ACCT_LOG_URL": "https://example.invalid/exec"}), \
-             patch.object(acct, "_spawn_log_flush"), patch.object(acct, "urlopen", side_effect=fake_urlopen):
+            return reply
+
+        with patch.object(acct, "_spawn_log_flush"), patch.object(acct, "pool_call", side_effect=fake):
             acct.log_event("a", "1")
             acct.log_event("b", "2")
             acct.cmd_log_flush(None)
         return sent
 
-    def test_flush_sends_the_outbox_in_one_batch_and_clears_it(self):
-        sent = self.flush(b"ok")
-        self.assertEqual([e["event"] for e in sent[0]["events"]], ["a", "b"])
+    def test_flush_sends_the_outbox_to_the_pool_server_in_one_batch(self):
+        sent = self.flush("ok")
+        self.assertEqual(sent[0][0], "/api/log")
+        self.assertEqual([e["event"] for e in sent[0][1]["events"]], ["a", "b"])
         self.assertFalse(os.path.exists(os.path.join(self.dir, "log-outbox.jsonl.sending")))
 
     def test_failed_upload_keeps_the_events_for_the_next_flush(self):
-        self.flush(OSError("offline"))
+        self.flush(acct.AcctError("pool server unreachable"))
         self.assertEqual(len(self.lines("log-outbox.jsonl.sending")), 2)
 
     def test_logging_never_raises(self):
         with patch.object(acct, "store_dir", side_effect=OSError("read-only")):
             acct.log_event("error", "x")
-
-    def test_failed_seat_move_is_logged_once(self):
-        cfg = {"enabled": True, "order": ["info", "sales"], "premiumAccount": "sales"}
-        idx = {"accounts": {"info": account(0, 0), "sales": account(85, 5)}}
-        def seat(meta, creds, force=False, refresh_name=None, ttl=None):
-            meta["seat"] = {"fetchedAt": time.time(), "tier": "team_tier_1" if creds["name"] == "sales" else "team_standard"}
-            return "ok"
-        with patch.object(acct, "load_rotation", return_value=cfg), \
-             patch.object(acct, "load_index", return_value=idx), \
-             patch.object(acct, "save_index"), patch.object(acct, "save_rotation"), \
-             patch.object(acct, "sync_current", return_value="sales"), \
-             patch.object(acct, "current_name", return_value="sales"), \
-             patch.object(acct, "read_stored_creds", side_effect=lambda n: {"name": n}), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_seat", side_effect=seat), \
-             patch.object(acct, "refresh_usage", return_value="cache"), \
-             patch.object(acct.random, "uniform", return_value=0), \
-             patch.object(acct, "_set_premium_seat", side_effect=acct.AcctError("not signed in")):
-            with self.assertRaises(acct.AcctError):
-                acct.cmd_auto_check(argparse.Namespace(force=False, manual=False))
-        events = [r["event"] for r in self.lines()]
-        self.assertEqual(events, ["heartbeat", "move_start", "move_fail"])
-        self.assertIn("not signed in", self.lines()[-1]["message"])
 
 
 class StopFailureRecoveryTests(unittest.TestCase):

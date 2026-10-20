@@ -1,7 +1,7 @@
 ---
 name: auto
-description: Configure the usage thresholds, enable or disable automatic Premium seat rotation, and inspect its status.
-argument-hint: "<configure|enable|disable|status|check> [options]"
+description: Join the XTGroup pool server, make machine 2 the seat mover, turn automatic account switching on or off, show the pool state, or open the admin browser.
+argument-hint: "<join <key>|mover <key>|enable|disable|status|browser>"
 disable-model-invocation: true
 allowed-tools: Bash(bash *)
 ---

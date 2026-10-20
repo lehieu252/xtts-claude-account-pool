@@ -37,7 +37,7 @@ const startRegularChrome = async () => {
   let command, commandArgs;
   if (process.platform === "darwin") {
     command = "open";
-    commandArgs = ["-na", "Google Chrome", "--args", ...args];
+    commandArgs = ["-gna", "Google Chrome", "--args", ...args];  // -g: stay in the background
   } else if (process.platform === "win32") {
     command = process.env.CLAUDE_ACCT_CHROME || "chrome.exe";
     commandArgs = args;

@@ -1,14 +1,17 @@
 # xtts-claude-account-pool (`acct`)
 
-A Claude Code plugin for people with more than one Claude account (claude.ai login). Save your accounts, see the 5-hour / 7-day usage of all of them in one table, and switch between them **without logging out and back in**. Works in the CLI and the VS Code extension, on macOS, Windows and Linux.
+A Claude Code plugin for the XTGroup claude.ai Team. Save the team's accounts, see the 5-hour / 7-day usage of all of them in one table, switch between them **without logging out and back in**, and share one Premium seat: one always-on machine (machine 2) moves the seat to the least-used account, and every working machine switches to the account that holds it. Works in the CLI and the VS Code extension, on macOS, Windows and Linux (the seat-moving service runs on macOS).
 
 | Command | What it does |
 |---|---|
+| `/acct:login` | Log in, one after the other in one terminal window, to every pool account this machine does not have yet (or whose login expired) |
 | `/acct:login <email>` or `/acct:login <name> [email]` | Log in to any account (new, or again) and save it. With just an email, the email is the account name, and the script checks that you signed in with that email in the browser. Opens a terminal window to finish the login; **your current account is not changed** |
 | `/acct:save <name>` | Save the account you are **currently logged in** with, no new login needed |
-| `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, organization seat (Premium / Standard / No seat), 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account. With rotation configured, it also shows whether the Premium account has reached its threshold and which account would take the seat next, or why each account is skipped |
+| `/acct:list [--refresh]` | Table of saved accounts: email, organization, plan, organization seat (Premium / Standard / No seat), 5-hour / 7-day usage with reset times. Accounts that need a new login are flagged. `▶` = current account. It also shows the pool phase, the machines seen in the last 5 minutes, whether the Premium account has reached its threshold, and which account would take the seat next, or why each account is skipped |
 | `/acct:switch <name> [--no-wait]` | Switch to another saved account and **keep working in the same chat**. Accepts the name, the email, or the part before `@` (e.g. `alice`) if it is unique |
-| `/acct:auto <configure|enable|disable|status|check>` | Move the organization's Premium seat to the least-used saved account when the active Premium account reaches its usage threshold |
+| `/acct:auto join <key>` | Join the pool server (every machine, once): turns automatic account switching on |
+| `/acct:auto mover <mover key>` | Make this machine the one that moves the Premium seat (machine 2, once); `off` removes it |
+| `/acct:auto <enable|disable|status|browser>` | Turn switching on or off on this machine, show the pool state, open the admin browser (machine 2) |
 | `/acct:logout <name>` | Remove an account from the list (deletes its saved token) |
 | `/acct:doctor` | Check the requirements, install the Node dependency, and list the setup steps that are left |
 
@@ -70,42 +73,30 @@ bash "$PLUGIN_ROOT/scripts/acct.sh" doctor
 
 Shell variables do not survive between tool calls, so in the next steps `$ACCT` stands for `bash "<PLUGIN_ROOT>/scripts/acct.sh"` with the absolute path printed above written out in full. The slash commands and hooks of a newly installed plugin are only loaded by a new session, but the script works right away, so steps 4 to 7 run it directly in the current session.
 
-**4. Save the accounts.** Ask the user for the email of every account in the pool. Save the account Claude Code is logged in with now, then log in to each other one:
+**4. Log in to the pool accounts.** The nine accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
 
 ```bash
-$ACCT save <email of the current account>
-$ACCT login <email>          # once per other account
+$ACCT login
 ```
 
-`login` opens a separate terminal window and a browser login page. Tell the user to sign in **with that email** and, if the page shows a code, paste it into that terminal window. Wait until the user says it is done, then run the next one. The current Claude Code login is not changed. Afterwards, check:
+It opens a terminal window. For each account, tell the user to be signed in to claude.ai **as that account** in the browser (sign out of another one first), press Enter in the terminal, finish the login, and paste the code into the terminal if the page shows one. Afterwards, check with `$ACCT list --refresh`: every account should be listed without "🔴 Log in again".
+
+**5. Join the pool.** Ask the user for the pool API key (they get it from the team, never from git) and run:
 
 ```bash
-$ACCT list --refresh
+$ACCT auto join <key>
 ```
 
-Every account should be listed without "🔴 Log in again", and the Seat column shows which one holds Premium now.
-
-**5. Configure rotation.** Use the account whose Seat is Premium as `--premium`, and put it first in `--order`, followed by the other accounts in the order the user wants them to take over. The default thresholds are 80% of the 5-hour usage or 90% of the 7-day usage; add `--threshold <1-99>` only if the user asks for another value.
-
-```bash
-$ACCT auto configure --premium <premium email> --order <premium email>,<next email>,<next email>
-```
-
-**6. Sign in to the automation browser.** This opens Chrome with a dedicated profile (`~/.claude-acct/browser-profile`), separate from the user's normal Chrome.
+**6. Only on machine 2** (the always-on Mac that moves the seat): open the automation browser and have the user sign in to claude.ai there as an organization owner or admin, then install the service with the mover key:
 
 ```bash
 $ACCT auto browser
+$ACCT auto mover <mover key>
 ```
 
-Tell the user to sign in to claude.ai in that window **as an organization owner or admin**, pass any Cloudflare check, and confirm that the Members page shows the expected Premium and Standard seats. Wait for the user to confirm. Leave the window open or closed as they like; the plugin starts it again when needed.
+**7. Check.** Run `$ACCT doctor` and `$ACCT auto status` and show the user the result.
 
-**7. Check and enable.** Run `$ACCT doctor` and `$ACCT auto status`, show the user the result, and turn rotation on only after the user agrees:
-
-```bash
-$ACCT auto enable
-```
-
-**8. Finish.** Tell the user to start a new session so the `/acct:*` commands and the rotation hooks load: in the terminal, exit and run `claude` again; in VS Code, run **Developer: Reload Window**. In the new session, `/acct:doctor` should end with "Everything is ready" and `/acct:list` shows the pool.
+**8. Finish.** Tell the user to start a new session so the `/acct:*` commands and the hooks load: in the terminal, exit and run `claude` again; in VS Code, run **Developer: Reload Window**. In the new session, `/acct:doctor` should end with "Everything is ready".
 
 Rules: never run `/logout` (it can revoke a saved token), never edit seat tiers in the Members page while rotation is on, and do not enable rotation without the user's go-ahead.
 
@@ -127,14 +118,12 @@ claude plugin install acct@xtts-claude-account-pool --scope user
 
 Start a new session (VS Code: **Developer: Reload Window**), then:
 
-1. `/acct:doctor`: checks the requirements, installs `playwright-core`, and lists what is left.
-2. `/acct:save <email>` for the account you are logged in with, and `/acct:login <email>` for every other account of the pool. Each login opens a terminal window and a browser page; sign in with that email.
-3. `/acct:list --refresh`: the Seat column shows which account holds Premium.
-4. `/acct:auto configure --premium <premium email> --order <premium email>,<next>,<next>`
-5. `/acct:auto browser`: sign in as an organization owner/admin in the Chrome window that opens.
-6. `/acct:doctor` and `/acct:auto status`, then `/acct:auto enable`.
+1. `/acct:login`: log in to every pool account, one after the other.
+2. `/acct:auto join <key>` with the pool API key you were given.
+3. Machine 2 only: `/acct:auto browser` (sign in as an organization owner/admin), then `/acct:auto mover <mover key>`.
+4. `/acct:doctor`: every line should be ✅.
 
-The account tokens, the browser profile and its sign-in are local to each machine (under `~/.claude-acct`). On a new machine, repeat the steps; nothing is transferred.
+The account tokens, the browser profile, its sign-in and the pool keys are local to each machine (under `~/.claude-acct`). On a new machine, repeat the steps; nothing is transferred.
 
 ### Update
 
@@ -154,40 +143,48 @@ Start a new session afterwards. Each version is installed in its own directory; 
 
 From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the confirmation, and keep working in the same chat. No new tab or `/resume` needed.
 
-### Automatic Premium seat rotation
+### The XTGroup pool
 
-The rotation is opt-in. It triggers when the Premium account reaches **80% of its 5-hour usage** or **90% of its 7-day usage**, or when any window is used up (100%). A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro), so the account that gives up the seat reads about 5x higher once it is Standard again: 80% of the 5-hour window as Premium is over 100% as Standard, so that account is usually rate-limited until its window resets. Configure the current Premium account and the pool of accounts that can take the seat:
+Two words with two meanings, never mixed:
+
+- **Move the seat**: change the seat tier of two accounts on the organization's Members page, P (Premium now) down to Standard and the target up to Premium. It affects the whole organization and needs an admin browser. **Only the service on machine 2 does it.**
+- **Switch account**: change the account Claude Code on one machine is logged in with. It affects only that machine. **The hooks of each working machine do it for that machine.**
+
+The accounts are fixed in `scripts/claude_acct.py`:
+
+| | Account | Role |
+|---|---|---|
+| — | `info@xtgroup.vn` | Backup, always Standard, never Premium: where every working machine waits while the seat moves |
+| 1–8 | `xtts@`, `sales@`, `contact@`, `careers@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; the order only breaks the last tie |
 
 ```
-/acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com
-/acct:auto browser
-/acct:auto status
-/acct:auto enable
+Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
+Target (the next Premium):      min(7d) → min(5h) → earliest 7-day reset → fixed order
+                                (never info; skips accounts not logged in, expired, or with unreadable usage)
+No target:                      P keeps the seat, the reason is logged
 ```
 
-To change the threshold, for example for a test at 75%:
+**Pool server.** `server/pool_server.py` runs on the xtts server (port 5680, `https://xtts.xtgroup.vn/pool/` through nginx) and holds the shared phase (`STABLE`, `PREPARING`, `MOVING`), the Premium account, the target, the machines that report, and the log. Its dashboard (password from `/etc/account-pool.env`) shows all of it and refreshes every 5 seconds. Deploy it with `bash server/deploy.sh`; the API key, the mover key and the dashboard password are created on the server the first time and never stored in git.
 
-```
-/acct:auto configure --premium alice@example.com --order alice@example.com,bob@example.com,carol@example.com --threshold 75
-```
+**One seat move, step by step.**
 
-`--daily-threshold 75` is the same. Run `/acct:auto status` to see the active value. Re-running `configure` keeps rotation off until you enable it again.
+1. Machine 2 (every 30 s, launchd): reads the usage of P. Below the thresholds, nothing happens.
+2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
+3. Every working machine, before its next request: sees `PREPARING`, **switches account to `info@xtgroup.vn`** and reports it.
+4. Machine 2 waits until every machine seen in the last 5 minutes reports `info` (at most 120 s; idle machines are not waited for).
+5. Machine 2 writes `MOVING`, reads the seat of P again, and **moves the seat** in Chrome: P down to Standard, the target up to Premium, both checked on the page. A failure rolls both back.
+6. Machine 2 writes `STABLE, premium = target`.
+7. Every working machine, before its next request: **switches account to the new Premium**. An idle machine does it before its first request when it wakes up, so no request is ever sent with the old account.
 
-**How the 7-day window is used.** A member's 7-day usage is measured against the limits of the seat it holds. On the Premium account it is a real measure of what is left, so the plugin rotates at 90% of it. On a Standard account it is divided by 5 to estimate the reading once the account holds Premium: an account whose 5-hour or 7-day usage would already be at a threshold that way (5x the threshold as Standard) is skipped, since it would hand the seat on at once. With the default 80% / 90% thresholds no Standard reading can reach that, so this only matters with a low `--threshold`. All Standard members share the same limits, so their readings also say which one has used least: the next Premium is the account with the **lowest 7-day usage, then the lowest 5-hour usage, then the earliest 7-day reset**; on a tie, the one that comes first in `--order` after the current Premium. An account that used up a window while it held Premium is not skipped: as Standard its reading stops at 100%, which is about 20% once it holds Premium again. These thresholds need no configuration: configs written by earlier versions, which saved the old 90% default, pick them up after the plugin update. Only an explicit `--threshold` overrides the 5-hour value.
+If the move fails, machine 2 writes `STABLE` with the account that really holds the seat (P after the rollback), the working machines switch back to it, and machine 2 waits 15 minutes before it tries again; the dashboard shows the error (for example, the admin browser needs a new sign-in). If the pool server cannot be reached, a working machine follows the seat it reads on claude.ai, and machine 2 does not move the seat. A request that is already running always finishes with the account it started with.
 
-The plugin checks the active Premium account before each prompt and tool call. When its usage reaches the threshold, it changes the old member to Standard, promotes the least-used eligible member to Premium in the Members page, verifies the displayed tiers, and then switches Claude Code to that account. If Claude Code reports a usage-related `rate_limit` failure, a `StopFailure` hook makes one best-effort rotation attempt using the same fresh-usage and seat checks. It ignores ordinary API throttling and other errors. Use `/acct:auto disable` to stop rotation.
+**Machine 2.** An always-on Mac that never sleeps, with a user logged in (the service needs that session's Keychain and Chrome), all nine accounts logged in (`/acct:login`), the admin browser signed in (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. The service is a launch agent (`vn.xtgroup.acct-mover`) that runs `acct.sh auto serve-once` every 30 seconds through `~/.claude-acct/bin/acct-mover.sh`, which always starts the installed plugin version. It never switches account. Chrome starts in the background. It does not need Claude Code to be open.
 
-**Following the Premium seat.** The seat can move without this machine: by hand on the Members page, or by another machine that shares the pool. Before each prompt and tool call the plugin reads the seat of the configured Premium account (and its usage, both cached for at most 30 seconds). When that account is no longer Premium, it looks for the account in `--order` that holds the seat, makes it the configured Premium account, and switches Claude Code to it; no seat is changed. While rotation is on, a session logged in to any other account of the pool is switched to the Premium account the same way; a login outside the pool (a personal plan, an unsaved account) is left alone. If no account of the pool holds Premium, or the seat cannot be read, nothing changes. For five minutes after this machine moved the seat itself, the seat is never followed back to the account it left, so a profile API that still shows the old tiers cannot send it back; a move to any other account is followed at once. After a usage-limit stop, the `StopFailure` hook follows the seat the same way and continues the task. When several machines reach the threshold together, each waits a random 0–5 seconds and reads the seat again right before moving it: if another machine already moved it, it follows instead of moving the seat a second time. The window between two machines is cut to seconds, not closed; there is no lock shared between machines.
+**Continuing after a usage-limit stop.** A long response can cross the limit before the next tool call, so the turn stops with a usage-limit error. The `StopFailure` hook runs with `asyncRewake`: it switches account the same way in the background, waits out the Keychain cache, then exits with code 2. Claude Code treats that as a wake-up and continues the stopped task in the same chat. If nothing was switched, the hook exits 0 and the session stays stopped.
 
-**Continuing after a usage-limit stop.** A long response can cross the limit before the next tool call, so the turn stops with a usage-limit error. The `StopFailure` hook runs with `asyncRewake`: it rotates in the background, waits out the Keychain cache, then exits with code 2. Claude Code treats that as a wake-up and continues the stopped task in the same chat, with the same context and the new account. Nobody has to type "continue". If nothing was rotated (ordinary throttling, no eligible account, rotation off), the hook exits 0 and the session stays stopped. Each rotation wakes the model at most once, so the chain ends when the pool runs out.
+Claude Code's own `autoContinueAtUsageLimit` (v2.1.234 or later) waits for the reset time of the account that hit the limit; it does not notice that the plugin switched to an account with usage left. The plugin's wake-up does not depend on it. Whether the two interact has not been verified on a real usage limit; turn `autoContinueAtUsageLimit` off if the wake-up is held.
 
-Claude Code's own `autoContinueAtUsageLimit` (v2.1.234 or later) waits for the reset time of the account that hit the limit; it does not notice that the plugin switched to an account with usage left. The plugin's wake-up does not depend on it. Whether the two interact (for example, the wake-up being held until that reset while native auto-continue is waiting) has not been verified on a real usage limit. Test it once with your Claude Code version, and turn `autoContinueAtUsageLimit` off if the wake-up is held.
-
-Run `/acct:auto browser` once to open the persistent automation profile in regular Chrome. Sign in as an organization owner/admin if needed. The plugin uses Chrome's local debugging endpoint to control this dedicated profile; your normal Chrome profile stays separate. Chrome 136 and later block remote debugging of the default user-data directory, so the plugin uses this dedicated profile. The Members page defaults to `https://claude.ai/admin-settings/members`; override it with `--members-url` if your organization uses a different path on claude.ai.
-
-`--order` lists the accounts in the pool and breaks ties. Before choosing a destination, the plugin checks the saved credentials of every other account in the pool and refreshes its usage (using the short cache to avoid excessive requests), then picks the least-used one. It skips accounts whose usage is at the threshold, accounts with expired/revoked logins, and accounts whose 5-hour usage cannot be confirmed. The seat automation then verifies that the current member is Premium and the destination is Standard before changing either seat; credentials switch only after the Members page confirms the transfer. If every other account is over threshold or cannot be verified, no seat or account is changed. Disable rotation before changing the pool. Seat tiers edited by hand are followed (see above).
-
-**Rotation log.** Every decision and failure of the rotation is written as one JSON line to `~/.claude-acct/rotation.log`: a heartbeat at most every 10 minutes (version, rotation on/off, configured Premium, current login and its usage), a threshold that has no eligible destination and why each account was skipped, seat moves (start, success, failure with the error and duration), seat moves skipped because another machine moved the seat first, seats followed from outside the machine, account switches, unreadable usage, usage-limit recoveries and any other error. Repeated states are logged at most every 30 minutes. Each line names the machine by `git config --global user.name` (falling back to the host name) and carries the plugin version. When `LOG_URL` in `scripts/claude_acct.py` (or `logUrl` in `rotation.json`, or the `CLAUDE_ACCT_LOG_URL` environment variable) points at a Google Apps Script web app, the lines are also uploaded in the background to a shared Google Sheet; failed uploads are retried with the next event. `scripts/log_sheet.gs` is that web app. No token or credential is ever logged.
+**Rotation log.** Every decision and failure is written as one JSON line to `~/.claude-acct/rotation.log` and, once the machine has joined, uploaded in the background to the pool server (dashboard → Log): heartbeats, thresholds without a target and why each account was skipped, seat moves (start, success, failure, timeout waiting for the backup account), account switches, unreadable usage, usage-limit recoveries and any other error. Each line names the machine by `git config --global user.name` and carries the plugin version. No token or credential is ever logged.
 
 If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login <name>` command it shows. Nothing else in the table needs your attention.
 

@@ -2,7 +2,8 @@
 """claude-acct: manage multiple Claude Code accounts (claude.ai login) on one machine.
 
 Commands:
-  login  <name|email> [email]  Log in to a new account / log in again (opens a terminal), save as <name>
+  login  [<name|email> [email]] Log in to an account (opens a terminal); without one, every pool account this machine lacks
+  auto   join|mover|enable|disable|status|browser   The XTGroup pool: switching (every machine), seat moves (machine 2)
   save   <name>                Save the currently logged-in account as <name>
   list                         List saved accounts + 5-hour / 7-day usage
   switch <name>                Switch to account <name>
@@ -595,7 +596,65 @@ def sh_quote(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def _backup_live_login():
+    if IS_MAC:
+        # Back up the live login in case the Keychain is not keyed by CLAUDE_CONFIG_DIR (see cmd_import_login).
+        main = _kc_find(LIVE_SERVICE, getpass.getuser())
+        if main:
+            _kc_write(STORE_SERVICE, BACKUP_NAME, main)
+
+
+def cmd_login_backup(args):
+    _backup_live_login()
+
+
+def _login_all():
+    """Log in, one after the other in one terminal window, to every pool account this machine lacks."""
+    idx = load_index()
+    todo = []
+    for email in POOL_EMAILS:
+        name = _saved_name(idx, email)
+        if name:
+            try:
+                if token_state(idx["accounts"][name], read_stored_creds(name)) != "relogin":
+                    continue
+            except AcctError:
+                pass
+        todo.append((name or email, email))
+    if not todo:
+        print("All %d pool accounts are logged in on this machine." % len(POOL_EMAILS))
+        return
+    acct_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")
+    work = os.path.join(store_dir(), "login-all")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    helper = os.path.join(work, "login-all.sh")
+    with open(helper, "w", encoding="utf-8", newline="\n") as f:
+        f.write("#!/usr/bin/env bash\n")
+        for n, (name, email) in enumerate(todo, 1):
+            tmp = os.path.join(store_dir(), "login-" + name)
+            f.write("echo; echo '=== (%d/%d) %s ==='\n" % (n, len(todo), email))
+            f.write("echo 'In the browser, be signed in to claude.ai as %s (sign out of any other account first).'\n" % email)
+            f.write("read -r -p 'Press Enter to open the login page for %s... '\n" % email)
+            f.write("rm -rf %s; mkdir -p %s\n" % (sh_quote(tmp), sh_quote(tmp)))
+            f.write("bash %s login-backup\n" % sh_quote(acct_sh))
+            f.write("CLAUDE_CONFIG_DIR=%s %s auth login --email %s\n" % (sh_quote(tmp), sh_quote(claude_bin()), sh_quote(email)))
+            f.write("bash %s import-login %s %s %s || echo 'Not saved: %s. Run /acct:login %s later.'\n" % (
+                sh_quote(acct_sh), sh_quote(tmp), sh_quote(name), sh_quote(email), email, email))
+        f.write("echo; echo 'Done. You can close this window and go back to Claude: /acct:list'\n")
+    os.chmod(helper, 0o700)
+    if open_terminal(helper):
+        print("Opened a **terminal window** to log in to %d account(s), one after the other: %s." % (
+            len(todo), ", ".join(e for _, e in todo)))
+        print("For each one: be signed in to claude.ai as that account in the browser, press Enter in the terminal, "
+              "finish the login (paste the code into the terminal if the page shows one). Your current account is NOT changed.")
+    else:
+        print("Could not open a terminal window. Open a terminal and run:\n\n    bash %s" % sh_quote(helper))
+
+
 def cmd_login(args):
+    if not args.name:
+        return _login_all()
     valid_name(args.name)
     idx = load_index()
     existing = resolve_name(idx, args.name, must_exist=False)
@@ -610,11 +669,7 @@ def cmd_login(args):
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
-    if IS_MAC:
-        # Back up the live login in case the Keychain is not keyed by CLAUDE_CONFIG_DIR (see cmd_import_login).
-        main = _kc_find(LIVE_SERVICE, getpass.getuser())
-        if main:
-            _kc_write(STORE_SERVICE, BACKUP_NAME, main)
+    _backup_live_login()
     login_cmd = [claude_bin(), "auth", "login"] + (["--email", args.email] if args.email else [])
     helper = os.path.join(tmp, "login.sh")
     with open(helper, "w", encoding="utf-8", newline="\n") as f:
@@ -776,28 +831,44 @@ def cmd_list(args):
 
 
 def _print_rotation_preview(idx, live):
-    """Where the Premium seat would go next, or why no account can take it. Changes nothing."""
-    cfg = load_rotation()
-    premium = cfg.get("premiumAccount")
-    if not cfg.get("order") or premium not in idx["accounts"] or premium not in cfg["order"]:
+    """The pool phase, the working machines, and where the Premium seat would go next. Changes nothing."""
+    st = read_json(pool_settings_path(), {}) or {}
+    state, machines = None, []
+    if st.get("api_key") or st.get("mover_key"):
+        try:
+            state = pool_call("GET", "/api/state", mover=not st.get("api_key"))
+            machines = pool_call("GET", "/api/machines", mover=not st.get("api_key"))
+        except AcctError as e:
+            print("\nPool server: %s" % e)
+    print("\nAccount switching %s · backup %s · seat moves at %s." % (
+        "ON" if load_rotation().get("enabled") else "OFF", BACKUP_EMAIL, _trigger_text()))
+    if state:
+        print("Pool phase: %s, Premium: %s%s" % (state.get("phase"), state.get("premium") or "not published yet",
+                                                ", target: %s" % state.get("target") if state.get("phase") != "STABLE" else ""))
+    working = [m for m in machines if m.get("active")]
+    if working:
+        print("Machines seen in the last 5 minutes: %s" % ", ".join(
+            "%s%s → %s" % (m.get("name") or m.get("host"), " (machine 2)" if m.get("role") == "mover" else "", m.get("account") or "?")
+            for m in working))
+    holder = _saved_name(idx, (state or {}).get("premium")) or _seat_holder(idx, live)
+    if not holder:
+        print("Premium account: not found among the saved rotation accounts.")
         return
-    daily, weekly = _rotation_threshold(cfg), _weekly_threshold(cfg)
-    usage = ((idx["accounts"][premium].get("usage") or {}).get("data")) or {}
+    usage = ((idx["accounts"][holder].get("usage") or {}).get("data")) or {}
     values = _usage_window_values(usage)
-    state = ("reached" if values and _usage_reached_threshold(usage, daily, weekly) else "not reached") if values else "unknown"
-    print("\nRotation %s, rotates at %s." % ("ON" if cfg.get("enabled") else "OFF", _trigger_text(cfg)))
+    reached = ("reached" if _usage_reached_threshold(usage) else "not reached") if values else "unknown"
     print("Premium %s: 5-hour %s, 7-day %s; threshold %s." % (
-        premium, "%d%%" % round(values["five_hour"]) if "five_hour" in values else "?",
-        "%d%%" % round(values["seven_day"]) if "seven_day" in values else "?", state))
+        holder, "%d%%" % round(values["five_hour"]) if "five_hour" in values else "?",
+        "%d%%" % round(values["seven_day"]) if "seven_day" in values else "?", reached))
     try:
-        name, skipped = _next_eligible_rotation_account(dict(cfg), idx, daily, weekly, live=live)
+        name, skipped = _next_eligible_rotation_account(idx, holder, live=live)
     except Exception as e:
         print("Next Premium: could not be determined (%s)." % e)
         return
     if name:
         print("Next Premium: **%s**" % name)
     else:
-        print("Next Premium: none eligible; %s keeps the seat. Why each account is skipped:" % premium)
+        print("Next Premium: none eligible; %s keeps the seat. Why each account is skipped:" % holder)
     for reason in skipped:
         print("- %s" % reason)
 
@@ -847,18 +918,118 @@ def save_rotation(cfg):
     write_json_atomic(auto_config_path(), cfg, private=True)
 
 
-# Rotation log: one JSON line per decision or failure in ~/.claude-acct/rotation.log, mirrored to
-# a shared Google Sheet (an Apps Script web app) so the machines of the pool can be compared.
-LOG_URL = "https://script.google.com/macros/s/AKfycbzYV_mDP8TZfoxRNThhyiqdzHpIiBdINEizW1RNVp1C1pBRkShhaoEai1w0RfAihJ_9TA/exec"  # Apps Script web app (scripts/log_sheet.gs); empty keeps the log local
+# ---------------------------------------------------------------- the XTGroup pool (fixed)
+
+# The plugin serves one organization, so its accounts are fixed here: no `configure`, no order.
+BACKUP_EMAIL = "info@xtgroup.vn"  # Standard, never Premium: where every machine waits while the seat moves
+ROTATION_EMAILS = (  # the accounts that take turns holding Premium; the order breaks the last tie
+    "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn", "careers@xtgroup.vn",
+    "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
+)
+POOL_EMAILS = (BACKUP_EMAIL,) + ROTATION_EMAILS
+
+# Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
+DAILY_THRESHOLD = 80
+WEEKLY_THRESHOLD = 90
+# A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro, per the Team plan help page),
+# so a percentage read on one seat is about PREMIUM_FACTOR times the same usage read on the other.
+PREMIUM_FACTOR = 5
+PREMIUM_CHECK_TTL = 30  # seconds; how stale the Premium account's seat and usage may be
+
+# Pool server (server/pool_server.py on the xtts server): the shared phase, the machines, the log.
+POOL_URL = "https://xtts.xtgroup.vn/pool"
+STATE_TTL = 5  # seconds a machine reuses the state it last fetched
+PREPARE_TIMEOUT = 120  # seconds machine 2 waits for the working machines to switch to the backup account
+MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move before it tries again
+MOVER_LABEL = "vn.xtgroup.acct-mover"
+MOVER_INTERVAL = 30  # seconds between two runs of the seat-moving service
+
 LOG_MAX_BYTES = 5_000_000
-HEARTBEAT_EVERY = 600  # seconds; at most one heartbeat per machine
+HEARTBEAT_EVERY = 600  # seconds; at most one heartbeat log line per machine
 QUIET_EVERY = 1800  # seconds; repeated states (no destination, unreadable usage) are logged at most this often
 _hook = None  # the hook event that started this process, set by main()
 
 
-def _log_url():
-    return os.environ.get("CLAUDE_ACCT_LOG_URL") or load_rotation().get("logUrl") or LOG_URL
+def _email_of(idx, name):
+    return (((idx["accounts"].get(name) or {}).get("profile") or {}).get("emailAddress") or "").lower() or None
 
+
+def _saved_name(idx, email):
+    """The saved account with this email, whatever it was named when saved."""
+    email = (email or "").lower()
+    for name in sorted(idx["accounts"]):
+        if _email_of(idx, name) == email:
+            return name
+    return None
+
+
+def _trigger_text():
+    return "5-hour >= %d%% or 7-day >= %d%% (or any window at 100%%)" % (DAILY_THRESHOLD, WEEKLY_THRESHOLD)
+
+
+# ---------------------------------------------------------------- pool server client
+
+def pool_settings_path():
+    return os.path.join(store_dir(), "pool.json")
+
+
+def pool_settings():
+    """url, api_key (every machine), mover_key (machine 2 only) and this machine's id. Never in git."""
+    st = read_json(pool_settings_path(), {}) or {}
+    if not st.get("machine_id"):
+        st["machine_id"] = hashlib.sha1(("%s|%s|%f" % (platform.node(), getpass.getuser(), time.time())).encode()).hexdigest()[:16]
+        os.makedirs(store_dir(), exist_ok=True)
+        write_json_atomic(pool_settings_path(), st, private=True)
+    return st
+
+
+def save_pool_settings(st):
+    os.makedirs(store_dir(), exist_ok=True)
+    write_json_atomic(pool_settings_path(), st, private=True)
+
+
+def _pool_url(st=None):
+    st = st if st is not None else pool_settings()
+    return (os.environ.get("CLAUDE_ACCT_POOL_URL") or st.get("url") or POOL_URL).rstrip("/")
+
+
+def pool_call(method, path, body=None, mover=False, timeout=4):
+    """One request to the pool server. Returns the decoded JSON (or text); raises AcctError on any failure."""
+    st = pool_settings()
+    key = st.get("mover_key") if mover else (st.get("api_key") or st.get("mover_key"))
+    if not key:
+        raise AcctError("This machine has not joined the pool: run /acct:auto join <key>.")
+    headers = {"Content-Type": "application/json",
+               ("X-Pool-Mover-Key" if mover or not st.get("api_key") else "X-Pool-Key"): key}
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(_pool_url(st) + path, data=data, headers=headers, method=method)
+    try:
+        with urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+            return json.loads(raw) if r.headers.get_content_type() == "application/json" else raw
+    except urllib.error.HTTPError as e:
+        raise AcctError("pool server answered HTTP %d for %s" % (e.code, path))
+    except (OSError, ValueError) as e:
+        raise AcctError("pool server unreachable: %s" % net_error(e))
+
+
+def _machine_report(account, at_info, mover=False):
+    return {"machine_id": pool_settings()["machine_id"], "name": machine_name(), "host": platform.node(),
+            "version": plugin_version(), "account": account, "at_info": bool(at_info)}
+
+
+def pool_state(account, force=False):
+    """Report this machine and read the shared state in one request; reuse it for STATE_TTL seconds."""
+    cache_path = os.path.join(store_dir(), "pool-cache.json")
+    cache = read_json(cache_path, {}) or {}
+    if not force and cache.get("account") == account and time.time() - cache.get("fetched", 0) < STATE_TTL:
+        return cache["state"]
+    state = pool_call("POST", "/api/machine", _machine_report(account, account == BACKUP_EMAIL))
+    write_json_atomic(cache_path, {"fetched": time.time(), "account": account, "state": state})
+    return state
+
+
+# ---------------------------------------------------------------- rotation log
 
 def plugin_version():
     return (read_json(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
@@ -871,6 +1042,11 @@ def machine_name():
     except (OSError, subprocess.TimeoutExpired):
         name = ""
     return name or platform.node()
+
+
+def _log_upload_enabled():
+    st = read_json(pool_settings_path(), {}) or {}
+    return bool(st.get("api_key") or st.get("mover_key"))
 
 
 def log_event(event, message="", every=None, key=None, **fields):
@@ -896,7 +1072,7 @@ def log_event(event, message="", every=None, key=None, **fields):
             os.replace(path, path + ".1")
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
-        if _log_url():
+        if _log_upload_enabled():
             with open(os.path.join(store_dir(), "log-outbox.jsonl"), "a", encoding="utf-8") as f:
                 f.write(line)
             _spawn_log_flush()
@@ -912,8 +1088,7 @@ def _spawn_log_flush():
 
 
 def cmd_log_flush(args):
-    url = _log_url()
-    if not url:
+    if not _log_upload_enabled():
         return
     lock_path = os.path.join(store_dir(), "log-flush.lock")
     if not _acquire_lock(lock_path):
@@ -932,12 +1107,8 @@ def cmd_log_flush(args):
                     events.append(json.loads(line))
                 except ValueError:
                     pass
-        if events:
-            body = json.dumps({"events": events}, ensure_ascii=False).encode("utf-8")
-            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-            with urlopen(req, timeout=20) as r:
-                if r.read(16).decode("utf-8", "replace").strip() != "ok":
-                    return
+        if events and str(pool_call("POST", "/api/log", {"events": events}, timeout=20)).strip() != "ok":
+            return
         os.unlink(sending)
     except Exception:
         pass
@@ -960,27 +1131,7 @@ def _usage_fields(meta):
     return {"p5h": values.get("five_hour"), "p7d": values.get("seven_day")}
 
 
-# Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
-DAILY_THRESHOLD = 80
-WEEKLY_THRESHOLD = 90
-LEGACY_DAILY_DEFAULT = 90  # written by `configure` before 0.9.1 when no --threshold was given
-# A Premium seat has 5x the limits of a Standard seat (6.25x vs 1.25x Pro, per the Team plan help page),
-# so a percentage read on one seat is about PREMIUM_FACTOR times the same usage read on the other.
-PREMIUM_FACTOR = 5
-PREMIUM_CHECK_TTL = 30  # seconds; how stale the Premium account's seat and usage may be in a check
-ROTATION_JITTER = 5  # seconds; machines that reach the threshold together do not move the seat at once
-
-
-def _rotation_threshold(cfg):
-    value = cfg.get("dailyThreshold", cfg.get("threshold"))
-    # Configs saved with the old default follow the current default without re-running `configure`.
-    return DAILY_THRESHOLD if value in (None, LEGACY_DAILY_DEFAULT) else value
-
-
-def _weekly_threshold(cfg):
-    # Not set by `configure`, so configs written by earlier versions get it without re-running anything.
-    return cfg.get("weeklyThreshold", WEEKLY_THRESHOLD)
-
+# ---------------------------------------------------------------- usage rules
 
 def _usage_window_values(usage):
     result = {}
@@ -991,93 +1142,16 @@ def _usage_window_values(usage):
     return result
 
 
-def _usage_reached_threshold(usage, daily_threshold, weekly_threshold=100):
+def _usage_reached_threshold(usage, daily_threshold=None, weekly_threshold=None):
     """Rotate the Premium account at the 5-hour or 7-day threshold, or when any window is used up.
 
     Readings of the account holding Premium are measured against Premium limits.
     """
+    daily = DAILY_THRESHOLD if daily_threshold is None else daily_threshold
+    weekly = WEEKLY_THRESHOLD if weekly_threshold is None else weekly_threshold
     values = _usage_window_values(usage)
-    return (values.get("five_hour", -1) >= daily_threshold or values.get("seven_day", -1) >= weekly_threshold
+    return (values.get("five_hour", -1) >= daily or values.get("seven_day", -1) >= weekly
             or any(v >= 100 for v in values.values()))
-
-
-def cmd_auto_configure(args):
-    idx = load_index()
-    premium = resolve_name(idx, args.premium)
-    order = [resolve_name(idx, item.strip()) for item in args.order.split(",") if item.strip()]
-    if len(order) < 2 or len(set(order)) != len(order):
-        raise AcctError("Rotation order must contain at least two different saved accounts.")
-    if premium not in order:
-        raise AcctError("The current Premium account must be included in the rotation order.")
-    daily_threshold = next((t for t in (args.daily_threshold, args.threshold) if t is not None), None)
-    if daily_threshold is not None and not 1 <= daily_threshold <= 99:
-        raise AcctError("The daily (5-hour) threshold must be between 1 and 99.")
-    cfg = {
-        "enabled": False,
-        "order": order,
-        "premiumAccount": premium,
-        "membersUrl": args.members_url,
-        "cdpUrl": args.cdp_url,
-        "browserProfile": os.path.abspath(os.path.expanduser(args.browser_profile)),
-    }
-    if daily_threshold is not None:  # left out, the default applies and follows plugin updates
-        cfg["dailyThreshold"] = daily_threshold
-    save_rotation(cfg)
-    print("Rotation configured: Premium %s; pool %s. Rotates at %s. The next Premium is the pool account with the lowest 7-day, then 5-hour usage. Rotation is OFF; run `acct auto enable` after setup."
-          % (premium, ", ".join(order), _trigger_text(cfg)))
-
-
-def _trigger_text(cfg):
-    return "5-hour >= %s%% or 7-day >= %s%% (or any window at 100%%)" % (
-        _rotation_threshold(cfg), _weekly_threshold(cfg))
-
-
-def cmd_auto_enable(args):
-    cfg = load_rotation()
-    if not cfg.get("order"):
-        raise AcctError("Configure rotation first: acct.sh auto configure --premium <account> --order name1,name2,...")
-    cfg["enabled"] = True
-    save_rotation(cfg)
-    print("Automatic Premium rotation enabled. It checks usage before prompts and tool calls.")
-
-
-def cmd_auto_disable(args):
-    cfg = load_rotation()
-    cfg["enabled"] = False
-    save_rotation(cfg)
-    print("Automatic Premium rotation disabled.")
-
-
-def cmd_auto_status(args):
-    cfg = load_rotation()
-    if not cfg.get("order"):
-        print("acct plugin %s" % plugin_version())
-        print("Automatic Premium rotation is not configured.")
-        return
-    print("acct plugin %s" % plugin_version())
-    print("Automatic Premium rotation: %s" % ("ON" if cfg.get("enabled") else "OFF"))
-    print("Rotates at: %s" % _trigger_text(cfg))
-    print("Next Premium: the least-used account (lowest 7-day, then 5-hour usage); ties follow the order")
-    print("Rotation order: %s" % " → ".join(cfg["order"]))
-    print("Current Premium account: %s" % cfg.get("premiumAccount", "?"))
-    print("Browser profile: %s" % cfg.get("browserProfile", "(CDP)"))
-
-
-def cmd_auto_browser(args):
-    cfg = load_rotation()
-    if not cfg.get("order"):
-        raise AcctError("Configure rotation first with `acct auto configure`.")
-    ensure_node_deps()
-    node = os.environ.get("CLAUDE_ACCT_NODE", "node")
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
-    env = seat_manager_env(cfg)
-    try:
-        subprocess.Popen([node, script, "--setup"], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         env=env, start_new_session=True)
-    except OSError as e:
-        raise AcctError("Could not open the persistent Chrome profile: %s" % e)
-    print("Opened Chrome with the saved automation profile. Sign in as an organization owner/admin if needed. Leave this profile available for seat automation; the login is saved for future rotations.")
 
 
 def _parse_reset(value):
@@ -1087,26 +1161,27 @@ def _parse_reset(value):
         return None
 
 
-def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=100, live=None):
-    """Pick the least-used Standard account after checking the live status and usage of each.
+def _next_eligible_rotation_account(idx, premium, live=None):
+    """Pick the least-used Standard account of the rotation after checking the live status and usage of each.
 
     Standard members share the same limits, so their 7-day percentages compare actual use:
-    lowest 7-day first, then lowest 5-hour, then the earliest 7-day reset, then the configured
-    order after the current Premium.
-    An account whose usage would already be at a threshold once read against Premium limits
-    (Standard reading / PREMIUM_FACTOR) is skipped: it would hand the seat on at once.
+    lowest 7-day first, then lowest 5-hour, then the earliest 7-day reset, then the fixed order
+    after the current Premium. An account whose usage would already be at a threshold once read
+    against Premium limits (Standard reading / PREMIUM_FACTOR) is skipped: it would hand the seat on at once.
     """
-    order = cfg.get("order", [])
-    current = cfg.get("premiumAccount")
-    start = order.index(current)
-    cfg.pop("usedUpUntil", None)  # saved by 0.9.9 and earlier, which skipped accounts used up as Premium
+    order = list(ROTATION_EMAILS)
+    premium_email = _email_of(idx, premium) or premium
+    start = order.index(premium_email) if premium_email in order else -1
     skipped, candidates = [], []
-    for offset in range(1, len(order)):
-        name = order[(start + offset) % len(order)]
-        meta = idx["accounts"].get(name)
-        if not meta:
-            skipped.append("%s (not saved)" % name)
+    for offset in range(1, len(order) + 1):
+        email = order[(start + offset) % len(order)]
+        if email == premium_email:
             continue
+        name = _saved_name(idx, email)
+        if not name:
+            skipped.append("%s (not logged in on this machine)" % email)
+            continue
+        meta = idx["accounts"][name]
         try:
             creds = read_stored_creds(name)
         except AcctError:
@@ -1119,13 +1194,12 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=
         status = refresh_usage(meta, creds, refresh_name=None if name == live else name)
         usage = (meta.get("usage") or {}).get("data") or {}
         values = _usage_window_values(usage)
-        # Fail closed: do not move Premium onto an account without a fresh 5-hour
-        # reading. refresh_usage uses its short cache to avoid 429s.
+        # Fail closed: do not move Premium onto an account without a fresh 5-hour reading.
         if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
         over = ["%s %d%% ≥ %d%%" % (label, round(values.get(key, 0)), limit * PREMIUM_FACTOR)
-                for key, label, limit in (("five_hour", "5-hour", daily_threshold), ("seven_day", "7-day", weekly_threshold))
+                for key, label, limit in (("five_hour", "5-hour", DAILY_THRESHOLD), ("seven_day", "7-day", WEEKLY_THRESHOLD))
                 if values.get(key, 0) / PREMIUM_FACTOR >= limit]
         if over:
             skipped.append("%s (already at threshold: %s)" % (name, ", ".join(over)))
@@ -1135,6 +1209,372 @@ def _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold=
     if not candidates:
         return None, skipped
     return min(candidates)[-1], skipped
+
+
+def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
+    """Return (status, tier) of a saved account's seat. The live login's token is never refreshed here."""
+    try:
+        creds = read_stored_creds(name)
+    except AcctError:
+        return "credentials unavailable", None
+    meta = idx["accounts"][name]
+    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name, ttl=ttl)
+    return status, (meta.get("seat") or {}).get("tier")
+
+
+def _seat_holder(idx, live, first=None, force=False):
+    """The rotation account that holds Premium on claude.ai, or None if no saved account confirms it."""
+    names = [n for n in (_saved_name(idx, e) for e in ROTATION_EMAILS) if n]
+    if first in names:
+        names.remove(first)
+        names.insert(0, first)
+    for name in names:
+        status, tier = _seat_tier(idx, name, live, force=force, ttl=PREMIUM_CHECK_TTL)
+        if status in ("ok", "cache") and tier == PREMIUM_TIER:
+            return name
+    return None
+
+
+def _forget_seat_readings(idx, *names):
+    """Drop cached seat and usage of accounts whose seat changed: a percentage read against Standard
+    limits would be taken for a Premium one (5x too high) and trigger another rotation."""
+    for name in names:
+        meta = idx["accounts"].get(name) or {}
+        meta.pop("seat", None)
+        meta.pop("usage", None)
+
+
+# ---------------------------------------------------------------- working machines: switch account
+
+def _logged_switch(cur, target):
+    try:
+        cmd_switch(argparse.Namespace(name=target, force=False, no_wait=False))
+    except Exception as e:
+        log_event("switch_fail", str(e)[-500:], live=cur, target=target)
+        e.logged = True
+        raise
+    log_event("switch_ok", "", live=cur, target=target)
+
+
+def _wanted_account(idx, cur, args):
+    """(email of the account this session should use, why). None: leave the session as it is."""
+    cur_email = _email_of(idx, cur)
+    try:
+        state = pool_state(cur_email, force=args.force)
+    except AcctError as e:
+        # The pool server is down or this machine has not joined: follow the seat on claude.ai.
+        if "not joined" not in str(e):
+            log_event("read_fail", "pool state: %s" % e, every=QUIET_EVERY, live=cur)
+        # Unconfirmed readings leave the session as it is.
+        holder = _seat_holder(idx, cur, first=cur)
+        return (_email_of(idx, holder), "claude.ai seat") if holder else (None, "unknown")
+    if state.get("phase") in ("PREPARING", "MOVING"):
+        return BACKUP_EMAIL, "seat moving %s → %s" % (state.get("premium"), state.get("target"))
+    if state.get("premium"):
+        return state["premium"].lower(), "Premium"
+    holder = _seat_holder(idx, cur, first=cur)  # machine 2 has not published the Premium account yet
+    return (_email_of(idx, holder), "claude.ai seat") if holder else (None, "unknown")
+
+
+def _worker_check(args):
+    """Switch this session to the account the pool says: the backup while the seat moves, else Premium."""
+    idx = load_index()
+    try:
+        cur = sync_current(idx)
+    except AcctError:
+        cur = current_name(idx)
+    if _email_of(idx, cur) not in POOL_EMAILS:
+        return  # a login outside the pool (a personal plan, an unsaved account) is left alone
+    want, why = _wanted_account(idx, cur, args)
+    save_index(idx)
+    if not want or want == _email_of(idx, cur):
+        return
+    target = _saved_name(idx, want)
+    if not target:
+        log_event("switch_fail", "%s is not logged in on this machine: run /acct:login" % want, every=QUIET_EVERY,
+                  live=cur, target=want)
+        if args.manual:
+            raise _logged_error("The pool wants %s (%s), but it is not logged in on this machine. Run /acct:login." % (want, why))
+        return
+    _logged_switch(cur, target)
+    try:  # tell machine 2 at once: it may be waiting for this machine to reach the backup account
+        pool_state(want, force=True)
+    except AcctError:
+        pass
+
+
+# ---------------------------------------------------------------- machine 2: move the seat
+
+def _mover_state():
+    return read_json(os.path.join(store_dir(), "mover-state.json"), {}) or {}
+
+
+def _save_mover_state(ms):
+    write_json_atomic(os.path.join(store_dir(), "mover-state.json"), ms)
+
+
+def _put_state(phase, premium, target=None, message=None):
+    return pool_call("PUT", "/api/state", {"phase": phase, "premium": premium, "target": target,
+                                            "message": message, "by": machine_name()}, mover=True)
+
+
+def _wait_for_backup(prepared_at, poll=5):
+    """Wait until every working machine seen in the last 5 minutes reports the backup account."""
+    deadline = time.time() + PREPARE_TIMEOUT
+    waiting = []
+    while True:
+        machines = pool_call("GET", "/api/machines", mover=True)
+        waiting = [m.get("name") or m.get("host") for m in machines
+                   if m.get("role") == "worker" and m.get("active")
+                   and not (m.get("at_info") and m.get("last_seen", 0) >= prepared_at)]
+        if not waiting or time.time() >= deadline:
+            return waiting
+        time.sleep(poll)
+
+
+def _move_seat(idx, premium, target, live, fields):
+    """PREPARING → wait for the backup account → MOVING → seat move → STABLE. Returns True on success."""
+    p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
+    log_event("move_start", "threshold reached", target=t_email, **fields)
+    prepared = _put_state("PREPARING", p_email, t_email, "threshold reached")
+    waiting = _wait_for_backup(prepared["updated_at"])
+    if waiting:
+        log_event("prepare_timeout", "still not on %s after %ds: %s" % (BACKUP_EMAIL, PREPARE_TIMEOUT, ", ".join(waiting)),
+                  target=t_email, **fields)
+    _put_state("MOVING", p_email, t_email)
+    status, tier = _seat_tier(idx, premium, live, force=True)
+    if status == "ok" and tier != PREMIUM_TIER:  # moved by hand meanwhile: publish where it is
+        holder = _seat_holder(idx, live, force=True)
+        _put_state("STABLE", _email_of(idx, holder) or p_email, message="seat moved outside the service")
+        log_event("move_skipped", "seat moved outside the service", target=_email_of(idx, holder), **fields)
+        return False
+    started = time.time()
+    try:
+        _set_premium_seat(premium, target, load_rotation(), idx)
+    except Exception as e:
+        holder = _seat_holder(idx, live, force=True)  # the seat manager rolls back; trust only claude.ai
+        _put_state("STABLE", _email_of(idx, holder) or p_email, message="seat move failed: %s" % str(e)[-300:])
+        ms = _mover_state()
+        ms["backoff_until"] = time.time() + MOVE_BACKOFF
+        _save_mover_state(ms)
+        log_event("move_fail", "%ds: %s" % (time.time() - started, str(e)[-800:]), target=t_email, **fields)
+        return False
+    _put_state("STABLE", t_email, message="moved from %s" % p_email)
+    _forget_seat_readings(idx, premium, target)
+    save_index(idx)
+    log_event("move_ok", "%ds" % (time.time() - started), target=t_email, **fields)
+    return True
+
+
+def _mover_once(args):
+    st = pool_settings()
+    if not st.get("mover_key"):
+        raise AcctError("This machine is not the seat-moving machine: run /acct:auto mover <mover key> on machine 2.")
+    idx = load_index()
+    live = current_name(idx)
+    state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
+    if time.time() < _mover_state().get("backoff_until", 0) and not args.force:
+        return
+    missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
+    if missing:
+        log_event("not_logged_in", "machine 2 is missing: %s (run /acct:login)" % ", ".join(missing), every=QUIET_EVERY)
+    holder = _seat_holder(idx, live, first=_saved_name(idx, state.get("premium")))
+    if not holder:
+        log_event("no_holder", "no rotation account holds Premium on claude.ai", every=QUIET_EVERY)
+        return
+    h_email = _email_of(idx, holder)
+    if state.get("phase") != "STABLE" or (state.get("premium") or "").lower() != h_email:
+        # first run, a seat moved by hand, or a move cut short: publish where the seat really is
+        _put_state("STABLE", h_email, message="synced with claude.ai")
+        log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
+    meta = idx["accounts"][holder]
+    status = refresh_usage(meta, read_stored_creds(holder), force=args.force,
+                           refresh_name=None if holder == live else holder, ttl=PREMIUM_CHECK_TTL)
+    save_index(idx)
+    if status not in ("ok", "cache"):
+        log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, premium=h_email)
+        return
+    usage = (meta.get("usage") or {}).get("data") or {}
+    if not _usage_reached_threshold(usage):
+        return
+    fields = dict(premium=h_email, **_usage_fields(meta))
+    target, skipped = _next_eligible_rotation_account(idx, holder, live=live)
+    save_index(idx)
+    if not target:
+        log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
+        return
+    if args.manual:
+        print("Threshold reached on %s: moving the Premium seat to %s..." % (holder, target))
+    _move_seat(idx, holder, target, live, fields)
+
+
+def cmd_auto_serve(args):
+    """One run of the seat-moving service on machine 2 (launchd starts it every MOVER_INTERVAL seconds)."""
+    lock_path = os.path.join(store_dir(), "mover.lock")
+    os.makedirs(store_dir(), exist_ok=True)
+    if not _acquire_lock(lock_path):
+        return
+    try:
+        _mover_once(args)
+    except Exception as e:
+        if not getattr(e, "logged", False):
+            log_event("error", ("%s: %s" % (type(e).__name__, e))[-800:], every=60, key="mover-error")
+        raise
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+
+
+# ---------------------------------------------------------------- launchd service (machine 2, macOS)
+
+def _launch_agent_path():
+    return os.path.expanduser("~/Library/LaunchAgents/%s.plist" % MOVER_LABEL)
+
+
+def _mover_launcher_path():
+    return os.path.join(store_dir(), "bin", "acct-mover.sh")
+
+
+def _write_mover_launcher():
+    """A stable entry point: launchd keeps calling it while plugin updates move the scripts."""
+    path = _mover_launcher_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("#!/bin/bash\n")
+        f.write("# Seat-moving service of the acct plugin (machine 2). Runs the installed plugin version.\n")
+        f.write("export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"\n")
+        f.write("S=$(python3 - <<'PY'\nimport json, os\n"
+                "p = os.path.expanduser('~/.claude/plugins/installed_plugins.json')\n"
+                "try:\n    d = json.load(open(p))\nexcept Exception:\n    d = {}\n"
+                "for k, v in (d.get('plugins') or {}).items():\n"
+                "    if k.startswith('acct@') and v:\n"
+                "        s = os.path.join(v[0].get('installPath', ''), 'scripts', 'acct.sh')\n"
+                "        if os.path.isfile(s):\n            print(s)\n            break\nPY\n)\n")
+        f.write("[ -n \"$S\" ] || S=%s\n" % sh_quote(here))
+        f.write("exec bash \"$S\" auto serve-once\n")
+    os.chmod(path, 0o755)
+    return path
+
+
+def _install_mover_service():
+    if sys.platform != "darwin":
+        raise AcctError("The seat-moving service is set up for macOS (launchd) only.")
+    import plistlib
+    launcher = _write_mover_launcher()
+    plist = {"Label": MOVER_LABEL, "ProgramArguments": ["/bin/bash", launcher], "StartInterval": MOVER_INTERVAL,
+             "RunAtLoad": True, "StandardOutPath": os.path.join(store_dir(), "mover.out.log"),
+             "StandardErrorPath": os.path.join(store_dir(), "mover.out.log"), "ProcessType": "Background"}
+    path = _launch_agent_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        plistlib.dump(plist, f)
+    domain = "gui/%d" % os.getuid()
+    subprocess.run(["launchctl", "bootout", domain, path], capture_output=True)
+    r = subprocess.run(["launchctl", "bootstrap", domain, path], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AcctError("launchctl could not load %s: %s" % (path, (r.stderr or r.stdout).strip()))
+
+
+def _uninstall_mover_service():
+    path = _launch_agent_path()
+    if sys.platform == "darwin" and os.path.exists(path):
+        subprocess.run(["launchctl", "bootout", "gui/%d" % os.getuid(), path], capture_output=True)
+        os.unlink(path)
+
+
+def _mover_service_loaded():
+    if sys.platform != "darwin":
+        return False
+    r = subprocess.run(["launchctl", "print", "gui/%d/%s" % (os.getuid(), MOVER_LABEL)], capture_output=True)
+    return r.returncode == 0
+
+
+# ---------------------------------------------------------------- /acct:auto commands
+
+def cmd_auto_join(args):
+    st = pool_settings()
+    st["api_key"] = args.key.strip()
+    if args.url:
+        st["url"] = args.url.rstrip("/")
+    save_pool_settings(st)
+    try:
+        state = pool_call("GET", "/api/state")
+    except AcctError as e:
+        raise AcctError("Saved the key, but the pool server did not accept it: %s" % e)
+    cfg = load_rotation()
+    cfg["enabled"] = True
+    save_rotation(cfg)
+    print("Joined the pool at %s. Rotation is ON: before each request this session switches to %s while the "
+          "seat moves, then to the Premium account (now %s)." % (_pool_url(st), BACKUP_EMAIL, state.get("premium") or "not published yet"))
+
+
+def cmd_auto_mover(args):
+    st = pool_settings()
+    if args.key == "off":
+        st.pop("mover_key", None)
+        save_pool_settings(st)
+        _uninstall_mover_service()
+        print("This machine no longer moves the Premium seat; the service was removed.")
+        return
+    st["mover_key"] = args.key.strip()
+    if args.url:
+        st["url"] = args.url.rstrip("/")
+    save_pool_settings(st)
+    pool_call("POST", "/api/machine", _machine_report(None, False), mover=True)  # proves the key works
+    _install_mover_service()
+    print("This machine now moves the Premium seat: a launchd service (%s) checks every %ds. Keep it awake and logged in, "
+          "with every pool account logged in (/acct:login) and the admin browser signed in (/acct:auto browser)."
+          % (MOVER_LABEL, MOVER_INTERVAL))
+
+
+def cmd_auto_enable(args):
+    cfg = load_rotation()
+    cfg["enabled"] = True
+    save_rotation(cfg)
+    print("Automatic account switching enabled. It checks the pool before prompts and tool calls.")
+
+
+def cmd_auto_disable(args):
+    cfg = load_rotation()
+    cfg["enabled"] = False
+    save_rotation(cfg)
+    print("Automatic account switching disabled on this machine.")
+
+
+def cmd_auto_status(args):
+    st = read_json(pool_settings_path(), {}) or {}
+    print("acct plugin %s" % plugin_version())
+    print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
+    print("Rotates at: %s" % _trigger_text())
+    print("Backup account (while the seat moves): %s" % BACKUP_EMAIL)
+    print("Rotation: %s" % " → ".join(ROTATION_EMAILS))
+    print("Pool server: %s (%s)" % (_pool_url(st), "joined" if st.get("api_key") else "not joined: /acct:auto join <key>"))
+    if st.get("api_key") or st.get("mover_key"):
+        try:
+            s = pool_call("GET", "/api/state", mover=not st.get("api_key"))
+            print("Pool phase: %s, Premium: %s%s" % (s.get("phase"), s.get("premium") or "?",
+                                                    ", target: %s" % s.get("target") if s.get("phase") != "STABLE" else ""))
+        except AcctError as e:
+            print("Pool phase: unknown (%s)" % e)
+    if st.get("mover_key"):
+        print("This machine moves the seat: service %s" % ("loaded" if _mover_service_loaded() else "NOT loaded"))
+
+
+def cmd_auto_browser(args):
+    ensure_node_deps()
+    node = os.environ.get("CLAUDE_ACCT_NODE", "node")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
+    env = seat_manager_env(load_rotation())
+    try:
+        subprocess.Popen([node, script, "--setup"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=env, start_new_session=True)
+    except OSError as e:
+        raise AcctError("Could not open the persistent Chrome profile: %s" % e)
+    print("Opened Chrome with the saved automation profile. Sign in as an organization owner/admin if needed. Leave this profile available for seat automation; the login is saved for future rotations.")
 
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1197,28 +1637,31 @@ def cmd_doctor(args):
         if not ok and fix:
             todo.append(fix)
 
+    st = read_json(pool_settings_path(), {}) or {}
+    mover = bool(st.get("mover_key"))
     check("acct plugin", True, plugin_version())
     check("Python", True, "%d.%d" % sys.version_info[:2])
-    node = shutil.which(os.environ.get("CLAUDE_ACCT_NODE", "node"))
-    node_version = None
-    if node:
+    if mover:  # only the seat-moving machine drives Chrome
+        node = shutil.which(os.environ.get("CLAUDE_ACCT_NODE", "node"))
+        node_version = None
+        if node:
+            try:
+                node_version = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         try:
-            node_version = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    try:
-        node_ok = int((node_version or "v0").lstrip("v").split(".")[0]) >= 20
-    except ValueError:
-        node_ok = False
-    check("Node.js 20+", node_ok, node_version or "not found", "Install Node.js 20 or later (https://nodejs.org), then run /acct:doctor again.")
-    if node_ok:
-        try:
-            ensure_node_deps()
-            check("playwright-core", True, "installed in %s" % PLUGIN_ROOT)
-        except (AcctError, OSError, subprocess.TimeoutExpired) as e:
-            check("playwright-core", False, str(e), "Fix the npm error above, then run /acct:doctor again.")
-    else:
-        check("playwright-core", False, "needs Node.js first")
+            node_ok = int((node_version or "v0").lstrip("v").split(".")[0]) >= 20
+        except ValueError:
+            node_ok = False
+        check("Node.js 20+", node_ok, node_version or "not found", "Install Node.js 20 or later (https://nodejs.org), then run /acct:doctor again.")
+        if node_ok:
+            try:
+                ensure_node_deps()
+                check("playwright-core", True, "installed in %s" % PLUGIN_ROOT)
+            except (AcctError, OSError, subprocess.TimeoutExpired) as e:
+                check("playwright-core", False, str(e), "Fix the npm error above, then run /acct:doctor again.")
+        chrome = find_chrome()
+        check("Google Chrome", bool(chrome), chrome or "not found", "Install Google Chrome (or set CLAUDE_ACCT_CHROME to its executable).")
     try:
         fetch_usage("doctor-check")  # no valid token: a 401 proves HTTPS works
         check("HTTPS to api.anthropic.com", True, "ok")
@@ -1230,9 +1673,6 @@ def cmd_doctor(args):
               ("This Python (%s) has no CA certificates. python.org on macOS: run \"/Applications/Python %d.%d/Install Certificates.command\", "
                "or `%s -m pip install certifi`." % (sys.executable, sys.version_info[0], sys.version_info[1], sys.executable)) if cert
               else "Check the network, proxy or firewall for api.anthropic.com.")
-    chrome = find_chrome()
-    check("Google Chrome", bool(chrome), chrome or "not found",
-          "Install Google Chrome (or set CLAUDE_ACCT_CHROME to its executable).")
     try:
         read_live_creds()
         live = read_live_profile() or {}
@@ -1240,23 +1680,24 @@ def cmd_doctor(args):
     except AcctError:
         check("Claude Code login", False, "not logged in", "Log in to Claude Code with /login.")
     idx = load_index()
-    names = sorted(idx["accounts"])
-    cur = current_name(idx)
-    check("Saved accounts", len(names) >= 2, ", ".join(names) or "none",
-          "Save every account of the pool: /acct:save <name> for the current one, /acct:login <name> <email> for each other one.")
-    if names and not cur:
-        todo.append("The current Claude Code login is not saved: run /acct:save <name>.")
-    cfg = load_rotation()
-    if not cfg.get("order"):
-        check("Rotation", False, "not configured",
-              "Configure rotation: /acct:auto configure --premium <current Premium account> --order <premium>,<next>,...")
+    missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
+    check("Pool accounts logged in", not missing, "all %d" % len(POOL_EMAILS) if not missing else "missing: " + ", ".join(missing),
+          "Log in to the missing accounts: /acct:login (it goes through them one by one).")
+    if st.get("api_key") or mover:
+        try:
+            s = pool_call("GET", "/api/state", mover=not st.get("api_key"))
+            check("Pool server", True, "%s · %s, Premium %s" % (_pool_url(st), s.get("phase"), s.get("premium") or "?"))
+        except AcctError as e:
+            check("Pool server", False, str(e), "Check the network to %s, or the key (/acct:auto join <key>)." % _pool_url(st))
     else:
-        check("Rotation", True, "%s, Premium: %s, rotates at %s, next Premium: least used of %s" % (
-            "ON" if cfg.get("enabled") else "OFF", cfg.get("premiumAccount"), _trigger_text(cfg), ", ".join(cfg["order"])))
-        if not os.path.isdir(cfg.get("browserProfile") or ""):
+        check("Pool server", False, "not joined", "Join the pool with the API key you were given: /acct:auto join <key>")
+    check("Account switching", bool(load_rotation().get("enabled")), "ON" if load_rotation().get("enabled") else "OFF",
+          "Turn it on: /acct:auto enable")
+    if mover:
+        check("Seat-moving service", _mover_service_loaded(), "launchd %s" % MOVER_LABEL,
+              "Reinstall it: /acct:auto mover <mover key>")
+        if not os.path.isdir(load_rotation().get("browserProfile") or os.path.join(store_dir(), "browser-profile")):
             todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
-        if not cfg.get("enabled"):
-            todo.append("When the steps above are done: /acct:auto enable")
     print("| | Check | Detail |")
     print("|---|---|---|")
     for r in rows:
@@ -1267,93 +1708,6 @@ def cmd_doctor(args):
             print("%d. %s" % (i, t))
     else:
         print("\nEverything is ready.")
-
-
-FOLLOW_GRACE = 300  # seconds after this machine moved the seat; see _follow_premium_seat
-
-
-def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
-    """Return (status, tier) of a saved account's seat. The live login's token is never refreshed here."""
-    try:
-        creds = read_stored_creds(name)
-    except AcctError:
-        return "credentials unavailable", None
-    meta = idx["accounts"][name]
-    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name, ttl=ttl)
-    return status, (meta.get("seat") or {}).get("tier")
-
-
-def _find_premium_holder(cfg, idx, live, force=False, exclude=None):
-    """Return the pool account that holds the Premium seat, or None if no pool account confirms it.
-
-    The seat can move without this machine: by hand on the Members page, or by another machine
-    that shares the pool. Unconfirmed readings keep the configured account; `exclude` is never
-    taken as the holder.
-    """
-    premium = cfg.get("premiumAccount")
-    status, tier = _seat_tier(idx, premium, live, force, ttl=PREMIUM_CHECK_TTL)
-    if status not in ("ok", "cache") or tier == PREMIUM_TIER:
-        return premium
-    for name in cfg.get("order", []):
-        if name in (premium, exclude) or name not in idx["accounts"]:
-            continue
-        # Fresh readings: a cached Premium may be the seat this machine saw before it moved.
-        status, tier = _seat_tier(idx, name, live, force=True)
-        if status == "ok" and tier == PREMIUM_TIER:
-            return name
-    return None
-
-
-def _forget_seat_readings(idx, *names):
-    """Drop cached seat and usage of accounts whose seat changed: a percentage read against Standard
-    limits would be taken for a Premium one (5x too high) and trigger another rotation."""
-    for name in names:
-        meta = idx["accounts"].get(name) or {}
-        meta.pop("seat", None)
-        meta.pop("usage", None)
-
-
-def _follow_premium_seat(cfg, idx, cur, args):
-    """Point the config and this session at the account holding Premium. Return True if done for this check."""
-    premium = cfg.get("premiumAccount")
-    # Right after this machine moved the seat, the profile API may still show the account it left as
-    # Premium: never follow the seat back there. A move to any other account is followed at once.
-    recent = time.time() - (cfg.get("rotatedAt") or 0) < FOLLOW_GRACE
-    holder = _find_premium_holder(cfg, idx, cur or current_name(idx), force=args.force,
-                                  exclude=cfg.get("rotatedFrom") if recent else None)
-    save_index(idx)
-    if holder is None:
-        # Rotating would ask the Members page to demote an account that is not Premium.
-        log_event("no_holder", "%s is not Premium and no saved pool account holds the seat" % premium,
-                  every=QUIET_EVERY, live=cur, premium=premium)
-        if args.manual:
-            raise _logged_error("%s no longer holds the Premium seat, and no saved account in the rotation order does. "
-                            "No seat or account was changed." % premium)
-        return True
-    if holder != premium:
-        cfg["premiumAccount"] = holder
-        cfg.pop("rotationHold", None)
-        save_rotation(cfg)
-        holder_seat = idx["accounts"][holder].get("seat")
-        _forget_seat_readings(idx, premium, holder)
-        idx["accounts"][holder]["seat"] = holder_seat  # just read fresh: it is Premium
-        save_index(idx)
-        print("The Premium seat moved from %s to %s outside this machine." % (premium, holder))
-        log_event("follow", "seat moved outside this machine", live=cur, premium=premium, target=holder)
-    if cur == holder:
-        return False
-    _logged_switch(cur, holder)
-    return True
-
-
-def _logged_switch(cur, target):
-    try:
-        cmd_switch(argparse.Namespace(name=target, force=False, no_wait=False))
-    except Exception as e:
-        log_event("switch_fail", str(e)[-500:], live=cur, target=target)
-        e.logged = True
-        raise
-    log_event("switch_ok", "", live=cur, target=target)
 
 
 def _set_premium_seat(old_name, new_name, cfg, idx):
@@ -1371,101 +1725,9 @@ def _set_premium_seat(old_name, new_name, cfg, idx):
         raise AcctError("Could not run seat automation: %s. Check Node.js, Playwright, and the Chrome CDP connection." % e)
     if r.returncode != 0:
         detail = (r.stderr or r.stdout or "unknown error").strip()
-        raise AcctError("Premium seat transfer failed; account switch was not performed. %s" % detail[-1200:])
+        raise AcctError("Premium seat transfer failed. %s" % detail[-1200:])
     if r.stdout.strip():
         print(r.stdout.strip())
-
-
-def _cmd_auto_check_locked(args):
-    cfg = load_rotation()
-    if not cfg.get("enabled"):
-        return
-    idx = load_index()
-    premium = cfg.get("premiumAccount")
-    if premium not in idx["accounts"]:
-        raise AcctError("Current Premium account '%s' is not saved. Disable rotation or reconfigure it." % premium)
-    try:
-        cur = sync_current(idx)
-    except AcctError:
-        cur = current_name(idx)
-    # A login outside the pool (a personal plan, an unsaved account) is left alone.
-    if cur != premium and cur not in cfg.get("order", []):
-        return
-    if _follow_premium_seat(cfg, idx, cur, args):
-        return
-    premium = cfg["premiumAccount"]
-    try:
-        creds = read_stored_creds(premium)
-    except AcctError as e:
-        raise AcctError("Automatic rotation could not read the Premium account: %s" % e)
-    meta = idx["accounts"][premium]
-    status = refresh_usage(meta, creds, force=args.force, ttl=PREMIUM_CHECK_TTL)
-    if status not in ("ok", "cache"):
-        log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, live=cur, premium=premium)
-        save_index(idx)
-        if args.manual:
-            raise _logged_error("Cannot check Premium usage (%s); rotation did not run." % status)
-        return
-    usage = (meta.get("usage") or {}).get("data") or {}
-    daily_threshold = _rotation_threshold(cfg)
-    weekly_threshold = _weekly_threshold(cfg)
-    values = _usage_window_values(usage)
-    save_index(idx)
-    if cfg.get("rotationHold") == premium:
-        if not values or _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
-            return
-        cfg.pop("rotationHold", None)
-        save_rotation(cfg)
-    if not values or not _usage_reached_threshold(usage, daily_threshold, weekly_threshold):
-        return
-    old_name = premium
-    new_name, skipped = _next_eligible_rotation_account(cfg, idx, daily_threshold, weekly_threshold)
-    save_rotation(cfg)
-    save_index(idx)
-    fields = dict(live=cur, premium=premium, **_usage_fields(meta))
-    if not new_name:
-        log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
-        if args.manual:
-            raise _logged_error("No eligible account for Premium: every other account is at the usage threshold or has an expired login / unavailable usage. "
-                            "No seat or account was changed. Checked: %s" % (", ".join(skipped) or "none"))
-        return
-    if args.manual:
-        reached = []
-        if values.get("five_hour", -1) >= daily_threshold:
-            reached.append("5-hour %d%% (threshold %d%%)" % (round(values["five_hour"]), daily_threshold))
-        if values.get("seven_day", -1) >= weekly_threshold:
-            reached.append("7-day %d%% (threshold %d%%)" % (round(values["seven_day"]), weekly_threshold))
-        elif values.get("seven_day", -1) >= 100:
-            reached.append("7-day %d%% (used up)" % round(values["seven_day"]))
-        print("Usage threshold reached for %s. Transferring Premium from %s to %s..." % (" and ".join(reached), old_name, new_name))
-    # Other machines may reach the threshold at the same moment. Wait a random moment, then confirm
-    # with a fresh reading that the seat has not moved meanwhile; if it has, follow it instead.
-    time.sleep(random.uniform(0, ROTATION_JITTER))
-    status, tier = _seat_tier(idx, premium, cur, force=True)
-    if status == "ok" and tier != PREMIUM_TIER:
-        log_event("move_skipped", "seat moved by another machine during the wait", target=new_name, **fields)
-        save_index(idx)
-        _follow_premium_seat(cfg, idx, cur, argparse.Namespace(force=True, manual=args.manual))
-        return
-    log_event("move_start", "threshold reached", target=new_name, **fields)
-    started = time.time()
-    try:
-        _set_premium_seat(old_name, new_name, cfg, idx)
-    except Exception as e:
-        log_event("move_fail", "%ds: %s" % (time.time() - started, str(e)[-800:]), target=new_name, **fields)
-        e.logged = True
-        raise
-    log_event("move_ok", "%ds" % (time.time() - started), target=new_name, **fields)
-    # Change credentials only after the Members page confirms the tier change.
-    _logged_switch(cur, new_name)
-    cfg["premiumAccount"] = new_name
-    cfg["rotatedAt"] = time.time()
-    cfg["rotatedFrom"] = old_name
-    cfg.pop("rotationHold", None)
-    save_rotation(cfg)
-    idx = load_index()  # cmd_switch saved its own copy
-    _forget_seat_readings(idx, old_name, new_name)
-    save_index(idx)
 
 
 def _acquire_lock(lock_path, wait=0):
@@ -1488,29 +1750,25 @@ def _acquire_lock(lock_path, wait=0):
         time.sleep(2)
 
 
-def _heartbeat(cfg):
+def _heartbeat():
     try:
         idx = load_index()
-        premium = cfg.get("premiumAccount")
-        log_event("heartbeat", "rotation %s; %s" % ("ON" if cfg.get("enabled") else "OFF", _trigger_text(cfg)),
-                  every=HEARTBEAT_EVERY, live=current_name(idx), premium=premium,
-                  **_usage_fields(idx["accounts"].get(premium)))
+        log_event("heartbeat", "switching %s; %s" % ("ON" if load_rotation().get("enabled") else "OFF", _trigger_text()),
+                  every=HEARTBEAT_EVERY, live=current_name(idx))
     except Exception:
         pass
 
 
 def cmd_auto_check(args, lock_wait=0):
-    cfg = load_rotation()
-    if cfg.get("order"):
-        _heartbeat(cfg)
-    if not cfg.get("enabled"):
+    _heartbeat()
+    if not load_rotation().get("enabled"):
         return
     lock_path = os.path.join(store_dir(), "rotation.lock")
     os.makedirs(store_dir(), exist_ok=True)
     if not _acquire_lock(lock_path, lock_wait):
         return
     try:
-        _cmd_auto_check_locked(args)
+        _worker_check(args)
     except Exception as e:
         if not getattr(e, "logged", False):
             log_event("error", ("%s: %s" % (type(e).__name__, e))[-800:])
@@ -1525,15 +1783,15 @@ def cmd_auto_check(args, lock_wait=0):
 # Exit code 2 from an `asyncRewake` hook wakes the model with this text (stderr) in the same session.
 REWAKE_EXIT = 2
 REWAKE_MESSAGE = ("The claude.ai usage limit of account %s was reached, so the acct plugin switched this session to "
-                  "account %s, which holds the organization's Premium seat and has usage available. Continue the task you were "
+                  "account %s, which has usage available. Continue the task you were "
                   "working on when the limit was reached; do not repeat work that is already complete.")
 
 
 def cmd_auto_recover(args):
-    """Seat rotation after Claude Code reports a quota rate limit; wakes the model when the account changed.
+    """After Claude Code reports a quota rate limit: switch to the account the pool says, and wake the model.
 
-    Runs as an `asyncRewake` StopFailure hook: in the background, so the seat transfer and the
-    Keychain cache wait do not block the UI. Exit 2 makes Claude Code continue the stopped task.
+    Runs as an `asyncRewake` StopFailure hook: in the background, so the Keychain cache wait does
+    not block the UI. Exit 2 makes Claude Code continue the stopped task.
     """
     try:
         event = json.load(sys.stdin)
@@ -1544,10 +1802,6 @@ def cmd_auto_recover(args):
     if not load_rotation().get("enabled"):
         return
     before = current_name(load_index())
-    # StopFailure's rate_limit category also covers ordinary API throttling.
-    # Reuse normal checks: live usage must confirm the configured threshold, and
-    # the destination must have fresh usage below both thresholds. Wait for a
-    # check that is already rotating instead of skipping it.
     try:
         cmd_auto_check(argparse.Namespace(force=True, manual=False), lock_wait=240)
     finally:
@@ -1590,32 +1844,34 @@ def main(argv=None):
     p = sub.add_parser("switch", help="switch account"); p.add_argument("name", nargs="?"); p.add_argument("--force", action="store_true"); p.add_argument("--no-wait", action="store_true"); p.set_defaults(fn=cmd_switch)
     p = sub.add_parser("remove", help="remove an account from the list"); p.add_argument("name", nargs="?"); p.set_defaults(fn=cmd_remove)
     p = sub.add_parser("doctor", help="check requirements, install the Node dependency, list remaining setup steps"); p.set_defaults(fn=cmd_doctor)
-    p = sub.add_parser("auto", help="configure automatic Premium seat rotation")
+    p = sub.add_parser("auto", help="automatic account switching and Premium seat moves (XTGroup pool)")
     autos = p.add_subparsers(dest="auto_cmd", required=True)
-    q = autos.add_parser("configure", help="set account rotation order and organization page")
-    q.add_argument("--premium", required=True); q.add_argument("--order", required=True)
-    q.add_argument("--daily-threshold", type=int, help="5-hour usage trigger (default: 80%%)")
-    q.add_argument("--threshold", type=int, help="same as --daily-threshold")
-    q.add_argument("--members-url", default="https://claude.ai/admin-settings/members")
-    q.add_argument("--cdp-url", default="http://127.0.0.1:9222")
-    q.add_argument("--browser-profile", default=os.path.join(store_dir(), "browser-profile"))
-    q.set_defaults(fn=cmd_auto_configure)
-    q = autos.add_parser("enable", help="enable automatic rotation"); q.set_defaults(fn=cmd_auto_enable)
-    q = autos.add_parser("disable", help="disable automatic rotation"); q.set_defaults(fn=cmd_auto_disable)
+    q = autos.add_parser("join", help="join the pool server with the API key (every machine; turns switching on)")
+    q.add_argument("key"); q.add_argument("--url", help="pool server URL (default %s)" % POOL_URL)
+    q.set_defaults(fn=cmd_auto_join)
+    q = autos.add_parser("mover", help="make this machine the one that moves the seat (machine 2), or 'off'")
+    q.add_argument("key"); q.add_argument("--url", help="pool server URL (default %s)" % POOL_URL)
+    q.set_defaults(fn=cmd_auto_mover)
+    q = autos.add_parser("serve-once", help=argparse.SUPPRESS)
+    q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
+    q.set_defaults(fn=cmd_auto_serve, hook="mover")
+    q = autos.add_parser("enable", help="turn automatic account switching on"); q.set_defaults(fn=cmd_auto_enable)
+    q = autos.add_parser("disable", help="turn automatic account switching off on this machine"); q.set_defaults(fn=cmd_auto_disable)
     q = autos.add_parser("status", help="show rotation settings"); q.set_defaults(fn=cmd_auto_status)
     q = autos.add_parser("browser", help="open the persistent admin browser profile for one-time sign-in"); q.set_defaults(fn=cmd_auto_browser)
-    q = autos.add_parser("check", help="check usage and rotate if threshold is reached")
+    q = autos.add_parser("check", help="switch this session to the account the pool says")
     q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
     q.add_argument("--hook", help=argparse.SUPPRESS)
     q.set_defaults(fn=cmd_auto_check)
     q = autos.add_parser("recover", help=argparse.SUPPRESS)
     q.set_defaults(fn=cmd_auto_recover, hook="StopFailure")
     p = sub.add_parser("log-flush", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_log_flush)
+    p = sub.add_parser("login-backup", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_login_backup)
     args = ap.parse_args(argv)
     global _hook
     _hook = getattr(args, "hook", None)
     try:
-        if hasattr(args, "name") and not args.name:
+        if hasattr(args, "name") and not args.name and args.cmd != "login":
             hint = {"login": "/acct:login", "save": "/acct:save", "switch": "/acct:switch", "remove": "/acct:logout"}[args.cmd]
             raise AcctError("Missing account name. Example: %s work" % hint)
         args.fn(args)
