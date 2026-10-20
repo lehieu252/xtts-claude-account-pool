@@ -1042,6 +1042,10 @@ def plugin_version():
 
 
 def machine_name():
+    """The machine's name on the dashboard and in the log: "name" in pool.json, else the git user name."""
+    name = (read_json(os.path.join(store_dir(), "pool.json"), {}) or {}).get("name")
+    if name:
+        return name
     try:
         r = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True, timeout=3)
         name = r.stdout.strip()

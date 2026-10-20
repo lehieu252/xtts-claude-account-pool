@@ -515,6 +515,10 @@ class JoinAndServiceTests(unittest.TestCase):
             with self.assertRaises(acct.AcctError):
                 acct.cmd_auto_join(argparse.Namespace(key="bad", url=None))
 
+    def test_a_name_in_pool_settings_overrides_the_git_user_name(self):
+        acct.save_pool_settings({"machine_id": "x", "name": "STG"})
+        self.assertEqual(acct.machine_name(), "STG")
+
     def test_launcher_runs_the_installed_plugin_version_once(self):
         path = acct._write_mover_launcher()
         text = open(path, encoding="utf-8").read()
