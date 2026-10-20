@@ -71,42 +71,27 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
 
   <div class="alerts" id="alerts"></div>
 
-  <div class="grid">
-    <div class="panel">
+  <div class="panel">
       <h2>Các máy</h2>
       <div class="tbl"><table>
         <thead><tr><th>Máy</th><th>Host</th><th>Vai trò</th><th>Account đang dùng</th><th>Ở info</th><th>Version</th><th>Lần cuối</th></tr></thead>
         <tbody id="machines"><tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr></tbody>
       </table></div>
-    </div>
-    <div class="panel">
-      <h2>Lịch sử pha</h2>
-      <div class="tbl"><table>
-        <thead><tr><th>Lúc</th><th>Pha</th><th>Premium → đích</th></tr></thead>
-        <tbody id="transitions"><tr><td colspan="3" class="muted">Chưa có lần chuyển seat nào.</td></tr></tbody>
-      </table></div>
-    </div>
   </div>
 
   <div class="panel">
-    <h2>Log</h2>
-    <div class="filters">
-      <label for="fmachine" class="muted">Máy</label><select id="fmachine"><option value="">Tất cả</option></select>
-      <label for="fevent" class="muted">Sự kiện</label><select id="fevent"><option value="">Tất cả</option></select>
-    </div>
-    <div class="tbl"><table>
-      <thead><tr><th>Thời gian</th><th>Máy</th><th>Version</th><th>Hook</th><th>Sự kiện</th><th>Đang dùng</th><th>Premium</th><th>Đích</th><th>P 5h</th><th>P 7d</th><th>Message</th></tr></thead>
-      <tbody id="log"><tr><td colspan="11" class="muted">Chưa có log.</td></tr></tbody>
-    </table></div>
+      <h2>Lịch sử pha</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>Lúc</th><th>Pha</th><th>Premium → đích</th><th>Ghi chú</th></tr></thead>
+        <tbody id="transitions"><tr><td colspan="4" class="muted">Chưa có lần chuyển seat nào.</td></tr></tbody>
+      </table></div>
   </div>
+
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const EVENTS = ["heartbeat", "no_destination", "move_start", "move_ok", "move_fail", "move_skipped", "follow",
-  "no_holder", "switch_ok", "switch_fail", "read_fail", "recover", "error"];
-let known = new Set();
 
 function ago(sec) {
   if (sec < 0) sec = 0;
@@ -154,34 +139,17 @@ function render(d) {
 
   $("transitions").innerHTML = d.transitions.length ? d.transitions.map((t) => `<tr>
       <td>${clock(t.at)}</td><td><span class="pill ${esc(t.phase)}">${esc(t.phase)}</span></td>
-      <td class="mono">${esc(t.premium || "—")}${t.target && t.phase !== "STABLE" ? " → " + esc(t.target) : ""}</td></tr>`).join("")
-    : `<tr><td colspan="3" class="muted">Chưa có lần chuyển seat nào.</td></tr>`;
+      <td class="mono">${esc(t.premium || "—")}${t.target && t.phase !== "STABLE" ? " → " + esc(t.target) : ""}</td>
+      <td class="wrap">${esc(t.message)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">Chưa có lần chuyển seat nào.</td></tr>`;
 
-  for (const r of d.log) if (r.machine) known.add(r.machine);
-  for (const m of d.machines) if (m.name) known.add(m.name);
-  fillSelect($("fmachine"), [...known].sort());
-  fillSelect($("fevent"), EVENTS);
-  $("log").innerHTML = d.log.length ? d.log.map((r) => `<tr>
-      <td class="mono">${esc(r.ts)}</td><td>${esc(r.machine)}</td><td class="mono">${esc(r.version)}</td>
-      <td>${esc(r.hook)}</td><td class="ev-${esc(r.event)}">${esc(r.event)}</td>
-      <td class="mono">${esc(r.live)}</td><td class="mono">${esc(r.premium)}</td><td class="mono">${esc(r.target)}</td>
-      <td>${r.p5h ?? ""}</td><td>${r.p7d ?? ""}</td><td class="wrap">${esc(r.message)}</td></tr>`).join("")
-    : `<tr><td colspan="11" class="muted">Chưa có log.</td></tr>`;
 
   $("updated").textContent = "Làm mới lúc " + new Date().toLocaleTimeString("vi-VN", { hour12: false }) + " · mỗi 5 giây";
 }
 
-function fillSelect(sel, values) {
-  const cur = sel.value;
-  const have = new Set([...sel.options].map((o) => o.value));
-  for (const v of values) if (!have.has(v)) sel.add(new Option(v, v));
-  sel.value = cur;
-}
 
 async function refresh() {
-  const q = new URLSearchParams({ limit: "200" });
-  if ($("fmachine").value) q.set("machine", $("fmachine").value);
-  if ($("fevent").value) q.set("event", $("fevent").value);
+  const q = new URLSearchParams({ limit: "50" });  // only for the "seat move failed" alert
   try {
     const r = await fetch("api/dashboard?" + q, { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -190,8 +158,6 @@ async function refresh() {
     $("updated").textContent = "Không tải được dữ liệu (" + e.message + "), thử lại sau 5 giây";
   }
 }
-$("fmachine").addEventListener("change", refresh);
-$("fevent").addEventListener("change", refresh);
 refresh();
 setInterval(refresh, 5000);
 </script>
