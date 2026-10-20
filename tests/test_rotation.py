@@ -552,6 +552,22 @@ class WindowsServiceTests(unittest.TestCase):
         self.assertIn("installed_plugins.json", text)
         self.assertIn(repr(os.path.abspath(acct.__file__)), text)
 
+    def test_launcher_skips_an_installed_version_without_serve_once(self):
+        import subprocess as sp
+        home = tempfile.mkdtemp()
+        old = os.path.join(home, "cache", "acct", "0.8.3", "scripts")
+        os.makedirs(old)
+        open(os.path.join(old, "claude_acct.py"), "w").write("# 0.8.3, no seat service\n")
+        os.makedirs(os.path.join(home, ".claude", "plugins"))
+        json.dump({"plugins": {"acct@x": [{"installPath": os.path.dirname(old)}]}},
+                  open(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), "w"))
+        text = open(acct._write_windows_mover_launcher(), encoding="utf-8").read()
+        probe = text.split("log_path =")[0] + "print(script())\n"
+        out = sp.run([sys.executable, "-c", probe], env=dict(os.environ, HOME=home, USERPROFILE=home),
+                     capture_output=True, text=True).stdout.strip()
+        self.assertEqual(out, os.path.abspath(acct.__file__))
+        shutil.rmtree(home)
+
     def test_task_runs_at_logon_in_the_interactive_session_and_starts_now(self):
         seen = []
         with Patches(patch.object(acct, "_is_windows", return_value=True),

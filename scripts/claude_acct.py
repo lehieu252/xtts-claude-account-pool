@@ -1458,7 +1458,9 @@ def _write_mover_launcher():
                 "for k, v in (d.get('plugins') or {}).items():\n"
                 "    if k.startswith('acct@') and v:\n"
                 "        s = os.path.join(v[0].get('installPath', ''), 'scripts', 'acct.sh')\n"
-                "        if os.path.isfile(s):\n            print(s)\n            break\nPY\n)\n")
+                "        py = os.path.join(os.path.dirname(s), 'claude_acct.py')\n"
+                "        if os.path.isfile(s) and os.path.isfile(py) and 'def cmd_auto_serve' in open(py).read():\n"
+                "            print(s)\n            break\nPY\n)\n")
         f.write("[ -n \"$S\" ] || S=%s\n" % sh_quote(here))
         f.write("exec bash \"$S\" auto serve-once\n")
     os.chmod(path, 0o755)
@@ -1488,7 +1490,8 @@ def script():
         for key, entries in plugins.items():
             if key.startswith("acct@") and entries:
                 s = os.path.join(entries[0].get("installPath", ""), "scripts", "claude_acct.py")
-                if os.path.isfile(s):
+                # An older installed version (before 1.0.0) has no serve-once: use the fallback copy then.
+                if os.path.isfile(s) and "def cmd_auto_serve" in open(s, encoding="utf-8").read():
                     return s
     except Exception:
         pass
