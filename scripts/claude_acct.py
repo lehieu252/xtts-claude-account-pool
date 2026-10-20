@@ -1398,6 +1398,16 @@ def _mover_once(args):
         # first run, a seat moved by hand, or a move cut short: publish where the seat really is
         _put_state("STABLE", h_email, message="synced with claude.ai")
         log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
+    test = st.get("test_move") or {}
+    if test.get("target") and time.time() < test.get("until", 0):
+        # One seat move asked by `auto test-move`, whatever the usage: the full flow, on demand.
+        st.pop("test_move", None)
+        save_pool_settings(st)
+        target = _saved_name(idx, test["target"])
+        if target and target != holder:
+            log_event("test_move", "test move asked by hand", premium=h_email, target=test["target"])
+            _move_seat(idx, holder, target, live, {"premium": h_email})
+        return
     meta = idx["accounts"][holder]
     status = refresh_usage(meta, read_stored_creds(holder), force=args.force,
                            refresh_name=None if holder == live else holder, ttl=PREMIUM_CHECK_TTL)
@@ -1688,6 +1698,20 @@ def cmd_auto_mover(args):
           "(on Windows Server: disconnect RDP, never sign out), with every pool account logged in (/acct:login) "
           "and the admin browser signed in (/acct:auto browser)."
           % ("the scheduled task " + MOVER_TASK if _is_windows() else "the launchd service " + MOVER_LABEL, MOVER_INTERVAL))
+
+
+def cmd_auto_test_move(args):
+    """Machine 2 only: on its next run, move the seat to <email> through the full flow, ignoring the thresholds."""
+    st = pool_settings()
+    if not st.get("mover_key"):
+        raise AcctError("Only the seat-moving machine can run a test move.")
+    email = args.email.strip().lower()
+    if email not in ROTATION_EMAILS:
+        raise AcctError("%s is not a rotation account (%s)." % (email, ", ".join(ROTATION_EMAILS)))
+    st["test_move"] = {"target": email, "until": time.time() + 300}
+    save_pool_settings(st)
+    print("Test move queued: within %ds the service moves the Premium seat to %s (PREPARING → backup → MOVING → STABLE). "
+          "Watch https://xtts.xtgroup.vn/pool/." % (MOVER_INTERVAL, email))
 
 
 def cmd_auto_enable(args):
@@ -2013,6 +2037,8 @@ def main(argv=None):
     q = autos.add_parser("mover", help="make this machine the one that moves the seat (machine 2), or 'off'")
     q.add_argument("key"); q.add_argument("--url", help="pool server URL (default %s)" % POOL_URL)
     q.set_defaults(fn=cmd_auto_mover)
+    q = autos.add_parser("test-move", help="machine 2: move the seat to <email> once, ignoring the thresholds (to test the flow)")
+    q.add_argument("email"); q.set_defaults(fn=cmd_auto_test_move)
     q = autos.add_parser("serve-once", help=argparse.SUPPRESS)
     q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
     q.set_defaults(fn=cmd_auto_serve, hook="mover")

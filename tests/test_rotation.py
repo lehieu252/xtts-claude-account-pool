@@ -490,6 +490,15 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(rows[INFO]["role"], "backup")
         self.assertEqual(rows[KIENLT]["status"], "not logged in on machine 2")
 
+    def test_a_test_move_runs_the_full_flow_once_below_the_thresholds(self):
+        acct.save_pool_settings({"mover_key": "mk", "machine_id": "m2",
+                                 "test_move": {"target": THANGLT, "until": time.time() + 60}})
+        pool = FakePool("STABLE", HIEUNX)
+        move = self.run_once(pool_index(**{HIEUNX: (31, 32)}, premium=HIEUNX), pool)
+        self.assertEqual(pool.puts, [("PREPARING", HIEUNX, THANGLT), ("MOVING", HIEUNX, THANGLT), ("STABLE", THANGLT, None)])
+        self.assertEqual(move.call_args.args[:2], (HIEUNX, THANGLT))
+        self.assertNotIn("test_move", acct.pool_settings())  # once only
+
     def test_needs_the_mover_key(self):
         acct.save_pool_settings({"api_key": "k", "machine_id": "w"})
         with self.assertRaises(acct.AcctError):
