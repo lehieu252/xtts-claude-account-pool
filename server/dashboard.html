@@ -75,7 +75,6 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
     <div class="stat"><span class="k">Account đích (P mới)</span><span class="v mono" id="target">—</span></div>
     <div class="stat"><span class="k">Máy 2 (chuyển seat)</span><span class="v" id="mover">—</span></div>
   </div>
-  <div class="muted" id="statemsg"></div>
 
   <div class="alerts" id="alerts"></div>
 
@@ -123,7 +122,6 @@ function render(d) {
   $("phase").innerHTML = `<span class="pill ${esc(st.phase)}">${esc(st.phase)}</span>`;
   $("premium").textContent = st.premium || "—";
   $("target").textContent = st.phase === "STABLE" ? "—" : (st.target || "—");
-  $("statemsg").textContent = `Cập nhật pha ${ago(now - st.updated_at)}${st.message ? " · " + st.message : ""}`;
 
   const movers = d.machines.filter((m) => m.role === "mover");
   const mover = movers.sort((a, b) => b.last_seen - a.last_seen)[0];

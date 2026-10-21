@@ -110,7 +110,14 @@ const context = browser.contexts()[0];
   };
   const chooseTier = async (control, tier) => {
     // Open the tier picker and click the "<tier> seat" option, all through the DOM.
-    await control.evaluate((el) => el.click());
+    // Right after the page loads the picker ignores clicks until its handlers are attached, so
+    // click again until it reports itself open (a click on an open picker would close it).
+    const expanded = () => control.evaluate((el) => el.getAttribute("aria-expanded") === "true");
+    const reportsState = await control.evaluate((el) => el.hasAttribute("aria-expanded"));
+    for (let click = 0; click < (reportsState ? 10 : 1) && !(await expanded()); click++) {
+      await control.evaluate((el) => el.click());
+      for (let wait = 0; wait < 8 && !(await expanded()); wait++) await page.waitForTimeout(250);
+    }
     let picked = false;
     for (let attempt = 0; attempt < 20 && !picked; attempt++) {
       await page.waitForTimeout(250);
