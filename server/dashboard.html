@@ -140,7 +140,9 @@ function render(d) {
   const alerts = [];
   if (!moverOk) alerts.push(["bad", mover ? `Máy 2 không báo trạng thái ${ago(now - mover.last_seen)}: không ai chuyển seat cho đến khi máy 2 chạy lại.` : "Máy 2 chưa kết nối lần nào."]);
   if (st.phase !== "STABLE" && now - st.updated_at > 300) alerts.push(["warn", `Pha ${st.phase} đã kéo dài ${ago(now - st.updated_at).replace(" trước", "")}.`]);
-  const fail = d.log.find((r) => r.event === "move_fail");
+  // The log is newest first: a seat move that succeeded after the failure clears the alert.
+  const last = d.log.find((r) => r.event === "move_fail" || r.event === "move_ok");
+  const fail = last && last.event === "move_fail" ? last : null;
   if (fail && now - fail.received < 3600) alerts.push(["bad", `Chuyển seat thất bại lúc ${esc(fail.ts)}: ${esc((fail.message || "").slice(0, 300))}`]);
   const stale = d.machines.filter((m) => m.active && m.role !== "mover" && st.phase === "STABLE" && st.premium && m.account && m.account !== st.premium && m.account);
   if (stale.length) alerts.push(["warn", `Máy chưa ở account Premium: ${stale.map((m) => esc(m.name || m.host)).join(", ")}.`]);
