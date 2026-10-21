@@ -932,6 +932,7 @@ ROTATION_EMAILS = (  # the accounts that take turns holding Premium; the order b
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
 )
 POOL_EMAILS = (BACKUP_EMAIL,) + ROTATION_EMAILS
+SPARE_BACKUP_EMAILS = ("info@xtgroup.vn",)  # a second backup, not used yet: only shown on the dashboard
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 80
@@ -1171,6 +1172,18 @@ def _parse_reset(value):
         return None
 
 
+def _rotation_rank(usage, offset):
+    """(sort key, None) of a Standard account as the next Premium, lower first, or (None, reason) when it is skipped."""
+    values = _usage_window_values(usage)
+    over = ["%s %d%% ≥ %d%%" % (label, round(values.get(key, 0)), limit * PREMIUM_FACTOR)
+            for key, label, limit in (("five_hour", "5-hour", DAILY_THRESHOLD), ("seven_day", "7-day", WEEKLY_THRESHOLD))
+            if values.get(key, 0) / PREMIUM_FACTOR >= limit]
+    if over:
+        return None, ", ".join(over)
+    reset = _parse_reset((usage.get("seven_day") or {}).get("resets_at")) or float("inf")
+    return (values.get("seven_day", 100), values["five_hour"], reset, offset), None
+
+
 def _next_eligible_rotation_account(idx, premium, live=None):
     """Pick the least-used Standard account of the rotation after checking the live status and usage of each.
 
@@ -1208,14 +1221,11 @@ def _next_eligible_rotation_account(idx, premium, live=None):
         if status not in ("ok", "cache") or "five_hour" not in values:
             skipped.append("%s (usage unavailable)" % name)
             continue
-        over = ["%s %d%% ≥ %d%%" % (label, round(values.get(key, 0)), limit * PREMIUM_FACTOR)
-                for key, label, limit in (("five_hour", "5-hour", DAILY_THRESHOLD), ("seven_day", "7-day", WEEKLY_THRESHOLD))
-                if values.get(key, 0) / PREMIUM_FACTOR >= limit]
+        key, over = _rotation_rank(usage, offset)
         if over:
-            skipped.append("%s (already at threshold: %s)" % (name, ", ".join(over)))
+            skipped.append("%s (already at threshold: %s)" % (name, over))
             continue
-        reset = _parse_reset((usage.get("seven_day") or {}).get("resets_at")) or float("inf")
-        candidates.append((values.get("seven_day", 100), values["five_hour"], reset, offset, name))
+        candidates.append(key + (name,))
     if not candidates:
         return None, skipped
     return min(candidates)[-1], skipped
@@ -1433,11 +1443,18 @@ ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the d
 
 
 def _account_rows(idx, live, premium=None):
-    """The usage of every pool account, as /acct:list shows it, for the dashboard."""
+    """The usage of every pool account for the dashboard, in display order: the Premium account, the
+    rotation accounts in the order the next Premium is chosen (rank 1 = next), then the backups."""
+    order = list(ROTATION_EMAILS)
+    premium = (premium or "").lower()
+    start = order.index(premium) if premium in order else -1
     rows = []
-    for email in POOL_EMAILS:
+    for email in POOL_EMAILS + SPARE_BACKUP_EMAILS:
         name = _saved_name(idx, email)
-        row = {"email": email, "role": "backup" if email == BACKUP_EMAIL else "rotation"}
+        role = "rotation" if email in ROTATION_EMAILS else "backup"
+        row = {"email": email, "role": "premium" if email == premium else role}
+        if role == "backup":
+            row["in_use"] = email == BACKUP_EMAIL
         if not name:
             rows.append(dict(row, status="not logged in on machine 2"))
             continue
@@ -1458,7 +1475,19 @@ def _account_rows(idx, live, premium=None):
                    seven_day_reset=(usage.get("seven_day") or {}).get("resets_at"),
                    read_at=(meta.get("usage") or {}).get("fetchedAt"),
                    status="log in again" if state == "relogin" else (None if status in ("ok", "cache", "expired") else status))
+        if row["role"] == "rotation" and not row["status"] and "five_hour" in _usage_window_values(usage):
+            offset = (order.index(email) - start) % len(order)
+            row["_key"], over = _rotation_rank(usage, offset)
+            if over:
+                row["status"] = "already at threshold: " + over
         rows.append(row)
+    ranked = sorted((r for r in rows if r.get("_key")), key=lambda r: r["_key"])
+    for rank, r in enumerate(ranked, 1):
+        r["rank"] = rank
+    group = {"premium": 0, "rotation": 1, "backup": 2}
+    rows.sort(key=lambda r: (group[r["role"]], r.get("rank") or 99, not r.get("in_use")))
+    for r in rows:
+        r.pop("_key", None)
     return rows
 
 

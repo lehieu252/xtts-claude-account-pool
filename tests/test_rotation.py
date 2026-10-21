@@ -112,6 +112,21 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("%s (login expired/revoked)" % SALES, skipped)
         self.assertIn("%s (usage unavailable)" % CONTACT, skipped)
 
+    def test_dashboard_rows_list_premium_then_the_ranked_pool_then_the_backups(self):
+        idx = pool_index(**{SALES: (0, 30), CONTACT: (40, 10), CAREERS: (5, 10), HIEUNX: (0, 60),
+                            TRUONGNV: (0, 70), THANGLT: (0, 70), KIENLT: (0, 70)}, premium=XTTS)
+        del idx["accounts"][HIEUNX]  # not logged in: listed after the ranked accounts
+        with Patches(*stored()):
+            rows = acct._account_rows(idx, None, XTTS)
+        self.assertEqual([r["email"] for r in rows],
+                         [XTTS, CAREERS, CONTACT, SALES, TRUONGNV, THANGLT, KIENLT, HIEUNX, INFO, "info@xtgroup.vn"])
+        self.assertEqual([r.get("rank") for r in rows[1:8]], [1, 2, 3, 4, 5, 6, None])
+        self.assertEqual([r["role"] for r in (rows[0], rows[1], rows[8])], ["premium", "rotation", "backup"])
+        self.assertEqual((rows[8]["in_use"], rows[9]["in_use"]), (True, False))
+        self.assertEqual(rows[9]["status"], "not logged in on machine 2")
+        # the first ranked account is the one a seat move would pick
+        self.assertEqual(self.pick(idx, XTTS)[0], rows[1]["email"])
+
     def test_never_refreshes_the_token_of_the_live_login(self):
         idx = pool_index(premium=XTTS)
         with patch.object(acct, "read_stored_creds", return_value=CREDS), \
@@ -485,7 +500,7 @@ class MoverTests(unittest.TestCase):
         with patch.object(acct, "_mover_state", return_value={}):
             self.run_once(idx, pool)
         rows = {r["email"]: r for r in pool.accounts}
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 10)  # the pool and the unused second backup
         self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
         self.assertEqual(rows[INFO]["role"], "backup")
         self.assertEqual(rows[KIENLT]["status"], "not logged in on machine 2")

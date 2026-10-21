@@ -32,7 +32,7 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
-ACCOUNT_FIELDS = ("email", "role", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
+ACCOUNT_FIELDS = ("email", "role", "rank", "in_use", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
                   "status", "read_at")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 

@@ -52,6 +52,13 @@ tr:last-child td { border-bottom: 0; }
 .reset { color: var(--muted); font-size: 12px; }
 tr.is-premium td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .chip.premium { color: var(--ok); font-weight: 600; } .chip.backup { color: var(--warn); font-weight: 600; }
+.chip.next { color: var(--accent); font-weight: 600; }
+tr.group td { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; padding-top: 12px; border-bottom: 1px solid currentColor; }
+tr.group.premium td { color: var(--ok); } tr.group.rotation td { color: var(--accent); } tr.group.backup td { color: var(--warn); }
+tr.g-premium td:first-child { box-shadow: inset 3px 0 var(--ok); }
+tr.g-rotation td:first-child { box-shadow: inset 3px 0 var(--accent); }
+tr.g-backup td:first-child { box-shadow: inset 3px 0 var(--warn); }
+tr.g-backup.idle td { opacity: .6; }
 .chip { display: inline-block; background: var(--chip); border-radius: 4px; padding: 0 6px; font-size: 12px; }
 .chip.mover { color: var(--accent); font-weight: 600; }
 .mismatch { color: var(--warn); font-weight: 600; }
@@ -152,16 +159,24 @@ function render(d) {
   }).join("") : `<tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
 
   const accounts = d.accounts || [];
-  $("accounts").innerHTML = accounts.length ? accounts.map((a) => {
-    const premium = a.seat === "Premium";
-    const tag = a.role === "backup" ? `<span class="chip backup">account tạm</span>`
-      : premium ? `<span class="chip premium">Premium</span>` : "";
-    return `<tr class="${premium ? "is-premium" : ""}">
+  // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
+  const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
+  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo"], ["backup", "Account tạm"]];
+  $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
+    const rows = accounts.filter((a) => groupOf(a) === g);
+    if (!rows.length) return "";
+    return `<tr class="group ${g}"><td colspan="5">${title}</td></tr>` + rows.map((a) => {
+      const tag = g === "premium" ? `<span class="chip premium">Premium</span>`
+        : g === "backup" ? `<span class="chip backup">${a.in_use === false ? "chưa dùng" : "đang dùng"}</span>`
+        : a.rank === 1 ? `<span class="chip next">#1 · tiếp theo</span>`
+        : a.rank ? `<span class="chip">#${a.rank}</span>` : "";
+      return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${a.in_use === false ? "idle" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
       <td>${usageCell(a.five_hour, a.five_hour_reset)}</td>
       <td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
       <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || "ok")}</td></tr>`;
+    }).join("");
   }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
 
