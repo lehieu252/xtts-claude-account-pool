@@ -25,7 +25,7 @@ h2 { margin: 0 0 10px; font-size: 15px; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 13px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
-.hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
 .stat { display: flex; flex-direction: column; gap: 4px; }
 .stat .k { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .stat .v { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
@@ -80,6 +80,7 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
     <div class="stat"><span class="k">Pha</span><span class="v" id="phase">—</span></div>
     <div class="stat"><span class="k">Account Premium</span><span class="v mono" id="premium">—</span></div>
     <div class="stat"><span class="k">Account đích (P mới)</span><span class="v mono" id="target">—</span></div>
+    <div class="stat"><span class="k">Account tạm</span><span class="v mono" id="backup">—</span></div>
     <div class="stat"><span class="k">Máy 2 (chuyển seat)</span><span class="v" id="mover">—</span></div>
   </div>
 
@@ -96,7 +97,7 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
   <div class="panel">
       <h2>Các máy</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Máy</th><th>Host</th><th>Vai trò</th><th>Account đang dùng</th><th>Ở info</th><th>Version</th><th>Lần cuối</th></tr></thead>
+        <thead><tr><th>Máy</th><th>Host</th><th>Vai trò</th><th>Account đang dùng</th><th>Ở account tạm</th><th>Version</th><th>Lần cuối</th></tr></thead>
         <tbody id="machines"><tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr></tbody>
       </table></div>
   </div>
@@ -129,6 +130,9 @@ function render(d) {
   $("phase").innerHTML = `<span class="pill ${esc(st.phase)}">${esc(st.phase)}</span>`;
   $("premium").textContent = st.premium || "—";
   $("target").textContent = st.phase === "STABLE" ? "—" : (st.target || "—");
+  // Older servers and movers send no backup account: the first one is used until machine 2 picks another.
+  const backup = st.backup || "info@xtgroup.vn";
+  $("backup").textContent = backup;
 
   const movers = d.machines.filter((m) => m.role === "mover");
   const mover = movers.sort((a, b) => b.last_seen - a.last_seen)[0];
@@ -155,7 +159,7 @@ function render(d) {
       <td class="mono">${esc(m.host)}</td>
       <td><span class="chip ${m.role === "mover" ? "mover" : ""}">${m.role === "mover" ? "Máy 2 · chuyển seat" : "Làm việc"}</span></td>
       <td class="mono ${mismatch ? "mismatch" : ""}">${esc(m.account || "—")}</td>
-      <td>${m.role === "mover" ? "—" : (m.at_info ? "Có" : "Không")}</td>
+      <td>${m.role === "mover" ? "—" : (m.account === backup ? "Có" : "Không")}</td>
       <td class="mono">${esc(m.version)}</td>
       <td>${ago(now - m.last_seen)}</td></tr>`;
   }).join("") : `<tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
@@ -169,10 +173,10 @@ function render(d) {
     if (!rows.length) return "";
     return `<tr class="group ${g}"><td colspan="5">${title}</td></tr>` + rows.map((a) => {
       const tag = g === "premium" ? `<span class="chip premium">Premium</span>`
-        : g === "backup" ? `<span class="chip backup">${a.in_use === false ? "chưa dùng" : "đang dùng"}</span>`
+        : g === "backup" ? `<span class="chip backup">${a.email === backup ? "đang dùng" : "chờ"}</span>`
         : a.rank === 1 ? `<span class="chip next">#1 · tiếp theo</span>`
         : a.rank ? `<span class="chip">#${a.rank}</span>` : "";
-      return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${a.in_use === false ? "idle" : ""}">
+      return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${g === "backup" && a.email !== backup ? "idle" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
       <td>${usageCell(a.five_hour, a.five_hour_reset)}</td>

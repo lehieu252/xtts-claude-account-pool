@@ -154,8 +154,8 @@ The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `hieule252uet@gmail.com` (was `info@xtgroup.vn` until 1.0.4) | Backup, never Premium: where every working machine waits while the seat moves. Every working machine must be logged in to it |
-| 1–8 | `xtts@`, `sales@`, `contact@`, `careers@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; the order only breaks the last tie |
+| — | `info@xtgroup.vn`, `careers@xtgroup.vn` | Backup accounts, never Premium: where every working machine waits while the seat moves. Machine 2 keeps using one until its 5-hour reaches 85% or a window is used up, then the other, so the one at rest can reset. Every working machine must be logged in to both |
+| 1–7 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; the order only breaks the last tie |
 
 ```
 Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)

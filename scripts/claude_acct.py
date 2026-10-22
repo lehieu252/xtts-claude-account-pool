@@ -846,7 +846,7 @@ def _print_rotation_preview(idx, live):
         except AcctError as e:
             print("\nPool server: %s" % e)
     print("\nAccount switching %s · backup %s · seat moves at %s." % (
-        "ON" if load_rotation().get("enabled") else "OFF", BACKUP_EMAIL, _trigger_text()))
+        "ON" if load_rotation().get("enabled") else "OFF", (state or {}).get("backup") or BACKUP_EMAILS[0], _trigger_text()))
     if state:
         print("Pool phase: %s, Premium: %s%s" % (state.get("phase"), state.get("premium") or "not published yet",
                                                 ", target: %s" % state.get("target") if state.get("phase") != "STABLE" else ""))
@@ -926,13 +926,17 @@ def save_rotation(cfg):
 # ---------------------------------------------------------------- the XTGroup pool (fixed)
 
 # The plugin serves one organization, so its accounts are fixed here: no `configure`, no order.
-BACKUP_EMAIL = "hieule252uet@gmail.com"  # never Premium: where every machine waits while the seat moves (info@xtgroup.vn until 1.0.4)
+# The backup accounts are never Premium: every machine waits on one of them while the seat moves. Machine 2
+# keeps using one until it reaches BACKUP_5H_LIMIT (or any window is used up), then moves on to the other,
+# so the 5-hour window of the one at rest can reset. The first one is used until machine 2 says otherwise.
+BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn")
+BACKUP_5H_LIMIT = 85
+FORMER_BACKUP_EMAILS = ("hieule252uet@gmail.com",)  # 1.0.4-1.0.7: a machine still on it goes back to the pool
 ROTATION_EMAILS = (  # the accounts that take turns holding Premium; the order breaks the last tie
-    "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn", "careers@xtgroup.vn",
+    "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn",
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
 )
-POOL_EMAILS = (BACKUP_EMAIL,) + ROTATION_EMAILS
-SPARE_BACKUP_EMAILS = ("info@xtgroup.vn",)  # a second backup, not used yet: only shown on the dashboard
+POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 80
@@ -1031,7 +1035,7 @@ def pool_state(account, force=False):
     cache = read_json(cache_path, {}) or {}
     if not force and cache.get("account") == account and time.time() - cache.get("fetched", 0) < STATE_TTL:
         return cache["state"]
-    state = pool_call("POST", "/api/machine", _machine_report(account, account == BACKUP_EMAIL))
+    state = pool_call("POST", "/api/machine", _machine_report(account, account in BACKUP_EMAILS))
     write_json_atomic(cache_path, {"fetched": time.time(), "account": account, "state": state})
     return state
 
@@ -1289,7 +1293,7 @@ def _wanted_account(idx, cur, args):
         holder = _seat_holder(idx, cur, first=cur)
         return (_email_of(idx, holder), "claude.ai seat") if holder else (None, "unknown")
     if state.get("phase") in ("PREPARING", "MOVING"):
-        return BACKUP_EMAIL, "seat moving %s → %s" % (state.get("premium"), state.get("target"))
+        return _backup_of(state), "seat moving %s → %s" % (state.get("premium"), state.get("target"))
     if state.get("premium"):
         return state["premium"].lower(), "Premium"
     holder = _seat_holder(idx, cur, first=cur)  # machine 2 has not published the Premium account yet
@@ -1303,7 +1307,7 @@ def _worker_check(args):
         cur = sync_current(idx)
     except AcctError:
         cur = current_name(idx)
-    if _email_of(idx, cur) not in POOL_EMAILS:
+    if _email_of(idx, cur) not in POOL_EMAILS + FORMER_BACKUP_EMAILS:
         return  # a login outside the pool (a personal plan, an unsaved account) is left alone
     want, why = _wanted_account(idx, cur, args)
     save_index(idx)
@@ -1333,33 +1337,78 @@ def _save_mover_state(ms):
     write_json_atomic(os.path.join(store_dir(), "mover-state.json"), ms)
 
 
-def _put_state(phase, premium, target=None, message=None):
-    return pool_call("PUT", "/api/state", {"phase": phase, "premium": premium, "target": target,
-                                            "message": message, "by": machine_name()}, mover=True)
+def _put_state(phase, premium, target=None, message=None, backup=None):
+    body = {"phase": phase, "premium": premium, "target": target, "message": message, "by": machine_name()}
+    if backup:  # left out, the server keeps the backup account it has
+        body["backup"] = backup
+    return pool_call("PUT", "/api/state", body, mover=True)
 
 
-def _wait_for_backup(prepared_at, poll=5):
+def _backup_of(state):
+    backup = (state.get("backup") or "").lower()
+    return backup if backup in BACKUP_EMAILS else BACKUP_EMAILS[0]
+
+
+def _backup_spent(idx, email, live, force=False):
+    """Why a backup account should rest (5-hour >= BACKUP_5H_LIMIT or a window used up), else None."""
+    name = _saved_name(idx, email)
+    if not name:
+        return "not logged in on machine 2"
+    meta = idx["accounts"][name]
+    try:
+        status = refresh_usage(meta, read_stored_creds(name), force=force, refresh_name=None if name == live else name)
+    except AcctError as e:
+        return str(e)
+    if status not in ("ok", "cache"):
+        return "usage unavailable (%s)" % status
+    values = _usage_window_values((meta.get("usage") or {}).get("data") or {})
+    if "five_hour" not in values:
+        return "usage unavailable"
+    if values["five_hour"] >= BACKUP_5H_LIMIT:
+        return "5-hour %d%% >= %d%%" % (round(values["five_hour"]), BACKUP_5H_LIMIT)
+    if any(v >= 100 for v in values.values()):
+        return "7-day 100%"
+    return None
+
+
+def _choose_backup(idx, state, live, force=False):
+    """Keep the backup account in use until it is spent, then the other one if it is not."""
+    current = _backup_of(state)
+    why = _backup_spent(idx, current, live, force=force)
+    if not why:
+        return current
+    for other in BACKUP_EMAILS:
+        if other != current and not _backup_spent(idx, other, live, force=force):
+            log_event("backup_change", "%s rests (%s): the backup account is now %s" % (current, why, other))
+            return other
+    log_event("backup_spent", "every backup account is spent; keeping %s (%s)" % (current, why), every=QUIET_EVERY)
+    return current
+
+
+def _wait_for_backup(prepared_at, backup, poll=5):
     """Wait until every working machine seen in the last 5 minutes reports the backup account."""
     deadline = time.time() + PREPARE_TIMEOUT
     waiting = []
     while True:
         machines = pool_call("GET", "/api/machines", mover=True)
+        # The account itself, not at_info: a machine on an older version may wait on a former backup account.
         waiting = [m.get("name") or m.get("host") for m in machines
                    if m.get("role") == "worker" and m.get("active")
-                   and not (m.get("at_info") and m.get("last_seen", 0) >= prepared_at)]
+                   and not ((m.get("account") or "").lower() == backup and m.get("last_seen", 0) >= prepared_at)]
         if not waiting or time.time() >= deadline:
             return waiting
         time.sleep(poll)
 
 
-def _move_seat(idx, premium, target, live, fields):
+def _move_seat(idx, premium, target, live, fields, state=None):
     """PREPARING → wait for the backup account → MOVING → seat move → STABLE. Returns True on success."""
     p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
-    log_event("move_start", "threshold reached", target=t_email, **fields)
-    prepared = _put_state("PREPARING", p_email, t_email, "threshold reached")
-    waiting = _wait_for_backup(prepared["updated_at"])
+    backup = _choose_backup(idx, state or {}, live, force=True)
+    log_event("move_start", "threshold reached; backup %s" % backup, target=t_email, **fields)
+    prepared = _put_state("PREPARING", p_email, t_email, "threshold reached", backup=backup)
+    waiting = _wait_for_backup(prepared["updated_at"], backup)
     if waiting:
-        log_event("prepare_timeout", "still not on %s after %ds: %s" % (BACKUP_EMAIL, PREPARE_TIMEOUT, ", ".join(waiting)),
+        log_event("prepare_timeout", "still not on %s after %ds: %s" % (backup, PREPARE_TIMEOUT, ", ".join(waiting)),
                   target=t_email, **fields)
     _put_state("MOVING", p_email, t_email)
     status, tier = _seat_tier(idx, premium, live, force=True)
@@ -1408,6 +1457,9 @@ def _mover_once(args):
         # first run, a seat moved by hand, or a move cut short: publish where the seat really is
         _put_state("STABLE", h_email, message="synced with claude.ai")
         log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
+    backup = _choose_backup(idx, state, live)
+    if backup != _backup_of(state) or not state.get("backup"):
+        state = _put_state("STABLE", h_email, message="backup account: %s" % backup, backup=backup)
     test = st.get("test_move") or {}
     if test.get("target") and time.time() < test.get("until", 0):
         # One seat move asked by `auto test-move`, whatever the usage: the full flow, on demand.
@@ -1416,7 +1468,7 @@ def _mover_once(args):
         target = _saved_name(idx, test["target"])
         if target and target != holder:
             log_event("test_move", "test move asked by hand", premium=h_email, target=test["target"])
-            _move_seat(idx, holder, target, live, {"premium": h_email})
+            _move_seat(idx, holder, target, live, {"premium": h_email}, state)
         return
     meta = idx["accounts"][holder]
     status = refresh_usage(meta, read_stored_creds(holder), force=args.force,
@@ -1436,7 +1488,7 @@ def _mover_once(args):
         return
     if args.manual:
         print("Threshold reached on %s: moving the Premium seat to %s..." % (holder, target))
-    _move_seat(idx, holder, target, live, fields)
+    _move_seat(idx, holder, target, live, fields, state)
 
 
 ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the dashboard
@@ -1444,17 +1496,15 @@ ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the d
 
 def _account_rows(idx, live, premium=None):
     """The usage of every pool account for the dashboard, in display order: the Premium account, the
-    rotation accounts in the order the next Premium is chosen (rank 1 = next), then the backups."""
+    rotation accounts in the order the next Premium is chosen (rank 1 = next), then the backup accounts."""
     order = list(ROTATION_EMAILS)
     premium = (premium or "").lower()
     start = order.index(premium) if premium in order else -1
     rows = []
-    for email in POOL_EMAILS + SPARE_BACKUP_EMAILS:
+    for email in POOL_EMAILS:
         name = _saved_name(idx, email)
         role = "rotation" if email in ROTATION_EMAILS else "backup"
         row = {"email": email, "role": "premium" if email == premium else role}
-        if role == "backup":
-            row["in_use"] = email == BACKUP_EMAIL
         if not name:
             rows.append(dict(row, status="not logged in on machine 2"))
             continue
@@ -1485,7 +1535,7 @@ def _account_rows(idx, live, premium=None):
     for rank, r in enumerate(ranked, 1):
         r["rank"] = rank
     group = {"premium": 0, "rotation": 1, "backup": 2}
-    rows.sort(key=lambda r: (group[r["role"]], r.get("rank") or 99, not r.get("in_use")))
+    rows.sort(key=lambda r: (group[r["role"]], r.get("rank") or 99))
     for r in rows:
         r.pop("_key", None)
     return rows
@@ -1706,7 +1756,7 @@ def cmd_auto_join(args):
     cfg["enabled"] = True
     save_rotation(cfg)
     print("Joined the pool at %s. Rotation is ON: before each request this session switches to %s while the "
-          "seat moves, then to the Premium account (now %s)." % (_pool_url(st), BACKUP_EMAIL, state.get("premium") or "not published yet"))
+          "seat moves, then to the Premium account (now %s)." % (_pool_url(st), " or ".join(BACKUP_EMAILS), state.get("premium") or "not published yet"))
 
 
 def cmd_auto_mover(args):
@@ -1762,7 +1812,7 @@ def cmd_auto_status(args):
     print("acct plugin %s" % plugin_version())
     print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
     print("Rotates at: %s" % _trigger_text())
-    print("Backup account (while the seat moves): %s" % BACKUP_EMAIL)
+    print("Backup accounts (while the seat moves, one at a time until 5-hour >= %d%%): %s" % (BACKUP_5H_LIMIT, ", ".join(BACKUP_EMAILS)))
     print("Rotation: %s" % " → ".join(ROTATION_EMAILS))
     print("Pool server: %s (%s)" % (_pool_url(st), "joined" if st.get("api_key") else "not joined: /acct:auto join <key>"))
     if st.get("api_key") or st.get("mover_key"):

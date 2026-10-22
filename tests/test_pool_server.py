@@ -69,6 +69,13 @@ class PoolServerTests(unittest.TestCase):
         self.assertEqual((code, st["phase"], st["target"]), (200, "PREPARING", "b@x.vn"))
         self.assertEqual(self.call("GET", "/api/state", key=API)[1]["phase"], "PREPARING")
 
+    def test_the_backup_account_is_kept_until_machine_2_changes_it(self):
+        self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "a@x.vn", "backup": "info@x.vn"}, mover=MOVER)
+        st = self.call("PUT", "/api/state", {"phase": "PREPARING", "premium": "a@x.vn", "target": "b@x.vn"}, mover=MOVER)[1]
+        self.assertEqual(st["backup"], "info@x.vn")
+        st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "b@x.vn", "backup": "careers@x.vn"}, mover=MOVER)[1]
+        self.assertEqual(self.call("GET", "/api/state", key=API)[1]["backup"], "careers@x.vn")
+
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "STABLE"}, mover=MOVER)[0], 400)

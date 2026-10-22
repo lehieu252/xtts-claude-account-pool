@@ -5,7 +5,8 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
 
   GET  /healthz                      no auth
   GET  /api/state                    X-Pool-Key (any machine) or X-Pool-Mover-Key
-  PUT  /api/state                    X-Pool-Mover-Key (machine 2 only): {phase, premium, target, message}
+  PUT  /api/state                    X-Pool-Mover-Key (machine 2 only): {phase, premium, target, message, backup};
+                                     without "backup" the backup account stays as it was
   POST /api/machine                  X-Pool-Key: {machine_id, name, host, version, role, account, at_info};
                                      answers with the state, so a follower needs one request per check
   GET  /api/machines                 X-Pool-Key
@@ -32,7 +33,7 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
-ACCOUNT_FIELDS = ("email", "role", "rank", "in_use", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
+ACCOUNT_FIELDS = ("email", "role", "rank", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
                   "status", "read_at")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
@@ -72,18 +73,21 @@ class Store:
                 CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, position INTEGER, data TEXT NOT NULL,
                     updated REAL NOT NULL);
             """)
+            # 1.0.8: the backup account the machines wait on while the seat moves (machine 2 picks it)
+            if "backup" not in [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]:
+                self.db.execute("ALTER TABLE state ADD COLUMN backup TEXT")
             if not self.db.execute("SELECT 1 FROM state").fetchone():
-                self.db.execute("INSERT INTO state VALUES (1, 'STABLE', NULL, NULL, 'not set yet', ?, NULL)", (time.time(),))
+                self.db.execute("INSERT INTO state (id, phase, premium, target, message, updated_at, by) VALUES (1, 'STABLE', NULL, NULL, 'not set yet', ?, NULL)", (time.time(),))
 
     def state(self):
         with self.lock:
-            return dict(self.db.execute("SELECT phase, premium, target, message, updated_at, by FROM state").fetchone())
+            return dict(self.db.execute("SELECT phase, premium, target, backup, message, updated_at, by FROM state").fetchone())
 
-    def set_state(self, phase, premium, target, message, by):
+    def set_state(self, phase, premium, target, message, by, backup=None):
         now = time.time()
         with self.lock, self.db:
-            self.db.execute("UPDATE state SET phase=?, premium=?, target=?, message=?, updated_at=?, by=? WHERE id=1",
-                            (phase, premium, target, message, now, by))
+            self.db.execute("UPDATE state SET phase=?, premium=?, target=?, message=?, updated_at=?, by=?, "
+                            "backup=COALESCE(?, backup) WHERE id=1", (phase, premium, target, message, now, by, backup))
             self.db.execute("INSERT INTO transitions (at, phase, premium, target, message, by) VALUES (?,?,?,?,?,?)",
                             (now, phase, premium, target, message, by))
 
@@ -265,7 +269,7 @@ def make_handler(cfg, store):
                     raise ValueError("%s needs premium and target" % phase)
             except (ValueError, json.JSONDecodeError) as e:
                 return self._send(400, {"error": str(e)})
-            store.set_state(phase, premium, target, _text(b.get("message"), 500), _text(b.get("by")))
+            store.set_state(phase, premium, target, _text(b.get("message"), 500), _text(b.get("by")), _text(b.get("backup")))
             self._send(200, self._state_payload())
 
         def do_POST(self):
