@@ -76,6 +76,15 @@ class PoolServerTests(unittest.TestCase):
         st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "b@x.vn", "backup": "careers@x.vn"}, mover=MOVER)[1]
         self.assertEqual(self.call("GET", "/api/state", key=API)[1]["backup"], "careers@x.vn")
 
+    def test_last_used_is_when_each_account_last_became_premium(self):
+        for body in ({"phase": "STABLE", "premium": "a@x.vn"}, {"phase": "STABLE", "premium": "a@x.vn", "message": "same"},
+                     {"phase": "PREPARING", "premium": "a@x.vn", "target": "b@x.vn"},
+                     {"phase": "STABLE", "premium": "b@x.vn"}, {"phase": "STABLE", "premium": "a@x.vn"}):
+            self.call("PUT", "/api/state", body, mover=MOVER)
+        rows = self.store.db.execute("SELECT at, premium FROM transitions WHERE phase='STABLE' ORDER BY id").fetchall()
+        used = self.call("GET", "/api/state", key=API)[1]["last_used"]
+        self.assertEqual(used, {"b@x.vn": rows[2]["at"], "a@x.vn": rows[3]["at"]})
+
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "STABLE"}, mover=MOVER)[0], 400)

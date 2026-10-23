@@ -4,7 +4,8 @@
 Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool/. Stdlib only.
 
   GET  /healthz                      no auth
-  GET  /api/state                    X-Pool-Key (any machine) or X-Pool-Mover-Key
+  GET  /api/state                    X-Pool-Key (any machine) or X-Pool-Mover-Key; with last_used
+                                     {email: when it last became Premium}, which orders the next Premium
   PUT  /api/state                    X-Pool-Mover-Key (machine 2 only): {phase, premium, target, message, backup};
                                      without "backup" the backup account stays as it was
   POST /api/machine                  X-Pool-Key: {machine_id, name, host, version, role, account, at_info};
@@ -33,7 +34,7 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
-ACCOUNT_FIELDS = ("email", "role", "rank", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
+ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
                   "status", "read_at")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
@@ -139,6 +140,18 @@ class Store:
             rows = self.db.execute("SELECT data, updated FROM accounts ORDER BY position").fetchall()
         return [dict(json.loads(r["data"]), published=r["updated"]) for r in rows]
 
+    def last_used(self):
+        """{email: when it last became Premium}, from the phase history (moves by machine 2 and by hand alike)."""
+        with self.lock:
+            rows = self.db.execute("SELECT at, premium FROM transitions WHERE phase = 'STABLE' AND premium IS NOT NULL "
+                                   "ORDER BY id").fetchall()
+        out, prev = {}, None
+        for r in rows:
+            if r["premium"] != prev:
+                out[r["premium"]] = r["at"]
+                prev = r["premium"]
+        return out
+
     def transitions(self, limit=30):
         with self.lock:
             return [dict(r) for r in self.db.execute("SELECT * FROM transitions ORDER BY id DESC LIMIT ?", (limit,))]
@@ -217,6 +230,7 @@ def make_handler(cfg, store):
 
         def _state_payload(self):
             st = store.state()
+            st["last_used"] = store.last_used()
             st["server_time"] = time.time()
             return st
 

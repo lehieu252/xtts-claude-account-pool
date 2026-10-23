@@ -1,6 +1,6 @@
 # xtts-claude-account-pool (`acct`)
 
-A Claude Code plugin for the XTGroup claude.ai Team. Save the team's accounts, see the 5-hour / 7-day usage of all of them in one table, switch between them **without logging out and back in**, and share one Premium seat: one always-on machine (machine 2) moves the seat to the least-used account, and every working machine switches to the account that holds it. Works in the CLI and the VS Code extension, on macOS, Windows and Linux (the seat-moving service runs on macOS).
+A Claude Code plugin for the XTGroup claude.ai Team. Save the team's accounts, see the 5-hour / 7-day usage of all of them in one table, switch between them **without logging out and back in**, and share one Premium seat: one always-on machine (machine 2) moves the seat to the account that was Premium least recently, and every working machine switches to the account that holds it. Works in the CLI and the VS Code extension, on macOS, Windows and Linux (the seat-moving service runs on macOS).
 
 | Command | What it does |
 |---|---|
@@ -147,20 +147,21 @@ From then on, just run `/acct:switch work` or `/acct:switch alice`, wait for the
 
 Two words with two meanings, never mixed:
 
-- **Move the seat**: change the seat tier of two accounts on the organization's Members page, P (Premium now) down to Standard and the target up to Premium. It affects the whole organization and needs an admin browser. **Only the service on machine 2 does it.**
+- **Move the seat**: change the seat tier of two accounts on the organization's Members page, P (Premium now) to No seat assigned and the target to Premium (the organization has one Premium and one Standard seat). It affects the whole organization and needs an admin browser. **Only the service on machine 2 does it.**
 - **Switch account**: change the account Claude Code on one machine is logged in with. It affects only that machine. **The hooks of each working machine do it for that machine.**
 
 The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `info@xtgroup.vn`, `careers@xtgroup.vn` | Backup accounts, never Premium: where every working machine waits while the seat moves. Machine 2 keeps using one until its 5-hour reaches 85% or a window is used up, then the other, so the one at rest can reset. Every working machine must be logged in to both |
-| 1–7 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; the order only breaks the last tie |
+| — | `info@xtgroup.vn`, `careers@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once its 5-hour reaches 85% or a window is used up (and nothing is moving), machine 2 gives the Standard seat to the other one, so the one at rest can reset. Every working machine must be logged in to both |
+| 1–7 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
 
 ```
 Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
-Target (the next Premium):      min(7d) → min(5h) → earliest 7-day reset → fixed order
-                                (never info; skips accounts not logged in, expired, or with unreadable usage)
+Target (the next Premium):      Premium least recently (never first) → fixed order
+                                (usage is not read: accounts without a seat have none; skips accounts
+                                 not logged in on machine 2 or with an expired login)
 No target:                      P keeps the seat, the reason is logged
 ```
 
@@ -171,8 +172,8 @@ No target:                      P keeps the seat, the reason is logged
 1. Machine 2 (every 30 s, launchd): reads the usage of P. Below the thresholds, nothing happens.
 2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
 3. Every working machine, before its next request: sees `PREPARING`, **switches account to the backup account** and reports it.
-4. Machine 2 waits until every machine seen in the last 5 minutes reports `info` (at most 120 s; idle machines are not waited for).
-5. Machine 2 writes `MOVING`, reads the seat of P again, and **moves the seat** in Chrome: P down to Standard, the target up to Premium, both checked on the page. A failure rolls both back.
+4. Machine 2 waits until every machine seen in the last 5 minutes reports the backup account (at most 120 s; idle machines are not waited for).
+5. Machine 2 writes `MOVING`, reads the seat of P again, and **moves the seat** in Chrome: P to No seat assigned, then the target to Premium, both checked on the page. A failure rolls both back.
 6. Machine 2 writes `STABLE, premium = target`.
 7. Every working machine, before its next request: **switches account to the new Premium**. An idle machine does it before its first request when it wakes up, so no request is ever sent with the old account.
 

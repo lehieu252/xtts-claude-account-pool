@@ -1,14 +1,20 @@
 import { chromium } from "playwright-core";
 import { spawn } from "node:child_process";
 
-const [oldEmail, newEmail] = process.argv.slice(2);
+// Usage: seat_manager.mjs <email>=<tier> ... applied in order, where <tier> is Premium, Standard or "No seat".
+// The organization has one Premium and one Standard seat: free a seat before giving it to someone else.
+const TIERS = { "Premium": /^\s*Premium seat/i, "Standard": /^\s*Standard seat/i, "No seat": /^\s*No seat/i };
+const changes = process.argv.slice(2).filter((a) => a.includes("=")).map((a) => {
+  const at = a.lastIndexOf("=");
+  return { email: a.slice(0, at), tier: a.slice(at + 1) };
+});
 const membersUrl = process.env.CLAUDE_ACCT_MEMBERS_URL || "https://claude.ai/admin-settings/members";
 const cdpUrl = process.env.CLAUDE_ACCT_CDP_URL || "http://127.0.0.1:9222";
 const browserProfile = process.env.CLAUDE_ACCT_BROWSER_PROFILE;
 const setupMode = process.argv[2] === "--setup";
 
-if (!setupMode && (!oldEmail || !newEmail || oldEmail.toLowerCase() === newEmail.toLowerCase())) {
-  throw new Error("Expected two different account emails.");
+if (!setupMode && (!changes.length || changes.some((c) => !c.email || !TIERS[c.tier]))) {
+  throw new Error('Expected <email>=<tier> arguments, with tier Premium, Standard or "No seat".');
 }
 const members = new URL(membersUrl);
 if (members.protocol !== "https:" || members.hostname !== "claude.ai") {
@@ -80,8 +86,9 @@ const context = browser.contexts()[0];
   }
   // The sidebar includes a Members label before the member table finishes loading.
   // Wait for both target emails so subsequent row lookups don't race the table render.
-  await page.getByText(oldEmail, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
-  await page.getByText(newEmail, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
+  for (const { email } of changes) {
+    await page.getByText(email, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
+  }
 
   const triggerFor = (email) => page.locator(`[role="combobox"][aria-label="Tier for ${email}"]`);
   const rowFor = async (email) => {
@@ -104,7 +111,8 @@ const context = browser.contexts()[0];
   };
   const tierOf = async (email) => {
     const text = await (await tierControl(email)).evaluate((el) => el.textContent || "");
-    const tier = text.match(/\b(Premium|Standard)\b/i) || (/no seat/i.test(text) ? ["", "No seat"] : null);
+    // The trigger shows "Unassigned" for a member without a seat; the picker calls it "No seat assigned".
+    const tier = text.match(/\b(Premium|Standard)\b/i) || (/no seat|unassigned/i.test(text) ? ["", "No seat"] : null);
     if (!tier) throw new Error(`Could not read the seat tier of ${email} ("${text.trim()}").`);
     return tier[1];
   };
@@ -121,46 +129,48 @@ const context = browser.contexts()[0];
     let picked = false;
     for (let attempt = 0; attempt < 20 && !picked; attempt++) {
       await page.waitForTimeout(250);
-      picked = await control.evaluate((el, wanted) => {
+      picked = await control.evaluate((el, pattern) => {
         const popup = document.getElementById(el.getAttribute("aria-controls") || "") || document;
         const option = [...popup.querySelectorAll('[role="option"]')]
-          .find((o) => new RegExp("^\\s*" + wanted + " seat", "i").test(o.textContent || ""));
+          .find((o) => new RegExp(pattern, "i").test(o.textContent || ""));
         if (!option) return false;
         option.scrollIntoView({ block: "nearest" });
         option.click();
         return true;
-      }, tier);
+      }, TIERS[tier].source);
     }
     if (!picked) {
       await page.keyboard.press("Escape").catch(() => {});
-      throw new Error(`The seat picker did not offer "${tier} seat".`);
+      throw new Error(`The seat picker did not offer "${tier}".`);
     }
   };
   const setTier = async (email, tier) => {
-    if (new RegExp(`^${tier}$`, "i").test(await tierOf(email))) return;
+    if ((await tierOf(email)) === tier) return;
     await chooseTier(await tierControl(email), tier);
     let actual;
     for (let attempt = 0; attempt < 40; attempt++) {
       actual = await tierOf(email);
-      if (new RegExp(`^${tier}$`, "i").test(actual)) return;
+      if (actual === tier) return;
       await page.waitForTimeout(500);
     }
     throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
   };
 
-  const oldTier = await tierOf(oldEmail);
-  const newTier = await tierOf(newEmail);
-  if (!/^Premium$/i.test(oldTier)) throw new Error(`${oldEmail} is not currently Premium (${oldTier}).`);
-  if (!/^Standard$/i.test(newTier)) throw new Error(`${newEmail} must be Standard before rotation (${newTier}).`);
-
+  const before = [];
+  for (const { email } of changes) before.push({ email, tier: await tierOf(email) });
+  const done = [];
   try {
-    await setTier(oldEmail, "Standard");
-    await setTier(newEmail, "Premium");
+    for (const change of changes) {
+      done.push(change);
+      await setTier(change.email, change.tier);
+    }
   } catch (error) {
-    // Best-effort rollback prevents a failed promotion from leaving the pool without Premium.
-    try { await setTier(newEmail, "Standard"); } catch {}
-    try { await setTier(oldEmail, "Premium"); } catch {}
+    // Best-effort rollback, in reverse order, so a failed step never leaves the seats half moved.
+    for (const { email } of done.reverse()) {
+      const original = before.find((b) => b.email === email);
+      try { await setTier(email, original.tier); } catch {}
+    }
     throw error;
   }
-  console.log(`Premium seat transferred from ${oldEmail} to ${newEmail}.`);
+  console.log(`Seats set: ${changes.map((c) => `${c.email} → ${c.tier}`).join(", ")}.`);
 process.exit(0); // Disconnect from CDP without closing the user's Chrome instance.

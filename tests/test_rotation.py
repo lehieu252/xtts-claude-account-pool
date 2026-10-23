@@ -76,65 +76,58 @@ class Patches:
 
 
 class CandidateTests(unittest.TestCase):
-    def pick(self, idx, premium, live=None):
-        with Patches(*stored()):
-            return acct._next_eligible_rotation_account(idx, premium, live=live)
+    """The next Premium is the rotation account that was Premium least recently; usage is never read."""
 
-    def test_lowest_weekly_then_five_hour_wins(self):
-        idx = pool_index(**{SALES: (0, 30), CONTACT: (40, 10), HIEUNX: (5, 10), TRUONGNV: (0, 60)}, premium=XTTS)
-        for e in (THANGLT, KIENLT):
-            idx["accounts"][e] = account(0, 70, e)
-        self.assertEqual(self.pick(idx, XTTS)[0], HIEUNX)
+    def pick(self, idx, premium, last_used=None):
+        with Patches(*stored(), usage=patch.object(acct, "refresh_usage", return_value="cache")) as p:
+            got = acct._next_premium(idx, premium, last_used)
+            p["usage"].assert_not_called()  # accounts without a seat have no usage to read
+        return got
 
-    def test_backup_account_and_premium_are_never_candidates(self):
+    def test_never_premium_first_then_the_oldest_then_the_list_order(self):
         idx = pool_index(premium=XTTS)
-        idx["accounts"][INFO] = account(0, 0, INFO)
-        idx["accounts"][CAREERS] = account(0, 0, CAREERS)
-        name, _ = self.pick(idx, XTTS)
+        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600}
+        self.assertEqual(self.pick(idx, XTTS, used)[0], CONTACT)
+        used[CONTACT] = 700
+        self.assertEqual(self.pick(idx, XTTS, used)[0], HIEUNX)
+        self.assertEqual(self.pick(idx, XTTS, {})[0], SALES)  # all equal: the list order, top first
+        self.assertEqual(self.pick(idx, SALES, {SALES: 1, XTTS: 2})[0], CONTACT)  # never Premium beats any date
+
+    def test_usage_does_not_matter(self):
+        idx = pool_index(**{SALES: (100, 100)}, premium=XTTS)
+        self.assertEqual(self.pick(idx, XTTS, {})[0], SALES)
+
+    def test_backup_accounts_and_premium_are_never_candidates(self):
+        idx = pool_index(premium=XTTS)
+        name, _ = self.pick(idx, XTTS, {e: 1000 for e in acct.ROTATION_EMAILS})
         self.assertNotIn(name, (INFO, CAREERS, XTTS))
-        self.assertEqual(name, SALES)  # full tie: the fixed order after the Premium account
 
-    def test_tie_goes_to_the_earliest_weekly_reset(self):
+    def test_unsaved_and_expired_accounts_are_skipped(self):
         idx = pool_index(premium=XTTS)
-        for e in acct.ROTATION_EMAILS[1:]:
-            idx["accounts"][e] = account(0, 10, e, reset="2026-10-25T00:00:00+00:00")
-        idx["accounts"][THANGLT] = account(0, 10, THANGLT, reset="2026-10-21T00:00:00+00:00")
-        self.assertEqual(self.pick(idx, XTTS)[0], THANGLT)
-
-    def test_unsaved_expired_and_unreadable_accounts_are_skipped(self):
-        idx = pool_index(premium=XTTS)
-        del idx["accounts"][KIENLT]
+        del idx["accounts"][SALES]
         with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
-                     patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == SALES else "ok"),
-                     patch.object(acct, "refresh_usage", side_effect=lambda m, c, **k: "http 429" if m["profile"]["emailAddress"] == CONTACT else "cache")):
-            name, skipped = acct._next_eligible_rotation_account(idx, XTTS)
+                     patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == CONTACT else "ok")):
+            name, skipped = acct._next_premium(idx, XTTS, {})
         self.assertEqual(name, HIEUNX)
-        self.assertIn("%s (not logged in on this machine)" % KIENLT, skipped)
-        self.assertIn("%s (login expired/revoked)" % SALES, skipped)
-        self.assertIn("%s (usage unavailable)" % CONTACT, skipped)
+        self.assertIn("%s (not logged in on this machine)" % SALES, skipped)
+        self.assertIn("%s (login expired/revoked)" % CONTACT, skipped)
 
-    def test_dashboard_rows_list_premium_then_the_ranked_pool_then_the_backups(self):
-        idx = pool_index(**{SALES: (0, 30), CONTACT: (40, 10), HIEUNX: (5, 10), TRUONGNV: (0, 60),
-                            THANGLT: (0, 70), KIENLT: (0, 70)}, premium=XTTS)
-        del idx["accounts"][TRUONGNV]  # not logged in: listed after the ranked accounts
-        del idx["accounts"][CAREERS]
-        with Patches(*stored()):
-            rows = acct._account_rows(idx, None, XTTS)
+    def test_dashboard_rows_read_usage_only_for_the_two_accounts_with_a_seat(self):
+        idx = pool_index(**{XTTS: (40, 10), INFO: (5, 6)}, premium=XTTS)
+        del idx["accounts"][TRUONGNV]
+        state = {"premium": XTTS, "backup": INFO, "last_used": {XTTS: 900, SALES: 300, CONTACT: 100}}
+        with Patches(*stored(), usage=patch.object(acct, "refresh_usage", return_value="cache")) as p:
+            rows = acct._account_rows(idx, None, state)
+        self.assertEqual({c.args[0]["profile"]["emailAddress"] for c in p["usage"].call_args_list}, {XTTS, INFO})
         self.assertEqual([r["email"] for r in rows],
-                         [XTTS, HIEUNX, CONTACT, SALES, THANGLT, KIENLT, TRUONGNV, INFO, CAREERS])
-        self.assertEqual([r.get("rank") for r in rows[1:7]], [1, 2, 3, 4, 5, None])
-        self.assertEqual([r["role"] for r in (rows[0], rows[1], rows[7], rows[8])], ["premium", "rotation", "backup", "backup"])
-        self.assertEqual(rows[8]["status"], "not logged in on machine 2")
-        # the first ranked account is the one a seat move would pick
-        self.assertEqual(self.pick(idx, XTTS)[0], rows[1]["email"])
-
-    def test_never_refreshes_the_token_of_the_live_login(self):
-        idx = pool_index(premium=XTTS)
-        with patch.object(acct, "read_stored_creds", return_value=CREDS), \
-             patch.object(acct, "token_state", return_value="ok"), \
-             patch.object(acct, "refresh_usage", return_value="cache") as usage:
-            acct._next_eligible_rotation_account(idx, XTTS, live=SALES)
-        self.assertNotIn(SALES, {c.kwargs.get("refresh_name") for c in usage.call_args_list})
+                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, CONTACT, SALES, INFO, CAREERS])
+        self.assertEqual([r["rank"] for r in rows[1:7]], [1, 2, 3, 4, 5, 6])
+        self.assertEqual((rows[0]["five_hour"], rows[7]["five_hour"]), (40, 5))
+        self.assertEqual((rows[1]["seat"], rows[8]["seat"]), ("No seat", "No seat"))
+        self.assertNotIn("five_hour", rows[1])
+        self.assertEqual((rows[5]["last_used"], rows[1]["last_used"]), (100, None))
+        self.assertEqual(rows[2]["status"], "not logged in on machine 2")
+        self.assertEqual(self.pick(idx, XTTS, state["last_used"])[0], HIEUNX)  # rank 1 is the next Premium
 
 
 class ThresholdTests(unittest.TestCase):
@@ -311,7 +304,7 @@ class WorkerTests(unittest.TestCase):
                      patch.object(acct, "pool_state", side_effect=fake_state),
                      patch.object(acct, "cmd_switch", side_effect=lambda a: switched.append(a.name)),
                      patch.object(acct.sys, "stdout", io.StringIO()),
-                     move=patch.object(acct, "_set_premium_seat")) as _p:
+                     move=patch.object(acct, "_set_seats")) as _p:
             move = _p["move"]
             acct._worker_check(argparse.Namespace(force=False, manual=manual))
         move.assert_not_called()
@@ -377,7 +370,7 @@ class FakePool:
     """The pool server as machine 2 sees it."""
 
     def __init__(self, phase="STABLE", premium=None, workers=()):
-        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "updated_at": 100.0}
+        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "last_used": {}, "updated_at": 100.0}
         self.workers = list(workers)
         self.puts = []
 
@@ -389,6 +382,9 @@ class FakePool:
             self.state.update(phase=body["phase"], premium=body["premium"], target=body.get("target"), updated_at=200.0)
             if body.get("backup"):
                 self.state["backup"] = body["backup"]
+            if body["phase"] == "STABLE" and body["premium"] != self.state.get("last_premium"):
+                self.state["last_used"] = dict(self.state["last_used"], **{body["premium"]: 1000.0 + len(self.puts)})
+            self.state["last_premium"] = body["premium"] if body["phase"] == "STABLE" else self.state.get("last_premium")
             for w in self.workers:  # every working machine reaches the backup account after PREPARING
                 if body["phase"] == "PREPARING":
                     w.update(account=self.state["backup"], at_info=True, last_seen=201.0)
@@ -435,7 +431,8 @@ class MoverTests(unittest.TestCase):
                      patch.object(acct, "pool_call", side_effect=pool),
                      patch.object(acct.time, "sleep"),
                      patch.object(acct.sys, "stdout", io.StringIO()),
-                     move=patch.object(acct, "_set_premium_seat", side_effect=move_error),
+                     patch.object(acct, "_spawn_log_flush"),  # no background upload racing the next test's pool.json
+                     move=patch.object(acct, "_set_seats", side_effect=move_error),
                      switch=patch.object(acct, "cmd_switch")) as _p:
             move = _p["move"]
             switch = _p["switch"]
@@ -451,32 +448,38 @@ class MoverTests(unittest.TestCase):
 
     def test_full_move_goes_through_preparing_moving_stable(self):
         pool = FakePool("STABLE", SALES, workers=[{"name": "Hiếu", "role": "worker", "active": True, "at_info": False, "last_seen": 150.0}])
-        idx = pool_index(**{SALES: (85, 40), CONTACT: (0, 5)}, premium=SALES)
-        for e in (XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT):
-            idx["accounts"][e] = account(0, 60, e)
+        pool.state["last_used"] = {XTTS: 500, SALES: 900, HIEUNX: 600, TRUONGNV: 700, THANGLT: 800, KIENLT: 550}
+        idx = pool_index(**{SALES: (85, 40)}, premium=SALES)
         move = self.run_once(idx, pool)
         self.assertEqual(pool.puts, [("PREPARING", SALES, CONTACT), ("MOVING", SALES, CONTACT), ("STABLE", CONTACT, None)])
-        self.assertEqual(move.call_args.args[:2], (SALES, CONTACT))
+        # one Premium seat: freed first, then given to the account that was Premium least recently (never)
+        self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (CONTACT, "Premium")])
+        self.assertIn(CONTACT, pool.state["last_used"])
 
-    def test_the_backup_account_stays_until_it_is_spent_then_the_other_one_rests_it(self):
+    def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)
-        self.run_once(pool_index(**{SALES: (50, 40), INFO: (84, 50)}, premium=SALES), pool)
+        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (84, 50)}, premium=SALES), pool)
         self.assertEqual(pool.state["backup"], INFO)  # 84% < 85%: kept
+        move.assert_not_called()
         for usage in ((85, 50), (10, 100)):  # 5-hour at the limit, or the week used up
+            os.unlink(os.path.join(acct.store_dir(), "mover-state.json")) if os.path.exists(os.path.join(acct.store_dir(), "mover-state.json")) else None
             pool = FakePool("STABLE", SALES)
-            self.run_once(pool_index(**{SALES: (50, 40), INFO: usage}, premium=SALES), pool)
+            # careers' own usage is not read (it has no seat): even a spent reading does not stop the change
+            move = self.run_once(pool_index(**{SALES: (50, 40), INFO: usage, CAREERS: (100, 100)}, premium=SALES), pool)
+            self.assertEqual(move.call_args.args[0], [(INFO, "No seat"), (CAREERS, "Standard")])
             self.assertEqual(pool.state["backup"], CAREERS)
-        pool = FakePool("STABLE", SALES)
-        pool.state["backup"] = CAREERS  # careers is now in use: kept while it is fine, even if info has reset
-        self.run_once(pool_index(**{SALES: (50, 40), INFO: (0, 0), CAREERS: (60, 50)}, premium=SALES), pool)
-        self.assertEqual(pool.state["backup"], CAREERS)
+            self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
 
-    def test_when_every_backup_account_is_spent_the_current_one_is_kept(self):
-        pool = FakePool("STABLE", SALES)
-        self.run_once(pool_index(**{SALES: (50, 40), INFO: (90, 50), CAREERS: (0, 100)}, premium=SALES), pool)
+    def test_a_failed_backup_seat_change_keeps_the_backup_and_backs_off(self):
+        pool = FakePool("PREPARING", SALES)
+        pool.state["target"] = CONTACT
+        idx = pool_index(**{SALES: (50, 40), INFO: (90, 50)}, premium=SALES)
+        move = self.run_once(idx, pool, move_error=acct.AcctError("picker"))  # resets to STABLE first, then tries
+        self.assertEqual(move.call_count, 1)
         self.assertEqual(pool.state["backup"], INFO)
-        events = [json.loads(l)["event"] for l in open(os.path.join(acct.store_dir(), "rotation.log"), encoding="utf-8")]
-        self.assertIn("backup_spent", events)
+        self.assertGreater(acct._mover_state()["backup_backoff_until"], time.time())
+        move = self.run_once(idx, FakePool("STABLE", SALES))
+        move.assert_not_called()  # backing off
 
     def test_a_move_waits_on_the_backup_account_it_picked_not_on_at_info(self):
         pool = FakePool("STABLE", SALES)
@@ -558,7 +561,8 @@ class MoverTests(unittest.TestCase):
         rows = {r["email"]: r for r in pool.accounts}
         self.assertEqual(len(rows), 9)
         self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
-        self.assertEqual(rows[INFO]["role"], "backup")
+        self.assertEqual((rows[INFO]["role"], rows[INFO]["seat"]), ("backup", "Standard"))
+        self.assertEqual((rows[CAREERS]["seat"], rows[XTTS]["seat"]), ("No seat", "No seat"))
         self.assertEqual(rows[KIENLT]["status"], "not logged in on machine 2")
 
     def test_a_test_move_runs_the_full_flow_once_below_the_thresholds(self):
@@ -567,7 +571,7 @@ class MoverTests(unittest.TestCase):
         pool = FakePool("STABLE", HIEUNX)
         move = self.run_once(pool_index(**{HIEUNX: (31, 32)}, premium=HIEUNX), pool)
         self.assertEqual(pool.puts, [("PREPARING", HIEUNX, THANGLT), ("MOVING", HIEUNX, THANGLT), ("STABLE", THANGLT, None)])
-        self.assertEqual(move.call_args.args[:2], (HIEUNX, THANGLT))
+        self.assertEqual(move.call_args.args[0], [(HIEUNX, "No seat"), (THANGLT, "Premium")])
         self.assertNotIn("test_move", acct.pool_settings())  # once only
 
     def test_needs_the_mover_key(self):
@@ -725,32 +729,27 @@ class LoginAllTests(unittest.TestCase):
 
 
 class RotationPreviewTests(unittest.TestCase):
+    def preview(self, idx, state):
+        with Patches(*stored(), patch.object(acct, "load_rotation", return_value={"enabled": True}),
+                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
+            acct._print_rotation_preview(idx, None, state, [])
+            return _p["out"].getvalue()
+
     def test_explains_why_no_account_is_eligible(self):
         idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
         for e in acct.ROTATION_EMAILS:
-            if e not in (SALES, CONTACT):
+            if e != SALES:
                 del idx["accounts"][e]
-        with Patches(*stored(), patch.object(acct, "load_rotation", return_value={"enabled": True}),
-                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
-            out = _p["out"]
-            idx["accounts"][CONTACT]["usage"]["data"]["five_hour"] = {"utilization": 100}
-            with patch.object(acct, "PREMIUM_FACTOR", 1):  # make the Premium-equivalent filter bite
-                acct._print_rotation_preview(idx, live=CONTACT)
-        text = out.getvalue()
+        text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {}})
         self.assertIn("Premium %s: 5-hour 85%%, 7-day 46%%; threshold reached" % SALES, text)
         self.assertIn("Next Premium: none eligible", text)
         self.assertIn("%s (not logged in on this machine)" % XTTS, text)
 
-    def test_names_the_next_premium(self):
-        idx = pool_index(**{SALES: (85, 46), HIEUNX: (0, 1)}, premium=SALES)
-        for e in acct.ROTATION_EMAILS:
-            if e not in (SALES, HIEUNX):
-                idx["accounts"][e] = account(0, 50, e)
-        with Patches(*stored(), patch.object(acct, "load_rotation", return_value={"enabled": True}),
-                     out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
-            out = _p["out"]
-            acct._print_rotation_preview(idx, live=None)
-        self.assertIn("Next Premium: **%s**" % HIEUNX, out.getvalue())
+    def test_names_the_next_premium_and_the_order(self):
+        idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
+        text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {XTTS: 5, CONTACT: 9}})
+        self.assertIn("Next Premium: **%s**" % HIEUNX, text)
+        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTTS, CONTACT]), text)
 
 
 class RotationLogTests(unittest.TestCase):

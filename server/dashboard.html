@@ -167,7 +167,7 @@ function render(d) {
   const accounts = d.accounts || [];
   // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
   const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
-  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo"], ["backup", "Account tạm"]];
+  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo (lâu nhất chưa làm Premium lên trước)"], ["backup", "Account tạm"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
     const rows = accounts.filter((a) => groupOf(a) === g);
     if (!rows.length) return "";
@@ -179,8 +179,9 @@ function render(d) {
       return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${g === "backup" && a.email !== backup ? "idle" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
-      <td>${usageCell(a.five_hour, a.five_hour_reset)}</td>
-      <td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
+      ${g === "rotation" && a.seat === "No seat"
+        ? `<td colspan="2" class="muted">Lên Premium lần cuối: ${a.last_used ? clock(a.last_used) : "chưa từng"}</td>`
+        : `<td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>`}
       <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || "ok")}</td></tr>`;
     }).join("");
   }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
