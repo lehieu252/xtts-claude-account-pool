@@ -171,6 +171,20 @@ class TokenRefreshTests(unittest.TestCase):
         self.env.stop()
         shutil.rmtree(self.dir)
 
+    def test_a_429_is_not_asked_again_before_retry_after(self):
+        meta = {}
+        creds = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": (time.time() + 3600) * 1000}}
+        err = urllib.error.HTTPError(acct.USAGE_URL, 429, "Too Many Requests", {"Retry-After": "1172"}, io.BytesIO(b""))
+        with patch.object(acct, "fetch_usage", side_effect=err) as fetch:
+            self.assertTrue(acct.refresh_usage(meta, creds, force=True).startswith("rate limited until"))
+            self.assertAlmostEqual(meta["usage_blocked_until"], time.time() + 1172, delta=5)
+            self.assertTrue(acct.refresh_usage(meta, creds, force=True).startswith("rate limited until"))
+            self.assertEqual(fetch.call_count, 1)  # the second check did not ask
+        meta["usage_blocked_until"] = time.time() - 1
+        with patch.object(acct, "fetch_usage", return_value={"five_hour": {"utilization": 12}}):
+            self.assertEqual(acct.refresh_usage(meta, creds, force=True), "ok")
+        self.assertNotIn("usage_blocked_until", meta)
+
     def test_expired_token_without_refresh_name_is_left_alone(self):
         with patch.object(acct, "_post_token_refresh") as post:
             status = acct.refresh_usage({}, acct.read_stored_creds("b"))
