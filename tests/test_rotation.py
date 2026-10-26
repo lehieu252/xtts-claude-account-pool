@@ -815,66 +815,6 @@ class RotationPreviewTests(unittest.TestCase):
         self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTTS, CONTACT]), text)
 
 
-class SeatLendTests(unittest.TestCase):
-    """Logging in an account without a seat: the Standard seat is lent for the login and given back."""
-
-    def setUp(self):
-        acct.save_pool_settings({"api_key": "k", "machine_id": "m1"})
-        try:
-            os.unlink(acct._borrow_path())
-        except FileNotFoundError:
-            pass
-
-    def tearDown(self):
-        acct.save_pool_settings({})
-
-    def run_cmd(self, fn, email, tiers=None, pool_error=None):
-        calls = []
-
-        def pool(method, path, body=None, mover=False, timeout=4):
-            calls.append((method, path, body))
-            if pool_error and method == "POST":
-                raise acct.AcctError(pool_error)
-            return {}
-
-        with Patches(patch.object(acct, "_read_tiers", return_value=tiers or {}),
-                     patch.object(acct, "pool_call", side_effect=pool),
-                     patch.object(acct, "_spawn_log_flush"),
-                     out=patch.object(acct.sys, "stdout", io.StringIO()),
-                     seats=patch.object(acct, "_set_seats")) as p:
-            fn(argparse.Namespace(email=email))
-        return p["seats"], calls, p["out"].getvalue()
-
-    def test_an_account_without_a_seat_borrows_standard_from_the_backup_then_gives_it_back(self):
-        seats, calls, _ = self.run_cmd(acct.cmd_seat_lend, XTG1, {XTG1: "No seat", INFO: "Standard", CAREERS: "No seat"})
-        self.assertEqual(seats.call_args.args[0], [(INFO, "No seat"), (XTG1, "Standard")])
-        self.assertEqual((calls[0][0], calls[0][1], calls[0][2]["account"], calls[0][2]["backup"]), ("POST", "/api/hold", XTG1, INFO))
-        seats, calls, _ = self.run_cmd(acct.cmd_seat_return, XTG1)
-        self.assertEqual(seats.call_args.args[0], [(XTG1, "No seat"), (INFO, "Standard")])
-        self.assertEqual(calls, [("DELETE", "/api/hold", None)])
-        self.assertFalse(os.path.exists(acct._borrow_path()))
-
-    def test_an_account_with_a_seat_borrows_nothing(self):
-        seats, calls, out = self.run_cmd(acct.cmd_seat_lend, XTG2, {XTG2: "Premium", INFO: "Standard"})
-        seats.assert_not_called()
-        self.assertEqual(calls, [])
-        self.assertIn("Premium seat", out)
-        seats, calls, _ = self.run_cmd(acct.cmd_seat_return, XTG2)
-        seats.assert_not_called()
-
-    def test_nothing_changes_when_the_pool_refuses_the_hold(self):
-        seats, _, out = self.run_cmd(acct.cmd_seat_lend, XTG1, {XTG1: "No seat", INFO: "Standard"},
-                                     pool_error="pool server answered HTTP 409 for /api/hold: a seat move is running")
-        seats.assert_not_called()
-        self.assertIn("a seat move is running", out)
-
-    def test_no_backup_with_standard_lends_the_free_seat(self):
-        seats, _, _ = self.run_cmd(acct.cmd_seat_lend, SUPPORT, {SUPPORT: "No seat", INFO: "No seat", CAREERS: "No seat"})
-        self.assertEqual(seats.call_args.args[0], [(SUPPORT, "Standard")])
-        seats, _, _ = self.run_cmd(acct.cmd_seat_return, SUPPORT)
-        self.assertEqual(seats.call_args.args[0], [(SUPPORT, "No seat")])
-
-
 class RotationLogTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

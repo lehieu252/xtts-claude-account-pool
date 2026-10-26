@@ -654,122 +654,21 @@ def _login_all():
                     "if [ \"$A\" != s ]; then\n" % email)
             f.write("rm -rf %s; mkdir -p %s\n" % (sh_quote(tmp), sh_quote(tmp)))
             f.write("bash %s login-backup\n" % sh_quote(acct_sh))
-            f.write(_seat_lend_lines(acct_sh, email))
             f.write("CLAUDE_CONFIG_DIR=%s %s auth login --email %s\n" % (sh_quote(tmp), sh_quote(claude_bin()), sh_quote(email)))
             f.write("bash %s import-login %s %s %s || echo 'Not saved: %s. Run /acct:login %s later.'\n" % (
                 sh_quote(acct_sh), sh_quote(tmp), sh_quote(name), sh_quote(email), email, email))
-            f.write(_seat_return_lines(acct_sh, email))
             f.write("fi\n")
         f.write("echo; echo 'Done. You can close this window and go back to Claude: /acct:list'\n")
     os.chmod(helper, 0o700)
     if open_terminal(helper):
         print("Opened a **terminal window** to log in to %d account(s), one after the other: %s." % (
             len(todo), ", ".join(e for _, e in todo)))
-        print("For each one: press Enter in the terminal; an account without a seat first gets the Standard seat for a few "
-              "minutes (given back right after). Open the login link in a **private browser window**, sign in as that "
-              "account, authorize, and paste the whole code into the terminal (Windows Git Bash: Shift+Insert). "
-              "Your current account is NOT changed.")
+        print("For each one: claude.ai refuses Claude Code to an account without a seat, so first give it a seat on the "
+              "Members page by hand (and take it back after). Press Enter in the terminal, open the login link in a "
+              "**private browser window**, sign in as that account, authorize, and paste the whole code into the terminal "
+              "(Windows Git Bash: Shift+Insert). Your current account is NOT changed.")
     else:
         print("Could not open a terminal window. Open a terminal and run:\n\n    bash %s" % sh_quote(helper))
-
-
-def _seat_lend_lines(acct_sh, email):
-    """Shell lines: lend the Standard seat to an account without one, and give it back however the login ends."""
-    back = "bash %s seat-return %s" % (sh_quote(acct_sh), sh_quote(email))
-    return ("bash %s seat-lend %s\n" % (sh_quote(acct_sh), sh_quote(email))
-            + "trap '%s; exit 130' INT TERM HUP\n" % back.replace("'", "'\\''"))
-
-
-def _seat_return_lines(acct_sh, email):
-    return "bash %s seat-return %s\ntrap - INT TERM HUP\n" % (sh_quote(acct_sh), sh_quote(email))
-
-
-def _read_tiers(emails, cfg):
-    """{email: "Premium" | "Standard" | "No seat"} read on the Members page with the automation browser."""
-    ensure_node_deps()
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
-    try:
-        r = subprocess.run([os.environ.get("CLAUDE_ACCT_NODE", "node"), script, "--read"] + list(emails),
-                           capture_output=True, text=True, timeout=90, env=seat_manager_env(cfg))
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise AcctError("could not run the automation browser: %s" % e)
-    if r.returncode != 0:
-        raise AcctError((r.stderr or r.stdout or "unknown error").strip()[-400:])
-    try:
-        return json.loads(r.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        raise AcctError("unexpected answer from the seat manager: %s" % r.stdout.strip()[-200:])
-
-
-def _borrow_path():
-    return os.path.join(store_dir(), "seat-lend.json")
-
-
-def cmd_seat_lend(args):
-    """Before logging in a pool account without a seat (claude.ai refuses it Claude Code): give it the Standard
-    seat for a few minutes, taken from the backup account that holds it. The pool server holds seat moves meanwhile."""
-    email = args.email.lower()
-    cfg = load_rotation()
-    try:
-        tiers = _read_tiers([email] + [e for e in BACKUP_EMAILS if e != email], cfg)
-    except AcctError as e:
-        print("Could not read the seats with the automation browser (%s).\nIf %s has no seat, the login page will say "
-              "'Unable to access Claude Code': give it a seat on the Members page by hand, or run /acct:auto browser "
-              "and sign in there as an organization admin." % (e, email))
-        return
-    if tiers.get(email) in ("Premium", "Standard"):
-        print("%s has a %s seat: no seat needs to be lent." % (email, tiers[email]))
-        return
-    backup = next((e for e in BACKUP_EMAILS if e != email and tiers.get(e) == "Standard"), None)
-    st = pool_settings()
-    joined = st.get("api_key") or st.get("mover_key")
-    if joined:
-        try:
-            pool_call("POST", "/api/hold", {"machine_id": st["machine_id"], "name": machine_name(), "account": email,
-                                            "backup": backup, "backup_tier": "Standard" if backup else None,
-                                            "seconds": 600}, timeout=10)
-        except AcctError as e:
-            print("Cannot lend a seat now: %s." % e)
-            return
-    print("Giving %s the Standard seat%s for the login..." % (email, " (taken from %s)" % backup if backup else ""))
-    try:
-        _set_seats(([(backup, "No seat")] if backup else []) + [(email, "Standard")], cfg)
-    except Exception as e:
-        print("Could not change the seats: %s" % str(e)[-400:])
-        if joined:
-            try:
-                pool_call("DELETE", "/api/hold", timeout=10)
-            except AcctError:
-                pass
-        return
-    write_json_atomic(_borrow_path(), {"email": email, "backup": backup, "at": time.time()})
-    log_event("seat_lend", "Standard seat lent to %s for a login%s" % (email, " (from %s)" % backup if backup else ""))
-    print("%s has the Standard seat for up to 10 minutes: log in now." % email)
-
-
-def cmd_seat_return(args):
-    """Give back the seat lent by seat-lend (does nothing if none was lent to this account)."""
-    lent = read_json(_borrow_path(), {}) or {}
-    if lent.get("email") != args.email.lower():
-        return
-    try:
-        _set_seats([(lent["email"], "No seat")] + ([(lent["backup"], "Standard")] if lent.get("backup") else []),
-                   load_rotation())
-    except Exception as e:
-        print("Could not give the seat back (%s). Machine 2 gives it back when the 10 minutes are over." % str(e)[-300:])
-        return
-    try:
-        os.unlink(_borrow_path())
-    except FileNotFoundError:
-        pass
-    st = pool_settings()
-    if st.get("api_key") or st.get("mover_key"):
-        try:
-            pool_call("DELETE", "/api/hold", timeout=10)
-        except AcctError as e:
-            print("Seat given back, but the pool server did not hear it (%s): machine 2 waits until the 10 minutes are over." % e)
-    log_event("seat_return", "Standard seat given back%s" % (" to %s" % lent["backup"] if lent.get("backup") else ""))
-    print("Seat given back: %s has no seat again%s." % (lent["email"], ", %s has the Standard seat" % lent["backup"] if lent.get("backup") else ""))
 
 
 def cmd_login(args):
@@ -796,16 +695,11 @@ def cmd_login(args):
         f.write("#!/usr/bin/env bash\n")
         f.write("echo '=== Claude account login: %s ==='\n" % args.name)
         acct_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")
-        lend = (args.email or "").lower() in POOL_EMAILS
-        if lend:
-            f.write(_seat_lend_lines(acct_sh, args.email.lower()))
         f.write("export CLAUDE_CONFIG_DIR=%s\n" % sh_quote(tmp))
         f.write(" ".join(sh_quote(a) for a in login_cmd) + "\n")
         f.write("unset CLAUDE_CONFIG_DIR\n")
         f.write("bash %s import-login %s %s %s\n" % (sh_quote(acct_sh), sh_quote(tmp),
                                                      sh_quote(args.name), sh_quote(args.email or "")))
-        if lend:
-            f.write(_seat_return_lines(acct_sh, args.email.lower()))
         f.write("echo; echo 'Done. You can close this window and go back to Claude: /acct:list'\n")
     os.chmod(helper, 0o700)
     opened = open_terminal(helper)
@@ -2303,8 +2197,6 @@ def main(argv=None):
     q.set_defaults(fn=cmd_auto_recover, hook="StopFailure")
     p = sub.add_parser("log-flush", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_log_flush)
     p = sub.add_parser("login-backup", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_login_backup)
-    p = sub.add_parser("seat-lend", help=argparse.SUPPRESS); p.add_argument("email"); p.set_defaults(fn=cmd_seat_lend)
-    p = sub.add_parser("seat-return", help=argparse.SUPPRESS); p.add_argument("email"); p.set_defaults(fn=cmd_seat_return)
     args = ap.parse_args(argv)
     global _hook
     _hook = getattr(args, "hook", None)
