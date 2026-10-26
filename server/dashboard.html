@@ -53,6 +53,10 @@ tr:last-child td { border-bottom: 0; }
 tr.is-premium td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .chip.premium { color: var(--ok); font-weight: 600; } .chip.backup { color: var(--warn); font-weight: 600; }
 .chip.next { color: var(--accent); font-weight: 600; }
+.use { font: inherit; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--accent); background: transparent; color: var(--accent); }
+.use:hover:not(:disabled) { background: var(--accent); color: var(--surface); }
+.use:disabled { opacity: .35; cursor: not-allowed; }
 tr.group td { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; padding-top: 12px; border-bottom: 1px solid currentColor; }
 tr.group.premium td { color: var(--ok); } tr.group.rotation td { color: var(--accent); } tr.group.backup td { color: var(--warn); }
 tr.g-premium td:first-child { box-shadow: inset 3px 0 var(--ok); }
@@ -89,8 +93,8 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
   <div class="panel">
       <h2>Account <span class="muted" style="font-weight:400;font-size:13px" id="accounts-note"></span></h2>
       <div class="tbl"><table>
-        <thead><tr><th>Account</th><th>Seat</th><th>5 giờ</th><th>7 ngày</th><th>Trạng thái</th></tr></thead>
-        <tbody id="accounts"><tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr></tbody>
+        <thead><tr><th>Account</th><th>Seat</th><th>5 giờ</th><th>7 ngày</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="accounts"><tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr></tbody>
       </table></div>
   </div>
 
@@ -146,6 +150,11 @@ function render(d) {
   const pool = (d.accounts || []).filter((a) => a.role === "rotation" && a.estimated);
   if (pool.length && pool.every((a) => a.eligible === false))
     alerts.push(["warn", "Mọi account trong pool đều đang chạm ngưỡng: Premium giữ nguyên tới khi dùng hết một cửa sổ."]);
+  const r0 = st.request;
+  if (r0 && ["pending", "running"].includes(r0.status) && now - r0.at < 900)
+    alerts.push(["warn", `Đang chuyển ${r0.kind === "premium" ? "Premium" : "Standard"} sang ${esc(r0.email)} (yêu cầu từ dashboard, ${r0.status === "running" ? "máy 2 đang thực hiện" : "chờ máy 2"}).`]);
+  else if (r0 && r0.status === "fail" && now - (r0.done_at || r0.at) < 600)
+    alerts.push(["bad", `Không chuyển được ${r0.kind === "premium" ? "Premium" : "Standard"} sang ${esc(r0.email)}: ${esc(r0.message || "")}`]);
   if (st.hold) alerts.push(["warn", st.hold.until > now
     ? `${esc(st.hold.name || "Một máy")} đang mượn seat Standard để login ${esc(st.hold.account)} (tới ${clock(st.hold.until)}): máy 2 tạm không chuyển seat.`
     : `Hết giờ mượn seat cho ${esc(st.hold.account)}: máy 2 đang trả seat lại.`]);
@@ -171,13 +180,17 @@ function render(d) {
   }).join("") : `<tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
 
   const accounts = d.accounts || [];
+  const req = st.request;
+  const pending = req && ["pending", "running"].includes(req.status) && now - req.at < 900;
+  const busy = st.phase !== "STABLE" || pending || !!st.hold;
+  current = { premium: st.premium, backup, accounts };
   // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
   const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
   const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo (dưới ngưỡng trước, rồi 7d, 5h thấp nhất)"], ["backup", "Account tạm"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
     const rows = accounts.filter((a) => groupOf(a) === g);
     if (!rows.length) return "";
-    return `<tr class="group ${g}"><td colspan="5">${title}</td></tr>` + rows.map((a) => {
+    return `<tr class="group ${g}"><td colspan="6">${title}</td></tr>` + rows.map((a) => {
       const tag = g === "premium" ? `<span class="chip premium">Premium</span>`
         : g === "backup" ? `<span class="chip backup">${a.email === backup ? "đang dùng" : "chờ"}</span>`
         : a.rank === 1 ? `<span class="chip next">#1 · tiếp theo</span>`
@@ -188,9 +201,12 @@ function render(d) {
       <td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
       <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || (a.estimated
         ? (a.measured_at ? "Lần cuối cập nhật: " + clock(a.measured_at) : "Chưa cập nhật")
-        : "ok"))}</td></tr>`;
+        : "ok"))}</td>
+      <td>${g !== "premium" && a.email !== (g === "backup" ? backup : st.premium)
+        ? `<button class="use" data-kind="${g === "backup" ? "standard" : "premium"}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>Dùng</button>`
+        : ""}</td></tr>`;
     }).join("");
-  }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
 
   $("transitions").innerHTML = d.transitions.length ? d.transitions.map((t) => `<tr>
@@ -211,6 +227,31 @@ function usageCell(pct, reset) {
   return `<div class="bar"><span class="track"><span class="fill ${level}" style="width:${Math.min(100, p)}%;display:block"></span></span>`
     + `<span class="pct">${p}%</span>${when ? `<span class="reset">reset ${when}</span>` : ""}</div>`;
 }
+
+let current = { premium: null, backup: null, accounts: [] };
+
+document.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest && ev.target.closest("button.use");
+  if (!btn || btn.disabled) return;
+  const kind = btn.dataset.kind, email = btn.dataset.email;
+  const from = kind === "premium" ? current.premium : current.backup;
+  const row = current.accounts.find((a) => a.email === email) || {};
+  const seat = kind === "premium" ? "Premium" : "Standard";
+  let text = `Chuyển seat ${seat} từ ${from || "—"} sang ${email}?`
+    + (kind === "premium" ? "\n\nCác máy sẽ về account tạm trong lúc chuyển (khoảng 1–3 phút)." : "");
+  if (row.eligible === false) text += `\n\nLưu ý: theo lần cập nhật cuối, ${email} đang chạm ngưỡng usage.`;
+  if (row.status) text += `\n\nLưu ý: ${row.status}.`;
+  if (!confirm(text)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch("api/request", { method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Pool-Dashboard": "1" }, body: JSON.stringify({ kind, email }) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "HTTP " + r.status);
+  } catch (e) {
+    alert("Không gửi được yêu cầu: " + e.message);
+  }
+  refresh();
+});
 
 async function refresh() {
   const q = new URLSearchParams({ limit: "50" });  // only for the "seat move failed" alert

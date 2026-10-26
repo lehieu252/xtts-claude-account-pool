@@ -448,6 +448,10 @@ class FakePool:
         if path == "/api/accounts":
             self.accounts = body["accounts"]
             return "ok"
+        if path == "/api/request/result":
+            self.state["request"] = dict(self.state["request"], status=body["status"], message=body.get("message"))
+            self.results = getattr(self, "results", []) + [body["status"]]
+            return "ok"
         if path == "/api/snapshots":
             self.state["snapshots"] = dict(self.state["snapshots"], **body["snapshots"])
             return "ok"
@@ -644,6 +648,35 @@ class MoverTests(unittest.TestCase):
         move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (85, 30)}, premium=SALES), pool)
         self.assertEqual(move.call_args.args[0], [(INFO, "No seat"), (CAREERS, "Standard")])
         self.assertEqual(pool.state["snapshots"][INFO]["five_hour"], 85)  # info's last usage is kept
+
+    def test_the_dashboard_button_moves_premium_through_the_full_flow(self):
+        pool = FakePool("STABLE", SALES)
+        pool.state["request"] = {"id": "1", "kind": "premium", "email": XTG2, "status": "pending"}
+        acct._save_mover_state({"backoff_until": time.time() + 600})  # not held back by a failed automatic move
+        move = self.run_once(pool_index(**{SALES: (10, 10)}, premium=SALES), pool)  # below the thresholds
+        self.assertEqual(pool.puts, [("PREPARING", SALES, XTG2), ("MOVING", SALES, XTG2), ("STABLE", XTG2, None)])
+        self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (XTG2, "Premium")])
+        self.assertEqual((pool.results, pool.state["request"]["status"]), (["running", "ok"], "ok"))
+        self.assertEqual(acct._mover_state()["premium_manual"]["email"], XTG2)  # kept like a seat given by hand
+
+    def test_the_dashboard_button_gives_the_standard_seat_to_a_backup_account(self):
+        pool = FakePool("STABLE", SALES)
+        pool.state["request"] = {"id": "2", "kind": "standard", "email": CAREERS, "status": "pending"}
+        move = self.run_once(pool_index(**{SALES: (10, 10)}, premium=SALES), pool)
+        self.assertEqual(move.call_args.args[0], [(INFO, "No seat"), (CAREERS, "Standard")])
+        self.assertEqual((pool.state["backup"], pool.state["request"]["status"]), (CAREERS, "ok"))
+
+    def test_a_dashboard_request_for_a_wrong_or_unusable_account_fails_without_moving(self):
+        idx = pool_index(**{SALES: (10, 10)}, premium=SALES)
+        del idx["accounts"][XTG1]
+        for kind, email, why in (("premium", INFO, "not a rotation account"), ("standard", XTTS, "not a backup account"),
+                                 ("premium", XTG1, "not logged in"), ("premium", SALES, "already holds")):
+            pool = FakePool("STABLE", SALES)
+            pool.state["request"] = {"id": "3", "kind": kind, "email": email, "status": "pending"}
+            move = self.run_once(idx, pool)
+            move.assert_not_called()
+            self.assertEqual(pool.state["request"]["status"], "fail")
+            self.assertIn(why, pool.state["request"]["message"])
 
     def test_a_failed_backup_seat_change_keeps_the_backup_and_backs_off(self):
         pool = FakePool("PREPARING", SALES)

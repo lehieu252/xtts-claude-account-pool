@@ -1475,6 +1475,48 @@ def _end_hold(hold):
     log_event("hold_end", "gave back the seat lent to %s (not given back within the time)" % hold.get("account"))
 
 
+def _request_done(request, status, message=None):
+    try:
+        pool_call("POST", "/api/request/result", {"id": request.get("id"), "status": status, "message": message},
+                  mover=True)
+    except AcctError as e:
+        log_event("read_fail", "dashboard request: %s" % e, every=QUIET_EVERY, key="request")
+
+
+def _run_request(idx, state, request, holder, live):
+    """The "Dùng" button of the dashboard: give `email` the Premium seat (the full move: everyone waits on the
+    backup account first) or the Standard seat (backup accounts). It is then kept like a seat given by hand."""
+    kind, email = request.get("kind"), (request.get("email") or "").lower()
+    group = ROTATION_EMAILS if kind == "premium" else BACKUP_EMAILS
+    current = _email_of(idx, holder) if kind == "premium" else _backup_of(state)
+    why = ("%s is not a %s account" % (email, "rotation" if kind == "premium" else "backup") if email not in group
+           else "%s already holds the seat" % email if email == current else _usable(idx, email))
+    if why:
+        log_event("request_fail", "dashboard asked %s → %s: %s" % (kind, email, why))
+        return _request_done(request, "fail", why)
+    _request_done(request, "running")
+    log_event("request", "dashboard asked the %s seat for %s" % (kind, email))
+    ms = _mover_state()
+    if kind == "premium":
+        ok = _move_seat(idx, holder, _saved_name(idx, email), live, {"premium": current}, state,
+                        reason="asked on the dashboard")
+        if not ok:
+            return _request_done(request, "fail", "the seat move failed: see the phase history")
+        ms["premium_manual"] = {"email": email, "at": time.time()}
+    else:
+        try:
+            _set_seats([(current, "No seat"), (email, "Standard")], load_rotation())
+        except Exception as e:
+            log_event("request_fail", "dashboard asked standard → %s: %s" % (email, str(e)[-500:]))
+            return _request_done(request, "fail", str(e)[-300:])
+        _forget_seat_readings(idx, *[n for n in (_saved_name(idx, e) for e in BACKUP_EMAILS) if n])
+        save_index(idx)
+        _put_state("STABLE", state.get("premium"), message="backup account: %s (dashboard)" % email, backup=email)
+        ms["backup_manual"] = {"email": email, "at": time.time()}
+    _save_mover_state(ms)
+    _request_done(request, "ok", "%s now holds the %s seat" % (email, "Premium" if kind == "premium" else "Standard"))
+
+
 def _sync_backup(idx, state, live, force=False):
     """While nothing moves: if the backup account the pool names no longer holds the Standard seat on claude.ai
     (moved by hand), publish the backup account that does. Returns the state, updated or not."""
@@ -1561,12 +1603,12 @@ def _wait_for_backup(prepared_at, backup, poll=5):
         time.sleep(poll)
 
 
-def _move_seat(idx, premium, target, live, fields, state=None):
+def _move_seat(idx, premium, target, live, fields, state=None, reason="threshold reached"):
     """PREPARING → wait for the backup account → MOVING → seat move → STABLE. Returns True on success."""
     p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
     backup = _backup_of(state or {})
-    log_event("move_start", "threshold reached; backup %s" % backup, target=t_email, **fields)
-    prepared = _put_state("PREPARING", p_email, t_email, "threshold reached", backup=backup)
+    log_event("move_start", "%s; backup %s" % (reason, backup), target=t_email, **fields)
+    prepared = _put_state("PREPARING", p_email, t_email, reason, backup=backup)
     waiting = _wait_for_backup(prepared["updated_at"], backup)
     if waiting:
         log_event("prepare_timeout", "still not on %s after %ds: %s" % (backup, PREPARE_TIMEOUT, ", ".join(waiting)),
@@ -1604,7 +1646,10 @@ def _mover_once(args):
     idx = load_index()
     live = current_name(idx)
     state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
-    if time.time() < _mover_state().get("backoff_until", 0) and not args.force:
+    request = state.get("request") or {}
+    asked = request.get("status") == "pending"
+    # A seat asked for on the dashboard is not held back by the wait after a failed automatic move.
+    if time.time() < _mover_state().get("backoff_until", 0) and not args.force and not asked:
         return
     hold = state.get("hold")
     if hold:  # a machine lent the Standard seat to log an account in: move nothing until it gives it back
@@ -1632,6 +1677,9 @@ def _mover_once(args):
     if not state.get("backup"):
         state = _put_state("STABLE", h_email, message="backup account: %s" % _backup_of(state), backup=_backup_of(state))
     state = _sync_backup(idx, state, live)
+    if asked:
+        _run_request(idx, state, request, holder, live)
+        return
     state = _rest_backup(idx, state, live)
     _publish_accounts(idx, live, state)
     test = st.get("test_move") or {}

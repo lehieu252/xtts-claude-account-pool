@@ -34,7 +34,7 @@ class PoolServerTests(unittest.TestCase):
         self.httpd.server_close()
         shutil.rmtree(self.dir)
 
-    def call(self, method, path, body=None, key=None, mover=None, viewer=None):
+    def call(self, method, path, body=None, key=None, mover=None, viewer=None, headers=None):
         req = urllib.request.Request(self.base + path, method=method,
                                      data=None if body is None else json.dumps(body).encode())
         if body is not None:
@@ -45,6 +45,8 @@ class PoolServerTests(unittest.TestCase):
             req.add_header("X-Pool-Mover-Key", mover)
         if viewer:
             req.add_header("Authorization", "Basic " + base64.b64encode(viewer.encode()).decode())
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
                 raw = r.read().decode()
@@ -113,6 +115,23 @@ class PoolServerTests(unittest.TestCase):
         got = self.call("GET", "/api/state", key=API)[1]["snapshots"]
         self.assertEqual((got["a@x.vn"]["five_hour"], got["b@x.vn"]["five_hour"]), (82.0, 1.0))
         self.assertNotIn("secret", got["a@x.vn"])
+
+    def test_the_dashboard_asks_for_a_seat_and_machine_2_reports_back(self):
+        self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "a@x.vn", "backup": "info@x.vn"}, mover=MOVER)
+        body, dash = {"kind": "premium", "email": "B@x.vn"}, {"X-Pool-Dashboard": "1"}
+        self.assertEqual(self.call("POST", "/api/request", body, headers=dash)[0], 401)
+        self.assertEqual(self.call("POST", "/api/request", body, viewer="xtts:" + PASS)[0], 403)  # not from the page
+        self.assertEqual(self.call("POST", "/api/request", body, key=API, headers=dash)[0], 401)
+        code, st = self.call("POST", "/api/request", body, viewer="xtts:" + PASS, headers=dash)
+        self.assertEqual((code, st["request"]["email"], st["request"]["status"]), (200, "b@x.vn", "pending"))
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "standard", "email": "c@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 409)  # one at a time
+        rid = st["request"]["id"]
+        self.assertEqual(self.call("POST", "/api/request/result", {"id": rid, "status": "ok"}, key=API)[0], 403)
+        self.assertEqual(self.call("POST", "/api/request/result", {"id": rid, "status": "ok", "message": "done"}, mover=MOVER)[0], 200)
+        self.assertEqual(self.call("GET", "/api/state", key=API)[1]["request"]["status"], "ok")
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "standard", "email": "info@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 409)  # already holds it
 
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)

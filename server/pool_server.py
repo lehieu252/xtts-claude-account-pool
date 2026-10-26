@@ -19,6 +19,9 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
   POST /api/snapshots                X-Pool-Mover-Key: {"snapshots": {email: {tier, five_hour, five_hour_reset,
                                      seven_day, seven_day_reset, at}}}: the last usage machine 2 read of each
                                      account while it held a seat; GET /api/state returns them as "snapshots"
+  POST /api/request                  Basic auth + X-Pool-Dashboard: 1: {kind: premium|standard, email}; the "Dùng"
+                                     button: machine 2 gives that account the seat on its next run (one at a time)
+  POST /api/request/result           X-Pool-Mover-Key: {id, status: running|ok|fail, message}
   DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
   GET  /api/dashboard                Basic auth: state, machines, transitions, log (filters: machine, event)
@@ -86,6 +89,8 @@ class Store:
             cols = [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]
             if "backup" not in cols:
                 self.db.execute("ALTER TABLE state ADD COLUMN backup TEXT")
+            if "request" not in cols:  # 1.0.18: a seat change asked from the dashboard
+                self.db.execute("ALTER TABLE state ADD COLUMN request TEXT")
             if "hold" not in cols:  # 1.0.12: the Standard seat lent to an account so a machine can log it in
                 self.db.execute("ALTER TABLE state ADD COLUMN hold TEXT")
             if not self.db.execute("SELECT 1 FROM state").fetchone():
@@ -93,9 +98,15 @@ class Store:
 
     def state(self):
         with self.lock:
-            st = dict(self.db.execute("SELECT phase, premium, target, backup, hold, message, updated_at, by FROM state").fetchone())
+            st = dict(self.db.execute("SELECT phase, premium, target, backup, hold, request, message, updated_at, by "
+                                      "FROM state").fetchone())
         st["hold"] = json.loads(st["hold"]) if st["hold"] else None
+        st["request"] = json.loads(st["request"]) if st["request"] else None
         return st
+
+    def set_request(self, req):
+        with self.lock, self.db:
+            self.db.execute("UPDATE state SET request=? WHERE id=1", (json.dumps(req, ensure_ascii=False) if req else None,))
 
     def set_hold(self, hold):
         with self.lock, self.db:
@@ -303,6 +314,38 @@ def make_handler(cfg, store):
             store.set_hold(None)
             self._send(200, self._state_payload())
 
+        def _take_request(self, b):
+            # The custom header cannot be sent cross-site without a CORS preflight, which this server never answers:
+            # only the dashboard page itself can ask for a seat change.
+            if self.headers.get("X-Pool-Dashboard") != "1":
+                return self._send(403, {"error": "dashboard only"})
+            st = store.state()
+            kind, email = b.get("kind"), (_text(b.get("email")) or "").lower()
+            if kind not in ("premium", "standard") or not email:
+                return self._send(400, {"error": "kind (premium|standard) and email required"})
+            if st["phase"] != "STABLE":
+                return self._send(409, {"error": "Đang chuyển seat (%s): thử lại sau ít phút." % st["phase"]})
+            req = st.get("request")
+            if req and req.get("status") in ("pending", "running") and time.time() - req.get("at", 0) < 900:
+                return self._send(409, {"error": "Đang có yêu cầu khác: %s → %s." % (req.get("kind"), req.get("email"))})
+            if st.get("hold"):
+                return self._send(409, {"error": "Một máy đang mượn seat để login: thử lại sau."})
+            current = (st.get("premium") if kind == "premium" else st.get("backup")) or ""
+            if email == current.lower():
+                return self._send(409, {"error": "%s đã đang giữ seat này." % email})
+            store.set_request({"id": "%d" % (time.time() * 1000), "kind": kind, "email": email, "at": time.time(),
+                               "from": self.client_address[0], "status": "pending", "message": None})
+            self._send(200, self._state_payload())
+
+        def _request_result(self, b):
+            if not self._is_mover():
+                return self._send(403, {"error": "mover key required"})
+            req = store.state().get("request")
+            if not req or req.get("id") != b.get("id") or b.get("status") not in ("running", "ok", "fail"):
+                return self._send(409, {"error": "no such request"})
+            store.set_request(dict(req, status=b["status"], message=_text(b.get("message"), 500), done_at=time.time()))
+            self._send(200, "ok", "text/plain; charset=utf-8")
+
         def _take_hold(self, b):
             st = store.state()
             account, machine_id = _text(b.get("account")), _text(b.get("machine_id"), 100)
@@ -343,6 +386,18 @@ def make_handler(cfg, store):
 
         def do_POST(self):
             path = self._path()
+            if path == "/api/request":
+                if not self._is_viewer():
+                    return self._deny_viewer()
+                try:
+                    return self._take_request(self._body())
+                except (ValueError, json.JSONDecodeError) as e:
+                    return self._send(400, {"error": str(e)})
+            if path == "/api/request/result":
+                try:
+                    return self._request_result(self._body())
+                except (ValueError, json.JSONDecodeError) as e:
+                    return self._send(400, {"error": str(e)})
             if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold", "/api/snapshots"):
                 return self._send(404, {"error": "not found"})
             if not self._is_machine():

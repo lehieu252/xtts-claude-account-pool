@@ -170,6 +170,8 @@ Backup accounts:                the same ranking (readings taken with the Standa
 No target:                      P keeps the seat, the reason is logged
 ```
 
+**"Dùng" button on the dashboard.** Each account of the pool and each backup account has a button that gives it the seat, like moving it by hand on the Members page: a confirmation, then machine 2 does it on its next run (30 s at most). Premium goes through the full move (every machine waits on the backup account first, about 1–3 minutes); Standard is changed at once. The account is then kept like a seat given by hand. One request at a time, refused while a seat moves; the dashboard shows its progress and any error. Anyone with the dashboard password can use it.
+
 **Pool server.** `server/pool_server.py` runs on the xtts server (port 5680, `https://xtts.xtgroup.vn/pool/` through nginx) and holds the shared phase (`STABLE`, `PREPARING`, `MOVING`), the Premium account, the target, the machines that report, and the log. Its dashboard (password from `/etc/account-pool.env`) shows all of it and refreshes every 5 seconds. Deploy it with `bash server/deploy.sh`; the API key, the mover key and the dashboard password are created on the server the first time and never stored in git.
 
 **One seat move, step by step.**
