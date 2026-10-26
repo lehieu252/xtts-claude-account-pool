@@ -13,6 +13,10 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
   GET  /api/machines                 X-Pool-Key
   POST /api/log                      X-Pool-Key: {"events": [...]}; answers "ok"
   POST /api/accounts                 X-Pool-Mover-Key: usage of every pool account, read by machine 2
+  POST /api/hold                     any key: {machine_id, name, account, backup, backup_tier, seconds}; a machine
+                                     lends the Standard seat to `account` to log it in (409 while a seat moves or
+                                     another machine holds it); machine 2 moves no seat until it is released
+  DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
   GET  /api/dashboard                Basic auth: state, machines, transitions, log (filters: machine, event)
 
@@ -75,14 +79,23 @@ class Store:
                     updated REAL NOT NULL);
             """)
             # 1.0.8: the backup account the machines wait on while the seat moves (machine 2 picks it)
-            if "backup" not in [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]:
+            cols = [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]
+            if "backup" not in cols:
                 self.db.execute("ALTER TABLE state ADD COLUMN backup TEXT")
+            if "hold" not in cols:  # 1.0.12: the Standard seat lent to an account so a machine can log it in
+                self.db.execute("ALTER TABLE state ADD COLUMN hold TEXT")
             if not self.db.execute("SELECT 1 FROM state").fetchone():
                 self.db.execute("INSERT INTO state (id, phase, premium, target, message, updated_at, by) VALUES (1, 'STABLE', NULL, NULL, 'not set yet', ?, NULL)", (time.time(),))
 
     def state(self):
         with self.lock:
-            return dict(self.db.execute("SELECT phase, premium, target, backup, message, updated_at, by FROM state").fetchone())
+            st = dict(self.db.execute("SELECT phase, premium, target, backup, hold, message, updated_at, by FROM state").fetchone())
+        st["hold"] = json.loads(st["hold"]) if st["hold"] else None
+        return st
+
+    def set_hold(self, hold):
+        with self.lock, self.db:
+            self.db.execute("UPDATE state SET hold=? WHERE id=1", (json.dumps(hold, ensure_ascii=False) if hold else None,))
 
     def set_state(self, phase, premium, target, message, by, backup=None):
         now = time.time()
@@ -266,6 +279,32 @@ def make_handler(cfg, store):
                 })
             self._send(404, {"error": "not found"})
 
+        def do_DELETE(self):
+            if self._path() != "/api/hold":
+                return self._send(404, {"error": "not found"})
+            if not self._is_machine():
+                return self._send(403, {"error": "key required"})
+            store.set_hold(None)
+            self._send(200, self._state_payload())
+
+        def _take_hold(self, b):
+            st = store.state()
+            account, machine_id = _text(b.get("account")), _text(b.get("machine_id"), 100)
+            if not account or not machine_id:
+                return self._send(400, {"error": "account and machine_id required"})
+            if st["phase"] != "STABLE":
+                return self._send(409, {"error": "a seat move is running (%s): try again in a few minutes" % st["phase"]})
+            held = st.get("hold")
+            if held and held.get("until", 0) > time.time() and held.get("machine_id") != machine_id:
+                return self._send(409, {"error": "%s is already logging in %s" % (held.get("name"), held.get("account"))})
+            if held and held.get("until", 0) <= time.time():
+                return self._send(409, {"error": "machine 2 is still giving back the seat lent to %s" % held.get("account")})
+            seconds = min(max(int(b.get("seconds") or 600), 60), 900)
+            store.set_hold({"machine_id": machine_id, "name": _text(b.get("name")), "account": account,
+                            "backup": _text(b.get("backup")), "backup_tier": _text(b.get("backup_tier"), 20),
+                            "since": time.time(), "until": time.time() + seconds})
+            self._send(200, self._state_payload())
+
         def do_PUT(self):
             if self._path() != "/api/state":
                 return self._send(404, {"error": "not found"})
@@ -288,7 +327,7 @@ def make_handler(cfg, store):
 
         def do_POST(self):
             path = self._path()
-            if path not in ("/api/machine", "/api/log", "/api/accounts"):
+            if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold"):
                 return self._send(404, {"error": "not found"})
             if not self._is_machine():
                 return self._send(403, {"error": "key required"})
@@ -296,6 +335,8 @@ def make_handler(cfg, store):
                 b = self._body()
             except (ValueError, json.JSONDecodeError) as e:
                 return self._send(400, {"error": str(e)})
+            if path == "/api/hold":
+                return self._take_hold(b)
             if path == "/api/accounts":
                 if not self._is_mover():
                     return self._send(403, {"error": "mover key required"})

@@ -12,8 +12,10 @@ const membersUrl = process.env.CLAUDE_ACCT_MEMBERS_URL || "https://claude.ai/adm
 const cdpUrl = process.env.CLAUDE_ACCT_CDP_URL || "http://127.0.0.1:9222";
 const browserProfile = process.env.CLAUDE_ACCT_BROWSER_PROFILE;
 const setupMode = process.argv[2] === "--setup";
+// seat_manager.mjs --read <email> ...: print {"<email>": "Premium" | "Standard" | "No seat"} and change nothing.
+const readEmails = process.argv[2] === "--read" ? process.argv.slice(3) : null;
 
-if (!setupMode && (!changes.length || changes.some((c) => !c.email || !TIERS[c.tier]))) {
+if (!setupMode && !readEmails?.length && (!changes.length || changes.some((c) => !c.email || !TIERS[c.tier]))) {
   throw new Error('Expected <email>=<tier> arguments, with tier Premium, Standard or "No seat".');
 }
 const members = new URL(membersUrl);
@@ -86,7 +88,7 @@ const context = browser.contexts()[0];
   }
   // The sidebar includes a Members label before the member table finishes loading.
   // Wait for both target emails so subsequent row lookups don't race the table render.
-  for (const { email } of changes) {
+  for (const email of readEmails || changes.map((c) => c.email)) {
     await page.getByText(email, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
   }
 
@@ -155,6 +157,13 @@ const context = browser.contexts()[0];
     }
     throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
   };
+
+  if (readEmails) {
+    const tiers = {};
+    for (const email of readEmails) tiers[email] = await tierOf(email);
+    console.log(JSON.stringify(tiers));
+    process.exit(0);
+  }
 
   const before = [];
   for (const { email } of changes) before.push({ email, tier: await tierOf(email) });

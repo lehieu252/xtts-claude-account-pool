@@ -85,6 +85,25 @@ class PoolServerTests(unittest.TestCase):
         used = self.call("GET", "/api/state", key=API)[1]["last_used"]
         self.assertEqual(used, {"b@x.vn": rows[2]["at"], "a@x.vn": rows[3]["at"]})
 
+    def test_a_machine_holds_the_seats_to_log_in_an_account(self):
+        body = {"machine_id": "m1", "name": "Hiếu", "account": "xtg1@x.vn", "backup": "info@x.vn", "backup_tier": "Standard"}
+        self.assertEqual(self.call("POST", "/api/hold", body)[0], 403)
+        code, st = self.call("POST", "/api/hold", body, key=API)
+        self.assertEqual((code, st["hold"]["account"], st["hold"]["backup"]), (200, "xtg1@x.vn", "info@x.vn"))
+        self.assertAlmostEqual(st["hold"]["until"] - st["hold"]["since"], 600, delta=1)
+        code, err = self.call("POST", "/api/hold", dict(body, machine_id="m2", account="xtg2@x.vn"), key=API)
+        self.assertEqual(code, 409)
+        self.assertIn("Hiếu", err["error"])
+        self.assertEqual(self.call("DELETE", "/api/hold", key=API)[1]["hold"], None)
+
+    def test_no_hold_while_a_seat_moves_and_an_expired_one_waits_for_machine_2(self):
+        self.call("PUT", "/api/state", {"phase": "PREPARING", "premium": "a@x.vn", "target": "b@x.vn"}, mover=MOVER)
+        self.assertEqual(self.call("POST", "/api/hold", {"machine_id": "m1", "account": "c@x.vn"}, key=API)[0], 409)
+        self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "b@x.vn"}, mover=MOVER)
+        self.store.set_hold({"machine_id": "m1", "account": "c@x.vn", "until": 1})
+        self.assertEqual(self.call("POST", "/api/hold", {"machine_id": "m1", "account": "c@x.vn"}, key=API)[0], 409)
+        self.assertEqual(self.call("GET", "/api/state", key=API)[1]["hold"]["account"], "c@x.vn")
+
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "STABLE"}, mover=MOVER)[0], 400)
