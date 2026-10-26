@@ -25,8 +25,8 @@ SPEC.loader.exec_module(acct)
 os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 
-INFO, CAREERS, SUPPORT = acct.BACKUP_EMAILS
-XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2 = acct.ROTATION_EMAILS
+INFO, CAREERS = acct.BACKUP_EMAILS
+XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT = acct.ROTATION_EMAILS
 CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 
 
@@ -86,7 +86,7 @@ class CandidateTests(unittest.TestCase):
 
     def test_never_premium_first_then_the_oldest_then_the_list_order(self):
         idx = pool_index(premium=XTTS)
-        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600, XTG1: 800, XTG2: 900}
+        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600, XTG1: 800, XTG2: 900, SUPPORT: 950}
         self.assertEqual(self.pick(idx, XTTS, used)[0], CONTACT)
         used[CONTACT] = 700
         self.assertEqual(self.pick(idx, XTTS, used)[0], HIEUNX)
@@ -120,12 +120,12 @@ class CandidateTests(unittest.TestCase):
             rows = acct._account_rows(idx, None, state)
         self.assertEqual({c.args[0]["profile"]["emailAddress"] for c in p["usage"].call_args_list}, {XTTS, INFO})
         self.assertEqual([r["email"] for r in rows],
-                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, CONTACT, SALES, INFO, CAREERS, SUPPORT])
-        self.assertEqual([r["rank"] for r in rows[1:9]], [1, 2, 3, 4, 5, 6, 7, 8])
-        self.assertEqual((rows[0]["five_hour"], rows[9]["five_hour"]), (40, 5))
-        self.assertEqual((rows[1]["seat"], rows[10]["seat"], rows[11]["seat"]), ("No seat", "No seat", "No seat"))
+                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, CONTACT, SALES, INFO, CAREERS])
+        self.assertEqual([r["rank"] for r in rows[1:10]], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+        self.assertEqual((rows[0]["five_hour"], rows[10]["five_hour"]), (40, 5))
+        self.assertEqual((rows[1]["seat"], rows[11]["seat"]), ("No seat", "No seat"))
         self.assertNotIn("five_hour", rows[1])
-        self.assertEqual((rows[7]["last_used"], rows[1]["last_used"]), (100, None))
+        self.assertEqual((rows[8]["last_used"], rows[1]["last_used"]), (100, None))
         self.assertEqual(rows[2]["status"], "not logged in on machine 2")
         self.assertEqual(self.pick(idx, XTTS, state["last_used"])[0], HIEUNX)  # rank 1 is the next Premium
 
@@ -142,11 +142,11 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(self.reached(100, 0))
 
     def test_pool_is_fixed(self):
-        self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn"))
+        self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn"))
         self.assertFalse(set(acct.BACKUP_EMAILS) & set(acct.ROTATION_EMAILS))
         self.assertNotIn("hieule252uet@gmail.com", acct.POOL_EMAILS)
-        self.assertEqual(len(acct.ROTATION_EMAILS), 9)
-        self.assertEqual(acct.ROTATION_EMAILS[-2:], ("xtg1@xtgroup.vn", "xtg2@xtgroup.vn"))
+        self.assertEqual(len(acct.ROTATION_EMAILS), 10)
+        self.assertEqual(acct.ROTATION_EMAILS[-3:], ("xtg1@xtgroup.vn", "xtg2@xtgroup.vn", "support@xtgroup.vn"))
         self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
 
 
@@ -504,7 +504,7 @@ class MoverTests(unittest.TestCase):
             self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
 
     def test_the_standard_seat_goes_round_the_backup_accounts_in_order(self):
-        for current, nxt in ((INFO, CAREERS), (CAREERS, SUPPORT), (SUPPORT, INFO)):
+        for current, nxt in ((INFO, CAREERS), (CAREERS, INFO)):
             if os.path.exists(os.path.join(acct.store_dir(), "mover-state.json")):
                 os.unlink(os.path.join(acct.store_dir(), "mover-state.json"))
             pool = FakePool("STABLE", SALES)
@@ -516,15 +516,9 @@ class MoverTests(unittest.TestCase):
     def test_a_standard_seat_moved_by_hand_is_followed(self):
         pool = FakePool("STABLE", SALES)
         idx = pool_index(**{SALES: (50, 40)}, premium=SALES)
-        idx["accounts"][INFO]["seat"]["tier"] = None  # info lost its seat by hand
+        idx["accounts"][INFO]["seat"]["tier"] = None  # careers got the Standard seat by hand
         move = self.run_once(idx, pool)
-        self.assertEqual(pool.state["backup"], CAREERS)  # the first backup account holding Standard (all do in pool_index)
-        idx = pool_index(**{SALES: (50, 40)}, premium=SALES)
-        for e in (INFO, CAREERS):
-            idx["accounts"][e]["seat"]["tier"] = None
-        pool = FakePool("STABLE", SALES)
-        move = self.run_once(idx, pool)
-        self.assertEqual(pool.state["backup"], SUPPORT)
+        self.assertEqual(pool.state["backup"], CAREERS)
         self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
         move.assert_not_called()
 
@@ -549,7 +543,7 @@ class MoverTests(unittest.TestCase):
         self.assertIsNone(pool.state["hold"])
 
     def test_the_standard_seat_is_read_again_right_before_it_changes(self):
-        # cached readings say info holds Standard and is spent; claude.ai now says support got it by hand
+        # cached readings say info holds Standard and is spent; claude.ai now says careers got it by hand
         pool = FakePool("STABLE", SALES)
         idx = pool_index(**{SALES: (50, 40), INFO: (90, 10)}, premium=SALES)
         idx["accounts"][CAREERS]["seat"]["tier"] = None
@@ -557,26 +551,26 @@ class MoverTests(unittest.TestCase):
         def tier(meta, creds, force=False, refresh_name=None, ttl=None):
             if force:
                 email = meta["profile"]["emailAddress"]
-                meta["seat"] = {"fetchedAt": time.time(), "tier": "team_standard" if email == SUPPORT else None}
+                meta["seat"] = {"fetchedAt": time.time(), "tier": "team_standard" if email == CAREERS else None}
             return "ok"
 
         with patch.object(acct, "refresh_seat", side_effect=tier):
             move = self.run_once_raw(idx, pool)
         move.assert_not_called()  # no seat changed: the one moved by hand is followed
-        self.assertEqual(pool.state["backup"], SUPPORT)
+        self.assertEqual(pool.state["backup"], CAREERS)
 
     def test_a_backup_given_standard_by_hand_keeps_it_for_3_minutes_even_when_spent(self):
         pool = FakePool("STABLE", SALES)
-        idx = pool_index(**{SALES: (50, 40), SUPPORT: (100, 10)}, premium=SALES)
-        idx["accounts"][INFO]["seat"]["tier"] = idx["accounts"][CAREERS]["seat"]["tier"] = None
-        move = self.run_once(idx, pool)  # follows support, which is spent: kept
-        self.assertEqual(pool.state["backup"], SUPPORT)
+        idx = pool_index(**{SALES: (50, 40), CAREERS: (100, 10)}, premium=SALES)
+        idx["accounts"][INFO]["seat"]["tier"] = None
+        move = self.run_once(idx, pool)  # follows careers, which is spent: kept
+        self.assertEqual(pool.state["backup"], CAREERS)
         move.assert_not_called()
         ms = acct._mover_state()
         ms["backup_manual"]["at"] -= acct.MANUAL_BACKUP_GRACE + 1  # 3 minutes later
         acct._save_mover_state(ms)
         move = self.run_once(idx, pool)
-        self.assertEqual(move.call_args.args[0], [(SUPPORT, "No seat"), (INFO, "Standard")])
+        self.assertEqual(move.call_args.args[0], [(CAREERS, "No seat"), (INFO, "Standard")])
 
     def test_a_premium_given_by_hand_keeps_the_seat_for_3_minutes_above_the_threshold(self):
         pool = FakePool("STABLE", SALES)
@@ -869,7 +863,7 @@ class RotationPreviewTests(unittest.TestCase):
         idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {XTTS: 5, CONTACT: 9}})
         self.assertIn("Next Premium: **%s**" % HIEUNX, text)
-        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTTS, CONTACT]), text)
+        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTTS, CONTACT]), text)
 
 
 class RotationLogTests(unittest.TestCase):

@@ -964,14 +964,14 @@ def save_rotation(cfg):
 # The backup accounts are never Premium: every machine waits on the one with the Standard seat while the
 # Premium seat moves. Once it reaches the same thresholds as the Premium account, machine 2 hands the
 # Standard seat to the next backup account in the list (after the last, the first), so the ones at rest can reset.
-BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn")  # used in turn, in this order
+BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn")  # used in turn, in this order
 MANUAL_BACKUP_GRACE = 180  # seconds a backup account given the Standard seat by hand keeps it, spent or not
 MANUAL_PREMIUM_GRACE = 180  # the same for an account given the Premium seat by hand (e.g. to log it in)
 FORMER_BACKUP_EMAILS = ("hieule252uet@gmail.com",)  # 1.0.4-1.0.7: a machine still on it goes back to the pool
 ROTATION_EMAILS = (  # the accounts that take turns holding Premium (least recently first); the order breaks ties
     "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn",
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
-    "xtg1@xtgroup.vn", "xtg2@xtgroup.vn",
+    "xtg1@xtgroup.vn", "xtg2@xtgroup.vn", "support@xtgroup.vn",
 )
 POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 

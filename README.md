@@ -154,8 +154,8 @@ The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `info@`, `careers@`, `support@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 80% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the next one in this order (after support, info again), so the ones at rest can reset. Every working machine must be logged in to all three |
-| 1–9 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@`, `xtg2@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
+| — | `info@`, `careers@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 80% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the other one, so the ones at rest can reset. Every working machine must be logged in to both |
+| 1–10 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@`, `xtg2@`, `support@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
 
 ```
 Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
