@@ -16,6 +16,9 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
   POST /api/hold                     any key: {machine_id, name, account, backup, backup_tier, seconds}; a machine
                                      lends the Standard seat to `account` to log it in (409 while a seat moves or
                                      another machine holds it); machine 2 moves no seat until it is released
+  POST /api/snapshots                X-Pool-Mover-Key: {"snapshots": {email: {tier, five_hour, five_hour_reset,
+                                     seven_day, seven_day_reset, at}}}: the last usage machine 2 read of each
+                                     account while it held a seat; GET /api/state returns them as "snapshots"
   DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
   GET  /api/dashboard                Basic auth: state, machines, transitions, log (filters: machine, event)
@@ -38,7 +41,7 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
-ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
+ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "estimated", "eligible", "measured_at", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
                   "status", "read_at")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
@@ -77,6 +80,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS log_received ON log(received);
                 CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, position INTEGER, data TEXT NOT NULL,
                     updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS snapshots (email TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL);
             """)
             # 1.0.8: the backup account the machines wait on while the seat moves (machine 2 picks it)
             cols = [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]
@@ -152,6 +156,17 @@ class Store:
         with self.lock:
             rows = self.db.execute("SELECT data, updated FROM accounts ORDER BY position").fetchall()
         return [dict(json.loads(r["data"]), published=r["updated"]) for r in rows]
+
+    def set_snapshots(self, snaps):
+        now = time.time()
+        with self.lock, self.db:
+            self.db.executemany("INSERT INTO snapshots (email, data, updated) VALUES (?,?,?) ON CONFLICT(email) DO "
+                                "UPDATE SET data=excluded.data, updated=excluded.updated",
+                                [(e, json.dumps(d, ensure_ascii=False), now) for e, d in snaps.items()])
+
+    def snapshots(self):
+        with self.lock:
+            return {r["email"]: json.loads(r["data"]) for r in self.db.execute("SELECT email, data FROM snapshots")}
 
     def last_used(self):
         """{email: when it last became Premium}, from the phase history (moves by machine 2 and by hand alike)."""
@@ -244,6 +259,7 @@ def make_handler(cfg, store):
         def _state_payload(self):
             st = store.state()
             st["last_used"] = store.last_used()
+            st["snapshots"] = store.snapshots()
             st["server_time"] = time.time()
             return st
 
@@ -327,7 +343,7 @@ def make_handler(cfg, store):
 
         def do_POST(self):
             path = self._path()
-            if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold"):
+            if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold", "/api/snapshots"):
                 return self._send(404, {"error": "not found"})
             if not self._is_machine():
                 return self._send(403, {"error": "key required"})
@@ -337,6 +353,16 @@ def make_handler(cfg, store):
                 return self._send(400, {"error": str(e)})
             if path == "/api/hold":
                 return self._take_hold(b)
+            if path == "/api/snapshots":
+                if not self._is_mover():
+                    return self._send(403, {"error": "mover key required"})
+                snaps = b.get("snapshots")
+                if not isinstance(snaps, dict):
+                    return self._send(400, {"error": "snapshots must be an object"})
+                keep = ("tier", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset", "at")
+                store.set_snapshots({str(e)[:200]: {k: _cell(d.get(k)) for k in keep}
+                                     for e, d in list(snaps.items())[:50] if isinstance(d, dict)})
+                return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/accounts":
                 if not self._is_mover():
                     return self._send(403, {"error": "mover key required"})

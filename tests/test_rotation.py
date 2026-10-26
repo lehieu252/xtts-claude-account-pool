@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -75,59 +76,94 @@ class Patches:
             p.stop()
 
 
-class CandidateTests(unittest.TestCase):
-    """The next Premium is the rotation account that was Premium least recently; usage is never read."""
+def snap(five, seven, five_in=None, seven_in=None, tier="premium"):
+    """A usage snapshot; five_in/seven_in: hours until that window resets (negative: already reset)."""
+    iso = lambda h: None if h is None else dt.datetime.fromtimestamp(time.time() + h * 3600, dt.timezone.utc).isoformat()
+    return {"tier": tier, "five_hour": five, "five_hour_reset": iso(five_in),
+            "seven_day": seven, "seven_day_reset": iso(seven_in), "at": time.time() - 60}
 
-    def pick(self, idx, premium, last_used=None):
+
+class CandidateTests(unittest.TestCase):
+    """The next Premium is ranked by the last usage read of each account, estimated for now."""
+
+    def pick(self, idx, premium, snaps=None, spent=False):
         with Patches(*stored(), usage=patch.object(acct, "refresh_usage", return_value="cache")) as p:
-            got = acct._next_premium(idx, premium, last_used)
+            got = acct._next_premium(idx, premium, snaps or {}, premium_spent=spent)
             p["usage"].assert_not_called()  # accounts without a seat have no usage to read
         return got
 
-    def test_never_premium_first_then_the_oldest_then_the_list_order(self):
+    def test_lowest_7_day_then_5_hour_then_earliest_resets_then_the_list_order(self):
         idx = pool_index(premium=XTTS)
-        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600, XTG1: 800, XTG2: 900, SUPPORT: 950}
-        self.assertEqual(self.pick(idx, XTTS, used)[0], CONTACT)
-        used[CONTACT] = 700
-        self.assertEqual(self.pick(idx, XTTS, used)[0], HIEUNX)
-        self.assertEqual(self.pick(idx, XTTS, {})[0], SALES)  # all equal: the list order, top first
-        self.assertEqual(self.pick(idx, SALES, {SALES: 1, XTTS: 2})[0], CONTACT)  # never Premium beats any date
+        full = {e: snap(50, 80, 3, 90) for e in acct.ROTATION_EMAILS}  # all alike, ranked by the list order
+        self.assertEqual(self.pick(idx, XTTS, full)[0], SALES)
+        snaps = dict(full, **{KIENLT: snap(50, 45, 3, 90), HIEUNX: snap(50, 47, 3, 90)})
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], KIENLT)  # 45 < 47: no tolerance
+        snaps = dict(full, **{KIENLT: snap(30, 45, 3, 90), HIEUNX: snap(20, 45, 3, 90)})
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], HIEUNX)  # same 7-day: lower 5-hour
+        snaps = dict(full, **{KIENLT: snap(20, 45, 4, 90), HIEUNX: snap(20, 45, 1, 90)})
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], HIEUNX)  # same usage: the 5-hour that resets first
+        snaps = dict(full, **{KIENLT: snap(20, 45, 1, 50), HIEUNX: snap(20, 45, 1, 90)})
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], KIENLT)  # then the 7-day that resets first
 
-    def test_usage_does_not_matter(self):
-        idx = pool_index(**{SALES: (100, 100)}, premium=XTTS)
-        self.assertEqual(self.pick(idx, XTTS, {})[0], SALES)
-
-    def test_backup_accounts_and_premium_are_never_candidates(self):
+    def test_a_window_past_its_reset_counts_as_0_and_an_account_never_read_too(self):
         idx = pool_index(premium=XTTS)
-        name, _ = self.pick(idx, XTTS, {e: 1000 for e in acct.ROTATION_EMAILS})
-        self.assertNotIn(name, (INFO, CAREERS, XTTS))
+        snaps = {e: snap(50, 80, 3, 90) for e in acct.ROTATION_EMAILS}
+        snaps[THANGLT] = snap(95, 92, -1, -2)  # both windows reset since: 0 %
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], THANGLT)
+        self.assertEqual(acct._estimate(snaps[THANGLT], "premium")[::2], (0.0, 0.0))
+        del snaps[THANGLT]
+        snaps[SUPPORT] = snap(90, 95, 3, 90, tier="standard")  # read with a Standard seat: not a Premium reading
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], THANGLT)  # never read as Premium: 0 %, list order first
 
-    def test_unsaved_and_expired_accounts_are_skipped(self):
+    def test_an_account_at_a_threshold_ranks_last_even_with_a_low_7_day(self):
+        # 25/10: truongnv had 7-day 47 % but 5-hour 81 %; the others 7-day 90-91 %
+        idx = pool_index(premium=XTTS)
+        snaps = {e: snap(3, 91, 2, 90) for e in acct.ROTATION_EMAILS}
+        snaps[TRUONGNV] = snap(81, 47, 2, 90)
+        snaps[XTG1] = snap(10, 60, 2, 90)
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], XTG1)
+        order = acct._premium_order(snaps, XTTS)
+        self.assertEqual(order[0], XTG1)
+        self.assertIn(TRUONGNV, order[1:])
+
+    def test_when_every_account_is_at_a_threshold_premium_keeps_the_seat_until_it_uses_a_window_up(self):
+        idx = pool_index(premium=XTTS)
+        snaps = {e: snap(3, 91, 2, 90) for e in acct.ROTATION_EMAILS}
+        snaps[TRUONGNV] = snap(81, 47, 2, 90)
+        name, notes = self.pick(idx, XTTS, snaps)
+        self.assertIsNone(name)
+        self.assertIn("every account is at a threshold", notes[-1])
+        self.assertEqual(self.pick(idx, XTTS, snaps, spent=True)[0], TRUONGNV)  # P used up: the best ranked one
+        snaps = {e: snap(100, 100, 2, 90) for e in acct.ROTATION_EMAILS}
+        self.assertIsNone(self.pick(idx, XTTS, snaps, spent=True)[0])  # every one used up: nothing better
+
+    def test_backup_accounts_and_premium_are_never_candidates_and_unusable_ones_are_skipped(self):
         idx = pool_index(premium=XTTS)
         del idx["accounts"][SALES]
         with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
                      patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == CONTACT else "ok")):
-            name, skipped = acct._next_premium(idx, XTTS, {})
+            name, notes = acct._next_premium(idx, XTTS, {})
         self.assertEqual(name, HIEUNX)
-        self.assertIn("%s (not logged in on this machine)" % SALES, skipped)
-        self.assertIn("%s (login expired/revoked)" % CONTACT, skipped)
+        self.assertIn("%s (not logged in on this machine)" % SALES, notes)
+        self.assertIn("%s (login expired/revoked)" % CONTACT, notes)
 
-    def test_dashboard_rows_read_usage_only_for_the_two_accounts_with_a_seat(self):
+    def test_dashboard_rows_show_estimates_for_accounts_without_a_seat(self):
         idx = pool_index(**{XTTS: (40, 10), INFO: (5, 6)}, premium=XTTS)
         del idx["accounts"][TRUONGNV]
-        state = {"premium": XTTS, "backup": INFO, "last_used": {XTTS: 900, SALES: 300, CONTACT: 100}}
+        snaps = {e: snap(3, 91, 2, 90) for e in acct.ROTATION_EMAILS}
+        snaps.update({HIEUNX: snap(20, 30, 2, 90), SALES: snap(50, 95, -1, -1), CAREERS: snap(30, 40, 2, 90, "standard")})
+        state = {"premium": XTTS, "backup": INFO, "snapshots": snaps}
         with Patches(*stored(), usage=patch.object(acct, "refresh_usage", return_value="cache")) as p:
             rows = acct._account_rows(idx, None, state)
         self.assertEqual({c.args[0]["profile"]["emailAddress"] for c in p["usage"].call_args_list}, {XTTS, INFO})
-        self.assertEqual([r["email"] for r in rows],
-                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, CONTACT, SALES, INFO, CAREERS])
-        self.assertEqual([r["rank"] for r in rows[1:10]], [1, 2, 3, 4, 5, 6, 7, 8, 9])
-        self.assertEqual((rows[0]["five_hour"], rows[10]["five_hour"]), (40, 5))
-        self.assertEqual((rows[1]["seat"], rows[11]["seat"]), ("No seat", "No seat"))
-        self.assertNotIn("five_hour", rows[1])
-        self.assertEqual((rows[8]["last_used"], rows[1]["last_used"]), (100, None))
-        self.assertEqual(rows[2]["status"], "not logged in on machine 2")
-        self.assertEqual(self.pick(idx, XTTS, state["last_used"])[0], HIEUNX)  # rank 1 is the next Premium
+        by = {r["email"]: r for r in rows}
+        self.assertEqual([r["email"] for r in rows[:3]], [XTTS, SALES, HIEUNX])  # sales reset: 0 %
+        self.assertEqual((by[SALES]["five_hour"], by[SALES]["seven_day"], by[SALES]["eligible"]), (0.0, 0.0, True))
+        self.assertEqual((by[CONTACT]["seven_day"], by[CONTACT]["eligible"], by[CONTACT]["estimated"]), (91.0, False, True))
+        self.assertEqual((by[CAREERS]["five_hour"], by[CAREERS]["seat"]), (30.0, "No seat"))
+        self.assertEqual(by[TRUONGNV]["status"], "not logged in on machine 2")
+        self.assertEqual([r["role"] for r in rows[-2:]], ["backup", "backup"])
+        self.assertEqual(self.pick(idx, XTTS, snaps)[0], rows[1]["email"])  # rank 1 is the next Premium
 
 
 class ThresholdTests(unittest.TestCase):
@@ -385,7 +421,8 @@ class FakePool:
     """The pool server as machine 2 sees it."""
 
     def __init__(self, phase="STABLE", premium=None, workers=()):
-        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "last_used": {}, "updated_at": 100.0}
+        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "last_used": {}, "snapshots": {},
+                      "updated_at": 100.0}
         self.workers = list(workers)
         self.puts = []
 
@@ -410,6 +447,9 @@ class FakePool:
             return dict(self.state)
         if path == "/api/accounts":
             self.accounts = body["accounts"]
+            return "ok"
+        if path == "/api/snapshots":
+            self.state["snapshots"] = dict(self.state["snapshots"], **body["snapshots"])
             return "ok"
         if path == "/api/hold" and method == "DELETE":
             self.state["hold"] = None
@@ -481,13 +521,23 @@ class MoverTests(unittest.TestCase):
 
     def test_full_move_goes_through_preparing_moving_stable(self):
         pool = FakePool("STABLE", SALES, workers=[{"name": "Hiếu", "role": "worker", "active": True, "at_info": False, "last_seen": 150.0}])
-        pool.state["last_used"] = {XTTS: 500, SALES: 900, HIEUNX: 600, TRUONGNV: 700, THANGLT: 800, KIENLT: 550}
+        pool.state["snapshots"] = {e: snap(5, 60, 2, 90) for e in acct.ROTATION_EMAILS}
+        pool.state["snapshots"][CONTACT] = snap(5, 20, 2, 90)
         idx = pool_index(**{SALES: (85, 40)}, premium=SALES)
         move = self.run_once(idx, pool)
         self.assertEqual(pool.puts, [("PREPARING", SALES, CONTACT), ("MOVING", SALES, CONTACT), ("STABLE", CONTACT, None)])
-        # one Premium seat: freed first, then given to the account that was Premium least recently (never)
+        # one Premium seat: freed first, then given to the best ranked account (lowest 7-day)
         self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (CONTACT, "Premium")])
-        self.assertIn(CONTACT, pool.state["last_used"])
+        self.assertEqual(pool.state["snapshots"][SALES]["five_hour"], 85)  # P's last usage is kept
+
+    def test_no_move_while_every_account_is_at_a_threshold(self):
+        pool = FakePool("STABLE", SALES)
+        pool.state["snapshots"] = {e: snap(3, 91, 2, 90) for e in acct.ROTATION_EMAILS}
+        move = self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool)
+        move.assert_not_called()
+        self.assertEqual(pool.puts, [])
+        move = self.run_once(pool_index(**{SALES: (100, 40)}, premium=SALES), pool)  # P used up: least spent one
+        self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (XTTS, "Premium")])
 
     def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)
@@ -583,6 +633,17 @@ class MoverTests(unittest.TestCase):
         acct._save_mover_state(ms)
         move = self.run_once(idx, pool)
         self.assertEqual(move.call_args.args[0][0], (KIENLT, "No seat"))
+
+    def test_the_standard_seat_does_not_go_to_a_backup_known_to_be_spent(self):
+        pool = FakePool("STABLE", SALES)
+        pool.state["snapshots"] = {CAREERS: snap(95, 40, 2, 90, tier="standard")}  # careers' 5-hour not reset yet
+        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (85, 30)}, premium=SALES), pool)
+        move.assert_not_called()
+        self.assertEqual(pool.state["backup"], INFO)
+        pool.state["snapshots"][CAREERS] = snap(95, 40, -1, 90, tier="standard")  # its 5-hour has reset since
+        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (85, 30)}, premium=SALES), pool)
+        self.assertEqual(move.call_args.args[0], [(INFO, "No seat"), (CAREERS, "Standard")])
+        self.assertEqual(pool.state["snapshots"][INFO]["five_hour"], 85)  # info's last usage is kept
 
     def test_a_failed_backup_seat_change_keeps_the_backup_and_backs_off(self):
         pool = FakePool("PREPARING", SALES)
@@ -856,14 +917,15 @@ class RotationPreviewTests(unittest.TestCase):
                 del idx["accounts"][e]
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {}})
         self.assertIn("Premium %s: 5-hour 85%%, 7-day 46%%; threshold reached" % SALES, text)
-        self.assertIn("Next Premium: none eligible", text)
+        self.assertIn("Next Premium: none below the thresholds", text)
         self.assertIn("%s (not logged in on this machine)" % XTTS, text)
 
     def test_names_the_next_premium_and_the_order(self):
         idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
-        text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {XTTS: 5, CONTACT: 9}})
-        self.assertIn("Next Premium: **%s**" % HIEUNX, text)
-        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTTS, CONTACT]), text)
+        snaps = {XTTS: snap(5, 95, 2, 90), CONTACT: snap(10, 50, 2, 90), HIEUNX: snap(10, 50, 1, 90)}
+        text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "snapshots": snaps})
+        self.assertIn("Next Premium: **%s**" % TRUONGNV, text)  # never read: 0 %
+        self.assertIn(" → ".join([TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, HIEUNX, CONTACT, XTTS]), text)
 
 
 class RotationLogTests(unittest.TestCase):

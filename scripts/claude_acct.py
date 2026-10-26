@@ -898,15 +898,16 @@ def _print_rotation_preview(idx, live, state, machines):
         holder, "%d%%" % round(values["five_hour"]) if "five_hour" in values else "?",
         "%d%%" % round(values["seven_day"]) if "seven_day" in values else "?", reached))
     try:
-        name, skipped = _next_premium(idx, holder, (state or {}).get("last_used"), live=live)
+        name, skipped = _next_premium(idx, holder, (state or {}).get("snapshots"), live=live,
+                                      premium_spent=any(v >= 100 for v in values.values()))
     except Exception as e:
         print("Next Premium: could not be determined (%s)." % e)
         return
     if name:
-        print("Next Premium: **%s** (Premium least recently; order: %s)" % (
-            name, " → ".join(_premium_order((state or {}).get("last_used"), _email_of(idx, holder)))))
+        print("Next Premium: **%s** (order by the last usage read of each: %s)" % (
+            name, " → ".join(_premium_order((state or {}).get("snapshots"), _email_of(idx, holder)))))
     else:
-        print("Next Premium: none eligible; %s keeps the seat. Why each account is skipped:" % holder)
+        print("Next Premium: none below the thresholds; %s keeps the seat until it uses a window up. Notes:" % holder)
     for reason in skipped:
         print("- %s" % reason)
 
@@ -1214,38 +1215,115 @@ def _parse_reset(value):
         return None
 
 
-def _next_premium(idx, premium, last_used, live=None):
-    """The rotation account that was Premium least recently (never first), the list order breaking ties.
+def _snapshot(meta, tier):
+    """The usage just read of an account holding a `tier` seat ("premium" or "standard"), as kept on the pool server."""
+    usage = (meta.get("usage") or {}).get("data") or {}
+    five, seven = usage.get("five_hour") or {}, usage.get("seven_day") or {}
+    return {"tier": tier, "five_hour": five.get("utilization"), "five_hour_reset": five.get("resets_at"),
+            "seven_day": seven.get("utilization"), "seven_day_reset": seven.get("resets_at"),
+            "at": (meta.get("usage") or {}).get("fetchedAt")}
 
-    Usage is not read: accounts without a seat have none to read. Only an account machine 2 cannot use
-    (not logged in, login expired) is skipped. Returns (name, [why each other account was skipped])."""
+
+def _remember_usage(state, email, meta, tier):
+    """Keep on the pool server the last usage of an account while it holds a seat; it ranks the account once it
+    has none (its usage cannot be read then, and it only goes down when a window resets)."""
+    snap = _snapshot(meta, tier)
+    if snap["five_hour"] is None and snap["seven_day"] is None:
+        return
+    old = (state.get("snapshots") or {}).get(email) or {}
+    if all(old.get(k) == snap[k] for k in snap if k != "at"):
+        return
+    try:
+        pool_call("POST", "/api/snapshots", {"snapshots": {email: snap}}, mover=True)
+    except AcctError as e:
+        log_event("read_fail", "usage snapshot: %s" % e, every=QUIET_EVERY, key="snapshots")
+        return
+    state.setdefault("snapshots", {})[email] = snap
+
+
+def _estimate(snap, tier, now=None):
+    """(5-hour %, its reset, 7-day %, its reset) of an account now, from its last reading with a `tier` seat.
+    A window past its reset time is 0 % with no reset; an account never read with that seat is 0 %."""
+    now = time.time() if now is None else now
+    if not snap or snap.get("tier") != tier:
+        return 0.0, None, 0.0, None
+    out = []
+    for key in ("five_hour", "seven_day"):
+        value, reset = float(snap.get(key) or 0), _parse_reset(snap.get(key + "_reset"))
+        if reset is not None and reset <= now:
+            value, reset = 0.0, None
+        out += [value, reset]
+    return tuple(out)
+
+
+def _over(est):
+    return est[0] >= DAILY_THRESHOLD or est[2] >= WEEKLY_THRESHOLD
+
+
+def _rank_key(est, pos):
+    """Below the thresholds first, then the lowest 7-day, the lowest 5-hour, the earliest 5-hour reset, the
+    earliest 7-day reset (a window that is not running has none: after one that has), then the list order."""
+    inf = float("inf")
+    return (_over(est), est[2], est[0], est[1] if est[1] is not None else inf, est[3] if est[3] is not None else inf, pos)
+
+
+def _ranked(emails, snapshots, tier):
+    """[(email, estimate)] best first."""
+    rows = [(e, _estimate((snapshots or {}).get(e), tier)) for e in emails]
+    return sorted(rows, key=lambda r: _rank_key(r[1], emails.index(r[0])))
+
+
+def _pick(ranked, holder_spent):
+    """The best ranked account, or None when it would reach a threshold at once: then the holder keeps its seat,
+    unless it has used a window up, and the best one has not."""
+    if not ranked:
+        return None
+    email, est = ranked[0]
+    if not _over(est):
+        return email
+    if holder_spent and est[0] < 100 and est[2] < 100:
+        return email
+    return None
+
+
+def _usable(idx, email):
+    """None if machine 2 can switch a working machine to it, else why not."""
+    name = _saved_name(idx, email)
+    if not name:
+        return "not logged in on this machine"
+    try:
+        creds = read_stored_creds(name)
+    except AcctError:
+        return "credentials unavailable"
+    if token_state(idx["accounts"][name], creds) == "relogin":
+        return "login expired/revoked"
+    return None
+
+
+def _next_premium(idx, premium, snapshots, live=None, premium_spent=False):
+    """The best rotation account for the Premium seat, from the last usage read of each (see _rank_key).
+    Returns (name, [notes]); None when every account would reach a threshold at once."""
     premium_email = _email_of(idx, premium) or premium
-    skipped, candidates = [], []
-    for pos, email in enumerate(ROTATION_EMAILS):
+    skipped, emails = [], []
+    for email in ROTATION_EMAILS:
         if email == premium_email:
             continue
-        name = _saved_name(idx, email)
-        if not name:
-            skipped.append("%s (not logged in on this machine)" % email)
-            continue
-        try:
-            creds = read_stored_creds(name)
-        except AcctError:
-            skipped.append("%s (credentials unavailable)" % name)
-            continue
-        if token_state(idx["accounts"][name], creds) == "relogin":
-            skipped.append("%s (login expired/revoked)" % name)
-            continue
-        candidates.append(((last_used or {}).get(email) or 0, pos, name))
-    if not candidates:
-        return None, skipped
-    return min(candidates)[-1], skipped
+        why = _usable(idx, email)
+        if why:
+            skipped.append("%s (%s)" % (email, why))
+        else:
+            emails.append(email)
+    ranked = _ranked(emails, snapshots, "premium")
+    email = _pick(ranked, premium_spent)
+    if not email and ranked:
+        best, est = ranked[0]
+        skipped.append("every account is at a threshold (best: %s, 5-hour %d%%, 7-day %d%%)" % (best, est[0], est[2]))
+    return (_saved_name(idx, email) if email else None), skipped
 
 
-def _premium_order(last_used, premium=None):
+def _premium_order(snapshots, premium=None):
     """The rotation accounts other than Premium, in the order they would become Premium."""
-    return sorted((e for e in ROTATION_EMAILS if e != premium),
-                  key=lambda e: ((last_used or {}).get(e) or 0, ROTATION_EMAILS.index(e)))
+    return [e for e, _ in _ranked([e for e in ROTATION_EMAILS if e != premium], snapshots, "premium")]
 
 
 def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
@@ -1428,6 +1506,8 @@ def _rest_backup(idx, state, live):
     in BACKUP_EMAILS (its usage cannot be read without a seat, so it is not checked). Returns the state, updated or not."""
     current = _backup_of(state)
     why = _backup_spent(idx, current, live)
+    if _saved_name(idx, current) and not (why or "").startswith(("not logged", "usage unavailable", "rate limited")):
+        _remember_usage(state, current, idx["accounts"][_saved_name(idx, current)], "standard")
     # Only a reading at the limit hands the seat on; an unreadable usage or login is no reason to.
     if not why or not why.startswith("5-hour") or state.get("phase") != "STABLE":
         return state
@@ -1444,7 +1524,14 @@ def _rest_backup(idx, state, live):
     status, tier = _seat_tier(idx, _saved_name(idx, current), live, force=True)
     if status in ("ok", "cache") and tier != STANDARD_TIER:
         return _sync_backup(idx, state, live, force=True)
-    other = BACKUP_EMAILS[(BACKUP_EMAILS.index(current) + 1) % len(BACKUP_EMAILS)]
+    meta = idx["accounts"][_saved_name(idx, current)]
+    spent = any(v >= 100 for v in _usage_window_values((meta.get("usage") or {}).get("data") or {}).values())
+    others = [e for e in BACKUP_EMAILS if e != current and not _usable(idx, e)]
+    other = _pick(_ranked(others, state.get("snapshots"), "standard"), spent)
+    if not other:
+        log_event("backup_spent", "%s is at a threshold (%s) and no other backup account is below one: it keeps "
+                  "the Standard seat" % (current, why), every=QUIET_EVERY)
+        return state
     log_event("backup_change", "%s rests (%s): the Standard seat goes to %s" % (current, why, other))
     try:
         _set_seats([(current, "No seat"), (other, "Standard")], load_rotation())
@@ -1565,6 +1652,7 @@ def _mover_once(args):
         log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, premium=h_email)
         return
     usage = (meta.get("usage") or {}).get("data") or {}
+    _remember_usage(state, h_email, meta, "premium")
     if not _usage_reached_threshold(usage):
         return
     manual = _mover_state().get("premium_manual") or {}
@@ -1573,7 +1661,8 @@ def _mover_once(args):
                   "is reached" % (h_email, MANUAL_PREMIUM_GRACE // 60), every=QUIET_EVERY, premium=h_email)
         return
     fields = dict(premium=h_email, **_usage_fields(meta))
-    target, skipped = _next_premium(idx, holder, state.get("last_used"), live=live)
+    spent = any(v >= 100 for v in _usage_window_values(usage).values())
+    target, skipped = _next_premium(idx, holder, state.get("snapshots"), live=live, premium_spent=spent)
     if not target:
         log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
         return
@@ -1590,16 +1679,26 @@ def _account_rows(idx, live, state):
     order they would become Premium (rank 1 = next), then the backup accounts. Usage is read only for the two
     accounts with a seat (Premium, and the backup account with the Standard seat): the others have none."""
     premium, backup, last_used = (state.get("premium") or "").lower(), _backup_of(state), state.get("last_used") or {}
-    rank = {e: i for i, e in enumerate(_premium_order(last_used, premium), 1)}
+    snapshots = state.get("snapshots") or {}
+    order = _premium_order(snapshots, premium)
+    rank = {e: i for i, e in enumerate(order, 1)}
+    others = [e for e in BACKUP_EMAILS if e != backup]
+    backups = [backup] + [e for e, _ in _ranked(others, snapshots, "standard")]
     rows = []
-    for email in (premium,) + tuple(_premium_order(last_used, premium)) + BACKUP_EMAILS:
+    for email in (premium,) + tuple(order) + tuple(backups):
         if not email:
             continue
         role = "premium" if email == premium else "rotation" if email in ROTATION_EMAILS else "backup"
         row = {"email": email, "role": role, "last_used": last_used.get(email), "rank": rank.get(email)}
         name = _saved_name(idx, email)
         if email not in (premium, backup):
-            row.update(seat="No seat", status=None if name else "not logged in on machine 2")
+            # No seat, so no usage to read: show the estimate from its last reading with the seat it would get.
+            snap = snapshots.get(email) or {}
+            est = _estimate(snap, "premium" if role == "rotation" else "standard")
+            iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat() if t else None
+            row.update(seat="No seat", status=None if name else "not logged in on machine 2", estimated=True,
+                       eligible=not _over(est), measured_at=snap.get("at"),
+                       five_hour=est[0], five_hour_reset=iso(est[1]), seven_day=est[2], seven_day_reset=iso(est[3]))
             rows.append(row)
             continue
         if not name:

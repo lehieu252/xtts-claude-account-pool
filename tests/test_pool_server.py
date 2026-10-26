@@ -104,6 +104,16 @@ class PoolServerTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/hold", {"machine_id": "m1", "account": "c@x.vn"}, key=API)[0], 409)
         self.assertEqual(self.call("GET", "/api/state", key=API)[1]["hold"]["account"], "c@x.vn")
 
+    def test_machine_2_keeps_the_last_usage_of_each_account(self):
+        snap = {"tier": "premium", "five_hour": 82.0, "five_hour_reset": "2026-10-27T05:00:00+00:00",
+                "seven_day": 47.0, "seven_day_reset": "2026-10-30T00:00:00+00:00", "at": 100.0, "secret": "x"}
+        self.assertEqual(self.call("POST", "/api/snapshots", {"snapshots": {"a@x.vn": snap}}, key=API)[0], 403)
+        self.assertEqual(self.call("POST", "/api/snapshots", {"snapshots": {"a@x.vn": snap}}, mover=MOVER), (200, "ok"))
+        self.call("POST", "/api/snapshots", {"snapshots": {"b@x.vn": dict(snap, five_hour=1.0)}}, mover=MOVER)
+        got = self.call("GET", "/api/state", key=API)[1]["snapshots"]
+        self.assertEqual((got["a@x.vn"]["five_hour"], got["b@x.vn"]["five_hour"]), (82.0, 1.0))
+        self.assertNotIn("secret", got["a@x.vn"])
+
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "STABLE"}, mover=MOVER)[0], 400)

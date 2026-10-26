@@ -143,6 +143,9 @@ function render(d) {
 
   const alerts = [];
   if (!moverOk) alerts.push(["bad", mover ? `Máy 2 không báo trạng thái ${ago(now - mover.last_seen)}: không ai chuyển seat cho đến khi máy 2 chạy lại.` : "Máy 2 chưa kết nối lần nào."]);
+  const pool = (d.accounts || []).filter((a) => a.role === "rotation" && a.estimated);
+  if (pool.length && pool.every((a) => a.eligible === false))
+    alerts.push(["warn", "Mọi account trong pool đều đang chạm ngưỡng: Premium giữ nguyên tới khi dùng hết một cửa sổ."]);
   if (st.hold) alerts.push(["warn", st.hold.until > now
     ? `${esc(st.hold.name || "Một máy")} đang mượn seat Standard để login ${esc(st.hold.account)} (tới ${clock(st.hold.until)}): máy 2 tạm không chuyển seat.`
     : `Hết giờ mượn seat cho ${esc(st.hold.account)}: máy 2 đang trả seat lại.`]);
@@ -170,7 +173,7 @@ function render(d) {
   const accounts = d.accounts || [];
   // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
   const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
-  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo (lâu nhất chưa làm Premium lên trước)"], ["backup", "Account tạm"]];
+  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo (dưới ngưỡng trước, rồi 7d, 5h thấp nhất)"], ["backup", "Account tạm"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
     const rows = accounts.filter((a) => groupOf(a) === g);
     if (!rows.length) return "";
@@ -182,10 +185,10 @@ function render(d) {
       return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${g === "backup" && a.email !== backup ? "idle" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
-      ${g === "rotation" && a.seat === "No seat"
-        ? `<td colspan="2" class="muted">Lên Premium lần cuối: ${a.last_used ? clock(a.last_used) : "chưa từng"}</td>`
-        : `<td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>`}
-      <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || "ok")}</td></tr>`;
+      <td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
+      <td class="${a.status || a.eligible === false ? "mismatch" : "muted"}">${esc(a.status || (a.estimated
+        ? (a.eligible === false ? "đang hết · " : "") + (a.measured_at ? "ước tính, đo " + clock(a.measured_at) : "chưa đo: tính 0%")
+        : "ok"))}</td></tr>`;
     }).join("");
   }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
