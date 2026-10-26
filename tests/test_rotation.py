@@ -458,6 +458,21 @@ class MoverTests(unittest.TestCase):
         switch.assert_not_called()
         return move
 
+    def run_once_raw(self, idx, pool):
+        """Like run_once, but leaves refresh_seat to the caller's patch."""
+        with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
+                     patch.object(acct, "token_state", return_value="ok"),
+                     patch.object(acct, "refresh_usage", return_value="cache"),
+                     patch.object(acct, "load_index", return_value=idx), patch.object(acct, "save_index"),
+                     patch.object(acct, "current_name", return_value=None),
+                     patch.object(acct, "pool_call", side_effect=pool),
+                     patch.object(acct.time, "sleep"),
+                     patch.object(acct.sys, "stdout", io.StringIO()),
+                     patch.object(acct, "_spawn_log_flush"),
+                     move=patch.object(acct, "_set_seats")) as p:
+            acct._mover_once(argparse.Namespace(force=False, manual=False))
+        return p["move"]
+
     def test_below_threshold_only_publishes_the_premium_account(self):
         pool = FakePool()
         move = self.run_once(pool_index(**{SALES: (50, 40)}, premium=SALES), pool)
@@ -532,6 +547,48 @@ class MoverTests(unittest.TestCase):
         move = self.run_once(pool_index(**{SALES: (95, 40)}, premium=SALES), pool)
         self.assertEqual(move.call_args.args[0], [(XTG1, "No seat"), (INFO, "Standard")])
         self.assertIsNone(pool.state["hold"])
+
+    def test_the_standard_seat_is_read_again_right_before_it_changes(self):
+        # cached readings say info holds Standard and is spent; claude.ai now says support got it by hand
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (50, 40), INFO: (90, 10)}, premium=SALES)
+        idx["accounts"][CAREERS]["seat"]["tier"] = None
+
+        def tier(meta, creds, force=False, refresh_name=None, ttl=None):
+            if force:
+                email = meta["profile"]["emailAddress"]
+                meta["seat"] = {"fetchedAt": time.time(), "tier": "team_standard" if email == SUPPORT else None}
+            return "ok"
+
+        with patch.object(acct, "refresh_seat", side_effect=tier):
+            move = self.run_once_raw(idx, pool)
+        move.assert_not_called()  # no seat changed: the one moved by hand is followed
+        self.assertEqual(pool.state["backup"], SUPPORT)
+
+    def test_a_backup_given_standard_by_hand_keeps_it_for_3_minutes_even_when_spent(self):
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (50, 40), SUPPORT: (100, 10)}, premium=SALES)
+        idx["accounts"][INFO]["seat"]["tier"] = idx["accounts"][CAREERS]["seat"]["tier"] = None
+        move = self.run_once(idx, pool)  # follows support, which is spent: kept
+        self.assertEqual(pool.state["backup"], SUPPORT)
+        move.assert_not_called()
+        ms = acct._mover_state()
+        ms["backup_manual"]["at"] -= acct.MANUAL_BACKUP_GRACE + 1  # 3 minutes later
+        acct._save_mover_state(ms)
+        move = self.run_once(idx, pool)
+        self.assertEqual(move.call_args.args[0], [(SUPPORT, "No seat"), (INFO, "Standard")])
+
+    def test_a_premium_given_by_hand_keeps_the_seat_for_3_minutes_above_the_threshold(self):
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{KIENLT: (95, 40)}, premium=KIENLT)  # moved by hand to kienlt, already at 95%
+        move = self.run_once(idx, pool)
+        self.assertEqual(pool.state["premium"], KIENLT)
+        move.assert_not_called()
+        ms = acct._mover_state()
+        ms["premium_manual"]["at"] -= acct.MANUAL_PREMIUM_GRACE + 1
+        acct._save_mover_state(ms)
+        move = self.run_once(idx, pool)
+        self.assertEqual(move.call_args.args[0][0], (KIENLT, "No seat"))
 
     def test_a_failed_backup_seat_change_keeps_the_backup_and_backs_off(self):
         pool = FakePool("PREPARING", SALES)

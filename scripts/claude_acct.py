@@ -966,6 +966,8 @@ def save_rotation(cfg):
 # Standard seat to the next backup account in the list (after the last, the first), so the ones at rest can reset.
 BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn")  # used in turn, in this order
 BACKUP_5H_LIMIT = 85
+MANUAL_BACKUP_GRACE = 180  # seconds a backup account given the Standard seat by hand keeps it, spent or not
+MANUAL_PREMIUM_GRACE = 180  # the same for an account given the Premium seat by hand (e.g. to log it in)
 FORMER_BACKUP_EMAILS = ("hieule252uet@gmail.com",)  # 1.0.4-1.0.7: a machine still on it goes back to the pool
 ROTATION_EMAILS = (  # the accounts that take turns holding Premium (least recently first); the order breaks ties
     "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn",
@@ -1398,23 +1400,26 @@ def _end_hold(hold):
     log_event("hold_end", "gave back the seat lent to %s (not given back within the time)" % hold.get("account"))
 
 
-def _sync_backup(idx, state, live):
+def _sync_backup(idx, state, live, force=False):
     """While nothing moves: if the backup account the pool names no longer holds the Standard seat on claude.ai
     (moved by hand), publish the backup account that does. Returns the state, updated or not."""
     current = _backup_of(state)
     name = _saved_name(idx, current)
     if state.get("phase") != "STABLE" or not name:
         return state
-    status, tier = _seat_tier(idx, name, live, ttl=PREMIUM_CHECK_TTL)
+    status, tier = _seat_tier(idx, name, live, force=force, ttl=PREMIUM_CHECK_TTL)
     if status not in ("ok", "cache") or tier == STANDARD_TIER:
         return state  # unreadable: keep what the pool says
     for email in BACKUP_EMAILS:
         other = _saved_name(idx, email)
         if email == current or not other:
             continue
-        status, tier = _seat_tier(idx, other, live, ttl=PREMIUM_CHECK_TTL)
+        status, tier = _seat_tier(idx, other, live, force=force, ttl=PREMIUM_CHECK_TTL)
         if status in ("ok", "cache") and tier == STANDARD_TIER:
             log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (current, email))
+            ms = _mover_state()
+            ms["backup_manual"] = {"email": email, "at": time.time()}
+            _save_mover_state(ms)
             return _put_state("STABLE", state.get("premium"), message="backup synced with claude.ai: %s" % email, backup=email)
     log_event("no_backup_holder", "no backup account holds the Standard seat on claude.ai (the pool still names %s)" % current,
               every=QUIET_EVERY)
@@ -1432,6 +1437,16 @@ def _rest_backup(idx, state, live):
     ms = _mover_state()
     if time.time() < ms.get("backup_backoff_until", 0):
         return state
+    manual = ms.get("backup_manual") or {}
+    if manual.get("email") == current and time.time() - manual.get("at", 0) < MANUAL_BACKUP_GRACE:
+        log_event("backup_manual", "%s was given the Standard seat by hand: kept for %d min although %s" % (
+            current, MANUAL_BACKUP_GRACE // 60, why), every=QUIET_EVERY)
+        return state
+    # Like a Premium move: read the seat on claude.ai again right before changing it. A seat moved by hand
+    # since the last (cached) reading is followed instead of changed.
+    status, tier = _seat_tier(idx, _saved_name(idx, current), live, force=True)
+    if status in ("ok", "cache") and tier != STANDARD_TIER:
+        return _sync_backup(idx, state, live, force=True)
     other = BACKUP_EMAILS[(BACKUP_EMAILS.index(current) + 1) % len(BACKUP_EMAILS)]
     log_event("backup_change", "%s rests (%s): the Standard seat goes to %s" % (current, why, other))
     try:
@@ -1527,6 +1542,9 @@ def _mover_once(args):
         # first run, a seat moved by hand, or a move cut short: publish where the seat really is
         state = _put_state("STABLE", h_email, message="synced with claude.ai")
         log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
+        ms = _mover_state()
+        ms["premium_manual"] = {"email": h_email, "at": time.time()}
+        _save_mover_state(ms)
     if not state.get("backup"):
         state = _put_state("STABLE", h_email, message="backup account: %s" % _backup_of(state), backup=_backup_of(state))
     state = _sync_backup(idx, state, live)
@@ -1551,6 +1569,11 @@ def _mover_once(args):
         return
     usage = (meta.get("usage") or {}).get("data") or {}
     if not _usage_reached_threshold(usage):
+        return
+    manual = _mover_state().get("premium_manual") or {}
+    if manual.get("email") == h_email and time.time() - manual.get("at", 0) < MANUAL_PREMIUM_GRACE:
+        log_event("premium_manual", "%s was given the Premium seat by hand: kept for %d min although the threshold "
+                  "is reached" % (h_email, MANUAL_PREMIUM_GRACE // 60), every=QUIET_EVERY, premium=h_email)
         return
     fields = dict(premium=h_email, **_usage_fields(meta))
     target, skipped = _next_premium(idx, holder, state.get("last_used"), live=live)
