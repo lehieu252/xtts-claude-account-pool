@@ -186,8 +186,8 @@ function render(d) {
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
       <td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
-      <td class="${a.status || a.eligible === false ? "mismatch" : "muted"}">${esc(a.status || (a.estimated
-        ? (a.eligible === false ? "đang hết · " : "") + (a.measured_at ? "ước tính, đo " + clock(a.measured_at) : "chưa đo: tính 0%")
+      <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || (a.estimated
+        ? (a.measured_at ? "Lần cuối cập nhật: " + clock(a.measured_at) : "Chưa cập nhật")
         : "ok"))}</td></tr>`;
     }).join("");
   }).join("") : `<tr><td colspan="5" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
