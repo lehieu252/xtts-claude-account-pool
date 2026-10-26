@@ -491,10 +491,10 @@ class MoverTests(unittest.TestCase):
 
     def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)
-        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (84, 50)}, premium=SALES), pool)
-        self.assertEqual(pool.state["backup"], INFO)  # 84% < 85%: kept
+        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (79, 89)}, premium=SALES), pool)
+        self.assertEqual(pool.state["backup"], INFO)  # below 80% and 90%: kept
         move.assert_not_called()
-        for usage in ((85, 50), (10, 100)):  # 5-hour at the limit, or the week used up
+        for usage in ((80, 50), (10, 90)):  # the Premium thresholds: 5-hour 80% or 7-day 90%
             os.unlink(os.path.join(acct.store_dir(), "mover-state.json")) if os.path.exists(os.path.join(acct.store_dir(), "mover-state.json")) else None
             pool = FakePool("STABLE", SALES)
             # careers' own usage is not read (it has no seat): even a spent reading does not stop the change

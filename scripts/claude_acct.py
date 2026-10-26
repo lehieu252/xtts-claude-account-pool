@@ -962,10 +962,9 @@ def save_rotation(cfg):
 # The organization has two seats: one Premium (the rotation account at work) and one Standard (the backup
 # account in use). Every other account has no seat, so its usage cannot be read and is never needed.
 # The backup accounts are never Premium: every machine waits on the one with the Standard seat while the
-# Premium seat moves. Once it reaches BACKUP_5H_LIMIT (or any window is used up), machine 2 hands the
+# Premium seat moves. Once it reaches the same thresholds as the Premium account, machine 2 hands the
 # Standard seat to the next backup account in the list (after the last, the first), so the ones at rest can reset.
 BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn")  # used in turn, in this order
-BACKUP_5H_LIMIT = 85
 MANUAL_BACKUP_GRACE = 180  # seconds a backup account given the Standard seat by hand keeps it, spent or not
 MANUAL_PREMIUM_GRACE = 180  # the same for an account given the Premium seat by hand (e.g. to log it in)
 FORMER_BACKUP_EMAILS = ("hieule252uet@gmail.com",)  # 1.0.4-1.0.7: a machine still on it goes back to the pool
@@ -1364,7 +1363,7 @@ def _backup_of(state):
 
 
 def _backup_spent(idx, email, live, force=False):
-    """Why a backup account should rest (5-hour >= BACKUP_5H_LIMIT or a window used up), else None."""
+    """Why a backup account should rest (the Premium thresholds: 5-hour, 7-day, or a window used up), else None."""
     name = _saved_name(idx, email)
     if not name:
         return "not logged in on machine 2"
@@ -1378,11 +1377,9 @@ def _backup_spent(idx, email, live, force=False):
     values = _usage_window_values((meta.get("usage") or {}).get("data") or {})
     if "five_hour" not in values:
         return "usage unavailable"
-    if values["five_hour"] >= BACKUP_5H_LIMIT:
-        return "5-hour %d%% >= %d%%" % (round(values["five_hour"]), BACKUP_5H_LIMIT)
-    if any(v >= 100 for v in values.values()):
-        return "7-day 100%"
-    return None
+    if not _usage_reached_threshold((meta.get("usage") or {}).get("data") or {}):
+        return None
+    return "5-hour %d%%, 7-day %d%% (%s)" % (round(values["five_hour"]), round(values.get("seven_day", 0)), _trigger_text())
 
 
 def _end_hold(hold):
@@ -1432,7 +1429,7 @@ def _rest_backup(idx, state, live):
     current = _backup_of(state)
     why = _backup_spent(idx, current, live)
     # Only a reading at the limit hands the seat on; an unreadable usage or login is no reason to.
-    if not why or not why.startswith(("5-hour", "7-day")) or state.get("phase") != "STABLE":
+    if not why or not why.startswith("5-hour") or state.get("phase") != "STABLE":
         return state
     ms = _mover_state()
     if time.time() < ms.get("backup_backoff_until", 0):
@@ -1900,7 +1897,7 @@ def cmd_auto_status(args):
     print("acct plugin %s" % plugin_version())
     print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
     print("Rotates at: %s" % _trigger_text())
-    print("Backup accounts (while the seat moves, one at a time until 5-hour >= %d%%): %s" % (BACKUP_5H_LIMIT, ", ".join(BACKUP_EMAILS)))
+    print("Backup accounts (while the seat moves, one at a time until %s): %s" % (_trigger_text(), ", ".join(BACKUP_EMAILS)))
     print("Rotation: %s" % " → ".join(ROTATION_EMAILS))
     print("Pool server: %s (%s)" % (_pool_url(st), "joined" if st.get("api_key") else "not joined: /acct:auto join <key>"))
     if st.get("api_key") or st.get("mover_key"):
