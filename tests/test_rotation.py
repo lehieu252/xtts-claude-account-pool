@@ -25,8 +25,8 @@ SPEC.loader.exec_module(acct)
 os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 
-INFO, CAREERS = acct.BACKUP_EMAILS
-XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT = acct.ROTATION_EMAILS
+INFO, CAREERS, SUPPORT = acct.BACKUP_EMAILS
+XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2 = acct.ROTATION_EMAILS
 CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 
 
@@ -86,7 +86,7 @@ class CandidateTests(unittest.TestCase):
 
     def test_never_premium_first_then_the_oldest_then_the_list_order(self):
         idx = pool_index(premium=XTTS)
-        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600}
+        used = {SALES: 300, CONTACT: 100, HIEUNX: 200, TRUONGNV: 400, THANGLT: 500, KIENLT: 600, XTG1: 800, XTG2: 900}
         self.assertEqual(self.pick(idx, XTTS, used)[0], CONTACT)
         used[CONTACT] = 700
         self.assertEqual(self.pick(idx, XTTS, used)[0], HIEUNX)
@@ -120,12 +120,12 @@ class CandidateTests(unittest.TestCase):
             rows = acct._account_rows(idx, None, state)
         self.assertEqual({c.args[0]["profile"]["emailAddress"] for c in p["usage"].call_args_list}, {XTTS, INFO})
         self.assertEqual([r["email"] for r in rows],
-                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, CONTACT, SALES, INFO, CAREERS])
-        self.assertEqual([r["rank"] for r in rows[1:7]], [1, 2, 3, 4, 5, 6])
-        self.assertEqual((rows[0]["five_hour"], rows[7]["five_hour"]), (40, 5))
-        self.assertEqual((rows[1]["seat"], rows[8]["seat"]), ("No seat", "No seat"))
+                         [XTTS, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, CONTACT, SALES, INFO, CAREERS, SUPPORT])
+        self.assertEqual([r["rank"] for r in rows[1:9]], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual((rows[0]["five_hour"], rows[9]["five_hour"]), (40, 5))
+        self.assertEqual((rows[1]["seat"], rows[10]["seat"], rows[11]["seat"]), ("No seat", "No seat", "No seat"))
         self.assertNotIn("five_hour", rows[1])
-        self.assertEqual((rows[5]["last_used"], rows[1]["last_used"]), (100, None))
+        self.assertEqual((rows[7]["last_used"], rows[1]["last_used"]), (100, None))
         self.assertEqual(rows[2]["status"], "not logged in on machine 2")
         self.assertEqual(self.pick(idx, XTTS, state["last_used"])[0], HIEUNX)  # rank 1 is the next Premium
 
@@ -142,10 +142,11 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(self.reached(100, 0))
 
     def test_pool_is_fixed(self):
-        self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn"))
+        self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn"))
         self.assertFalse(set(acct.BACKUP_EMAILS) & set(acct.ROTATION_EMAILS))
         self.assertNotIn("hieule252uet@gmail.com", acct.POOL_EMAILS)
-        self.assertEqual(len(acct.ROTATION_EMAILS), 7)
+        self.assertEqual(len(acct.ROTATION_EMAILS), 9)
+        self.assertEqual(acct.ROTATION_EMAILS[-2:], ("xtg1@xtgroup.vn", "xtg2@xtgroup.vn"))
         self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
 
 
@@ -484,6 +485,36 @@ class MoverTests(unittest.TestCase):
             self.assertEqual(pool.state["backup"], CAREERS)
             self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
 
+    def test_the_standard_seat_goes_round_the_backup_accounts_in_order(self):
+        for current, nxt in ((INFO, CAREERS), (CAREERS, SUPPORT), (SUPPORT, INFO)):
+            if os.path.exists(os.path.join(acct.store_dir(), "mover-state.json")):
+                os.unlink(os.path.join(acct.store_dir(), "mover-state.json"))
+            pool = FakePool("STABLE", SALES)
+            pool.state["backup"] = current
+            move = self.run_once(pool_index(**{SALES: (50, 40), current: (90, 10)}, premium=SALES), pool)
+            self.assertEqual(move.call_args.args[0], [(current, "No seat"), (nxt, "Standard")])
+            self.assertEqual(pool.state["backup"], nxt)
+
+    def test_a_standard_seat_moved_by_hand_is_followed(self):
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (50, 40)}, premium=SALES)
+        idx["accounts"][INFO]["seat"]["tier"] = None  # info lost its seat by hand
+        move = self.run_once(idx, pool)
+        self.assertEqual(pool.state["backup"], CAREERS)  # the first backup account holding Standard (all do in pool_index)
+        idx = pool_index(**{SALES: (50, 40)}, premium=SALES)
+        for e in (INFO, CAREERS):
+            idx["accounts"][e]["seat"]["tier"] = None
+        pool = FakePool("STABLE", SALES)
+        move = self.run_once(idx, pool)
+        self.assertEqual(pool.state["backup"], SUPPORT)
+        self.assertEqual(pool.puts[-1], ("STABLE", SALES, None))
+        move.assert_not_called()
+
+    def test_the_backup_account_stays_when_it_still_holds_standard(self):
+        pool = FakePool("STABLE", SALES)
+        self.run_once(pool_index(**{SALES: (50, 40)}, premium=SALES), pool)
+        self.assertEqual((pool.state["backup"], pool.puts), (INFO, []))
+
     def test_a_failed_backup_seat_change_keeps_the_backup_and_backs_off(self):
         pool = FakePool("PREPARING", SALES)
         pool.state["target"] = CONTACT
@@ -573,7 +604,7 @@ class MoverTests(unittest.TestCase):
         with patch.object(acct, "_mover_state", return_value={}):
             self.run_once(idx, pool)
         rows = {r["email"]: r for r in pool.accounts}
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 12)
         self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
         self.assertEqual((rows[INFO]["role"], rows[INFO]["seat"]), ("backup", "Standard"))
         self.assertEqual((rows[CAREERS]["seat"], rows[XTTS]["seat"]), ("No seat", "No seat"))
@@ -739,7 +770,7 @@ class LoginAllTests(unittest.TestCase):
             out = _p["out"]
             acct.cmd_login(argparse.Namespace(name=None, email=None))
         term.assert_not_called()
-        self.assertIn("All 9 pool accounts", out.getvalue())
+        self.assertIn("All 12 pool accounts", out.getvalue())
 
 
 class RotationPreviewTests(unittest.TestCase):
@@ -763,7 +794,7 @@ class RotationPreviewTests(unittest.TestCase):
         idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "last_used": {XTTS: 5, CONTACT: 9}})
         self.assertIn("Next Premium: **%s**" % HIEUNX, text)
-        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTTS, CONTACT]), text)
+        self.assertIn(" → ".join([HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTTS, CONTACT]), text)
 
 
 class RotationLogTests(unittest.TestCase):

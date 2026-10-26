@@ -53,6 +53,7 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # unofficial; organization.seat_tier is the member's seat
 SEAT_LABELS = {"team_standard": "Standard", "team_tier_1": "Premium"}
 PREMIUM_TIER = "team_tier_1"
+STANDARD_TIER = "team_standard"
 EXPIRY_MARGIN_MS = 60_000
 # Claude Code caches Keychain reads for 30 s (UOt=30000 in the 2.1.29x bundle). After that, a
 # running session sees the new token and switches to it, so waiting this long after a swap
@@ -959,13 +960,14 @@ def save_rotation(cfg):
 # account in use). Every other account has no seat, so its usage cannot be read and is never needed.
 # The backup accounts are never Premium: every machine waits on the one with the Standard seat while the
 # Premium seat moves. Once it reaches BACKUP_5H_LIMIT (or any window is used up), machine 2 hands the
-# Standard seat to the other backup account, so the 5-hour window of the one at rest can reset.
-BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn")
+# Standard seat to the next backup account in the list (after the last, the first), so the ones at rest can reset.
+BACKUP_EMAILS = ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn")  # used in turn, in this order
 BACKUP_5H_LIMIT = 85
 FORMER_BACKUP_EMAILS = ("hieule252uet@gmail.com",)  # 1.0.4-1.0.7: a machine still on it goes back to the pool
 ROTATION_EMAILS = (  # the accounts that take turns holding Premium (least recently first); the order breaks ties
     "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn",
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
+    "xtg1@xtgroup.vn", "xtg2@xtgroup.vn",
 )
 POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 
@@ -1374,9 +1376,32 @@ def _backup_spent(idx, email, live, force=False):
     return None
 
 
+def _sync_backup(idx, state, live):
+    """While nothing moves: if the backup account the pool names no longer holds the Standard seat on claude.ai
+    (moved by hand), publish the backup account that does. Returns the state, updated or not."""
+    current = _backup_of(state)
+    name = _saved_name(idx, current)
+    if state.get("phase") != "STABLE" or not name:
+        return state
+    status, tier = _seat_tier(idx, name, live, ttl=PREMIUM_CHECK_TTL)
+    if status not in ("ok", "cache") or tier == STANDARD_TIER:
+        return state  # unreadable: keep what the pool says
+    for email in BACKUP_EMAILS:
+        other = _saved_name(idx, email)
+        if email == current or not other:
+            continue
+        status, tier = _seat_tier(idx, other, live, ttl=PREMIUM_CHECK_TTL)
+        if status in ("ok", "cache") and tier == STANDARD_TIER:
+            log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (current, email))
+            return _put_state("STABLE", state.get("premium"), message="backup synced with claude.ai: %s" % email, backup=email)
+    log_event("no_backup_holder", "no backup account holds the Standard seat on claude.ai (the pool still names %s)" % current,
+              every=QUIET_EVERY)
+    return state
+
+
 def _rest_backup(idx, state, live):
-    """While nothing moves: once the backup account with the Standard seat is spent, give the seat to the other
-    one (its usage cannot be read without a seat, so it is not checked). Returns the state, updated or not."""
+    """While nothing moves: once the backup account with the Standard seat is spent, give the seat to the next one
+    in BACKUP_EMAILS (its usage cannot be read without a seat, so it is not checked). Returns the state, updated or not."""
     current = _backup_of(state)
     why = _backup_spent(idx, current, live)
     # Only a reading at the limit hands the seat on; an unreadable usage or login is no reason to.
@@ -1385,7 +1410,7 @@ def _rest_backup(idx, state, live):
     ms = _mover_state()
     if time.time() < ms.get("backup_backoff_until", 0):
         return state
-    other = next(e for e in BACKUP_EMAILS if e != current)
+    other = BACKUP_EMAILS[(BACKUP_EMAILS.index(current) + 1) % len(BACKUP_EMAILS)]
     log_event("backup_change", "%s rests (%s): the Standard seat goes to %s" % (current, why, other))
     try:
         _set_seats([(current, "No seat"), (other, "Standard")], load_rotation())
@@ -1474,6 +1499,7 @@ def _mover_once(args):
         log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
     if not state.get("backup"):
         state = _put_state("STABLE", h_email, message="backup account: %s" % _backup_of(state), backup=_backup_of(state))
+    state = _sync_backup(idx, state, live)
     state = _rest_backup(idx, state, live)
     _publish_accounts(idx, live, state)
     test = st.get("test_move") or {}
