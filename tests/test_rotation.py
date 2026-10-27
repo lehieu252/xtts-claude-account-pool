@@ -470,6 +470,7 @@ class FakePool:
             return dict(self.state)
         if path == "/api/accounts":
             self.accounts = body["accounts"]
+            self.published = getattr(self, "published", []) + [(self.state["phase"], self.state["premium"], body["accounts"])]
             return "ok"
         if path == "/api/request/result":
             self.state["request"] = dict(self.state["request"], status=body["status"], message=body.get("message"))
@@ -565,6 +566,34 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(pool.puts, [])
         move = self.run_once(pool_index(**{SALES: (100, 40)}, premium=SALES), pool)  # P used up: least spent one
         self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (XTTS, "Premium")])
+
+    def test_the_dashboard_table_shows_the_reading_behind_a_move_and_the_seats_after_it(self):
+        pool = FakePool("STABLE", SALES)
+        acct._save_mover_state({"accounts_at": time.time()})  # a table was just sent: the reading forces a new one
+        self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool)
+        phases = [(ph, prem) for ph, prem, _ in pool.published]
+        self.assertEqual(phases[0], ("STABLE", SALES))  # sent before PREPARING, with sales at 85 %
+        first = {r["email"]: r for r in pool.published[0][2]}
+        self.assertEqual(first[SALES]["five_hour"], 85)
+        self.assertEqual(phases[-1], ("STABLE", XTTS))  # and again once the seat is on the new Premium
+        self.assertEqual(pool.published[-1][2][0]["email"], XTTS)
+
+    def test_one_usage_reading_per_minute_and_seats_every_5_minutes(self):
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (10, 10)}, premium=SALES)
+        with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
+                     patch.object(acct, "token_state", return_value="ok"),
+                     patch.object(acct, "load_index", return_value=idx), patch.object(acct, "save_index"),
+                     patch.object(acct, "current_name", return_value=None),
+                     patch.object(acct, "pool_call", side_effect=pool),
+                     patch.object(acct.sys, "stdout", io.StringIO()),
+                     patch.object(acct, "_spawn_log_flush"),
+                     usage=patch.object(acct, "refresh_usage", return_value="cache"),
+                     seat=patch.object(acct, "refresh_seat", return_value="cache")) as p:
+            acct._mover_once(argparse.Namespace(force=False, manual=False))
+        self.assertEqual({c.kwargs.get("ttl") for c in p["usage"].call_args_list}, {acct.USAGE_READ_EVERY})
+        self.assertEqual({c.kwargs.get("ttl") for c in p["seat"].call_args_list}, {acct.SEAT_CHECK_EVERY})
+        self.assertEqual((acct.USAGE_READ_EVERY, acct.SEAT_CHECK_EVERY), (60, 300))
 
     def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)

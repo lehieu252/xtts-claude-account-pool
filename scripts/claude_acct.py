@@ -980,7 +980,12 @@ POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 80
 WEEKLY_THRESHOLD = 90
-PREMIUM_CHECK_TTL = 60  # seconds; how stale the Premium account's seat and usage may be (the usage API limits each account)
+# Machine 2 reads the usage of the two accounts with a seat (Premium, and the backup account with the Standard
+# seat) once per USAGE_READ_EVERY: that one reading serves the threshold check, the usage kept for ranking and the
+# dashboard table (the usage API limits each account). Seats are read every SEAT_CHECK_EVERY to notice a seat
+# moved by hand, and always again right before machine 2 changes one.
+USAGE_READ_EVERY = 60
+SEAT_CHECK_EVERY = 300
 
 # Pool server (server/pool_server.py on the xtts server): the shared phase, the machines, the log.
 POOL_URL = "https://xtts.xtgroup.vn/pool"
@@ -1357,7 +1362,7 @@ def _seat_holder(idx, live, first=None, force=False):
         names.remove(first)
         names.insert(0, first)
     for name in names:
-        status, tier = _seat_tier(idx, name, live, force=force, ttl=PREMIUM_CHECK_TTL)
+        status, tier = _seat_tier(idx, name, live, force=force, ttl=SEAT_CHECK_EVERY)
         if status in ("ok", "cache") and tier == PREMIUM_TIER:
             return name
     return None
@@ -1460,7 +1465,8 @@ def _backup_spent(idx, email, live, force=False):
         return "not logged in on machine 2"
     meta = idx["accounts"][name]
     try:
-        status = refresh_usage(meta, read_stored_creds(name), force=force, refresh_name=None if name == live else name)
+        status = refresh_usage(meta, read_stored_creds(name), force=force, refresh_name=None if name == live else name,
+                               ttl=USAGE_READ_EVERY)
     except AcctError as e:
         return str(e)
     if status not in ("ok", "cache"):
@@ -1537,14 +1543,14 @@ def _sync_backup(idx, state, live, force=False):
     name = _saved_name(idx, current)
     if state.get("phase") != "STABLE" or not name:
         return state
-    status, tier = _seat_tier(idx, name, live, force=force, ttl=PREMIUM_CHECK_TTL)
+    status, tier = _seat_tier(idx, name, live, force=force, ttl=SEAT_CHECK_EVERY)
     if status not in ("ok", "cache") or tier == STANDARD_TIER:
         return state  # unreadable: keep what the pool says
     for email in BACKUP_EMAILS:
         other = _saved_name(idx, email)
         if email == current or not other:
             continue
-        status, tier = _seat_tier(idx, other, live, force=force, ttl=PREMIUM_CHECK_TTL)
+        status, tier = _seat_tier(idx, other, live, force=force, ttl=SEAT_CHECK_EVERY)
         if status in ("ok", "cache") and tier == STANDARD_TIER:
             log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (current, email))
             ms = _mover_state()
@@ -1621,6 +1627,17 @@ def _move_seat(idx, premium, target, live, fields, state=None, reason="threshold
     p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
     backup = _backup_of(state or {})
     log_event("move_start", "%s; backup %s" % (reason, backup), target=t_email, **fields)
+    _publish_accounts(idx, live, state or {}, force=True)  # the dashboard shows the reading behind this move
+    try:
+        return _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email, t_email)
+    finally:
+        try:  # and the seats as they are once it is over, without waiting for the next run
+            _publish_accounts(idx, live, pool_call("GET", "/api/state", mover=True), force=True)
+        except AcctError:
+            pass
+
+
+def _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email, t_email):
     prepared = _put_state("PREPARING", p_email, t_email, reason, backup=backup)
     waiting = _wait_for_backup(prepared["updated_at"], backup)
     if waiting:
@@ -1694,7 +1711,6 @@ def _mover_once(args):
         _run_request(idx, state, request, holder, live)
         return
     state = _rest_backup(idx, state, live)
-    _publish_accounts(idx, live, state)
     test = st.get("test_move") or {}
     if test.get("target") and time.time() < test.get("until", 0):
         # One seat move asked by `auto test-move`, whatever the usage: the full flow, on demand.
@@ -1707,8 +1723,10 @@ def _mover_once(args):
         return
     meta = idx["accounts"][holder]
     status = refresh_usage(meta, read_stored_creds(holder), force=args.force,
-                           refresh_name=None if holder == live else holder, ttl=PREMIUM_CHECK_TTL)
+                           refresh_name=None if holder == live else holder, ttl=USAGE_READ_EVERY)
     save_index(idx)
+    # Right after the reading, so the dashboard shows the figures the threshold check uses.
+    _publish_accounts(idx, live, state, force=status == "ok")
     if status not in ("ok", "cache"):
         log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, premium=h_email)
         return
@@ -1770,8 +1788,9 @@ def _account_rows(idx, live, state):
         meta = idx["accounts"][name]
         try:
             creds = read_stored_creds(name)
-            status = refresh_usage(meta, creds, refresh_name=None if name == live else name)
-            refresh_seat(meta, creds, refresh_name=None if name == live else name)
+            # the readings of this run (USAGE_READ_EVERY / SEAT_CHECK_EVERY): no extra request for the table
+            status = refresh_usage(meta, creds, refresh_name=None if name == live else name, ttl=USAGE_READ_EVERY)
+            refresh_seat(meta, creds, refresh_name=None if name == live else name, ttl=SEAT_CHECK_EVERY)
             token = token_state(meta, creds)
         except AcctError as e:
             status, token = str(e), "relogin"
