@@ -160,10 +160,11 @@ The accounts are fixed in `scripts/claude_acct.py`:
 ```
 Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
 Target (the next Premium):      ranked by the last usage machine 2 read of each account while it held
-                                the seat (kept on the pool server; a window past its reset counts 0 %,
-                                an account never read counts 0 %):
+                                the seat (kept on the pool server; a window past its reset counts 0 %):
                                 below the thresholds first → min 7d → min 5h → earliest 5h reset
-                                → earliest 7d reset → fixed order
+                                → earliest 7d reset → fixed order; then the ones at a threshold;
+                                an account never measured comes last and is taken only with the
+                                dashboard "Dùng" button
                                 (skips accounts not logged in on machine 2 or with an expired login)
 No target below the thresholds: P keeps the seat until it uses a window up, then the best ranked one
 Backup accounts:                the same ranking (readings taken with the Standard seat)

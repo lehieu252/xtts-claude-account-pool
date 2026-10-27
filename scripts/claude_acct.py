@@ -905,7 +905,7 @@ def _print_rotation_preview(idx, live, state, machines):
         return
     if name:
         print("Next Premium: **%s** (order by the last usage read of each: %s)" % (
-            name, " → ".join(_premium_order((state or {}).get("snapshots"), _email_of(idx, holder)))))
+            name, " → ".join(_premium_order((state or {}).get("snapshots"), _email_of(idx, holder), idx))))
     else:
         print("Next Premium: none below the thresholds; %s keeps the seat until it uses a window up. Notes:" % holder)
     for reason in skipped:
@@ -1243,11 +1243,11 @@ def _remember_usage(state, email, meta, tier):
 
 
 def _estimate(snap, tier, now=None):
-    """(5-hour %, its reset, 7-day %, its reset) of an account now, from its last reading with a `tier` seat.
-    A window past its reset time is 0 % with no reset; an account never read with that seat is 0 %."""
+    """(5-hour %, its reset, 7-day %, its reset) of an account now, from its last reading with a `tier` seat,
+    or None if it was never read with that seat. A window past its reset time is 0 % with no reset."""
     now = time.time() if now is None else now
     if not snap or snap.get("tier") != tier:
-        return 0.0, None, 0.0, None
+        return None
     out = []
     for key in ("five_hour", "seven_day"):
         value, reset = float(snap.get(key) or 0), _parse_reset(snap.get(key + "_reset"))
@@ -1258,25 +1258,33 @@ def _estimate(snap, tier, now=None):
 
 
 def _over(est):
-    return est[0] >= DAILY_THRESHOLD or est[2] >= WEEKLY_THRESHOLD
+    return est is not None and (est[0] >= DAILY_THRESHOLD or est[2] >= WEEKLY_THRESHOLD)
 
 
-def _rank_key(est, pos):
-    """Below the thresholds first, then the lowest 7-day, the lowest 5-hour, the earliest 5-hour reset, the
-    earliest 7-day reset (a window that is not running has none: after one that has), then the list order."""
+def _rank_key(est, pos, usable=True):
+    """Measured and below the thresholds first, then measured at a threshold, then never measured (only taken
+    with the dashboard button), then not usable by machine 2; within a group the lowest 7-day, the lowest
+    5-hour, the earliest 5-hour reset, the earliest 7-day reset (a window not running has none: after one
+    that has), then the list order."""
     inf = float("inf")
-    return (_over(est), est[2], est[0], est[1] if est[1] is not None else inf, est[3] if est[3] is not None else inf, pos)
+    if not usable:
+        return (3, 0, 0, inf, inf, pos)
+    if est is None:
+        return (2, 0, 0, inf, inf, pos)
+    return (1 if _over(est) else 0, est[2], est[0], est[1] if est[1] is not None else inf,
+            est[3] if est[3] is not None else inf, pos)
 
 
-def _ranked(emails, snapshots, tier):
-    """[(email, estimate)] best first."""
+def _ranked(emails, snapshots, tier, idx=None):
+    """[(email, estimate or None)] best first. With idx, accounts machine 2 cannot use go last."""
     rows = [(e, _estimate((snapshots or {}).get(e), tier)) for e in emails]
-    return sorted(rows, key=lambda r: _rank_key(r[1], emails.index(r[0])))
+    return sorted(rows, key=lambda r: _rank_key(r[1], emails.index(r[0]), idx is None or not _usable(idx, r[0])))
 
 
 def _pick(ranked, holder_spent):
-    """The best ranked account, or None when it would reach a threshold at once: then the holder keeps its seat,
-    unless it has used a window up, and the best one has not."""
+    """The best measured account, or None when it would reach a threshold at once: then the holder keeps its
+    seat, unless it has used a window up, and the best one has not. Never-measured accounts are not taken."""
+    ranked = [r for r in ranked if r[1] is not None]
     if not ranked:
         return None
     email, est = ranked[0]
@@ -1316,15 +1324,19 @@ def _next_premium(idx, premium, snapshots, live=None, premium_spent=False):
             emails.append(email)
     ranked = _ranked(emails, snapshots, "premium")
     email = _pick(ranked, premium_spent)
-    if not email and ranked:
-        best, est = ranked[0]
+    measured = [r for r in ranked if r[1] is not None]
+    if not email and measured:
+        best, est = measured[0]
         skipped.append("every account is at a threshold (best: %s, 5-hour %d%%, 7-day %d%%)" % (best, est[0], est[2]))
+    unmeasured = [e for e, est in ranked if est is None]
+    if unmeasured:
+        skipped.append("never measured, taken only with the dashboard button: %s" % ", ".join(unmeasured))
     return (_saved_name(idx, email) if email else None), skipped
 
 
-def _premium_order(snapshots, premium=None):
+def _premium_order(snapshots, premium=None, idx=None):
     """The rotation accounts other than Premium, in the order they would become Premium."""
-    return [e for e, _ in _ranked([e for e in ROTATION_EMAILS if e != premium], snapshots, "premium")]
+    return [e for e, _ in _ranked([e for e in ROTATION_EMAILS if e != premium], snapshots, "premium", idx)]
 
 
 def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
@@ -1729,10 +1741,10 @@ def _account_rows(idx, live, state):
     accounts with a seat (Premium, and the backup account with the Standard seat): the others have none."""
     premium, backup, last_used = (state.get("premium") or "").lower(), _backup_of(state), state.get("last_used") or {}
     snapshots = state.get("snapshots") or {}
-    order = _premium_order(snapshots, premium)
+    order = _premium_order(snapshots, premium, idx)
     rank = {e: i for i, e in enumerate(order, 1)}
     others = [e for e in BACKUP_EMAILS if e != backup]
-    backups = [backup] + [e for e, _ in _ranked(others, snapshots, "standard")]
+    backups = [backup] + [e for e, _ in _ranked(others, snapshots, "standard", idx)]
     rows = []
     for email in (premium,) + tuple(order) + tuple(backups):
         if not email:
@@ -1746,8 +1758,10 @@ def _account_rows(idx, live, state):
             est = _estimate(snap, "premium" if role == "rotation" else "standard")
             iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat() if t else None
             row.update(seat="No seat", status=None if name else "not logged in on machine 2", estimated=True,
-                       eligible=not _over(est), measured_at=snap.get("at"),
-                       five_hour=est[0], five_hour_reset=iso(est[1]), seven_day=est[2], seven_day_reset=iso(est[3]))
+                       measured_at=snap.get("at") if est else None)
+            if est:  # never measured: no figure (it is not 0 %)
+                row.update(eligible=not _over(est), five_hour=est[0], five_hour_reset=iso(est[1]),
+                           seven_day=est[2], seven_day_reset=iso(est[3]))
             rows.append(row)
             continue
         if not name:

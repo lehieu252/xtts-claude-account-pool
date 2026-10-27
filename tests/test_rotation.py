@@ -105,15 +105,22 @@ class CandidateTests(unittest.TestCase):
         snaps = dict(full, **{KIENLT: snap(20, 45, 1, 50), HIEUNX: snap(20, 45, 1, 90)})
         self.assertEqual(self.pick(idx, XTTS, snaps)[0], KIENLT)  # then the 7-day that resets first
 
-    def test_a_window_past_its_reset_counts_as_0_and_an_account_never_read_too(self):
+    def test_a_window_past_its_reset_counts_as_0_and_a_never_measured_account_is_never_taken(self):
         idx = pool_index(premium=XTTS)
         snaps = {e: snap(50, 80, 3, 90) for e in acct.ROTATION_EMAILS}
         snaps[THANGLT] = snap(95, 92, -1, -2)  # both windows reset since: 0 %
         self.assertEqual(self.pick(idx, XTTS, snaps)[0], THANGLT)
         self.assertEqual(acct._estimate(snaps[THANGLT], "premium")[::2], (0.0, 0.0))
-        del snaps[THANGLT]
-        snaps[SUPPORT] = snap(90, 95, 3, 90, tier="standard")  # read with a Standard seat: not a Premium reading
-        self.assertEqual(self.pick(idx, XTTS, snaps)[0], THANGLT)  # never read as Premium: 0 %, list order first
+        del snaps[THANGLT]  # never measured
+        snaps[SUPPORT] = snap(0, 0, tier="standard")  # read with a Standard seat: not a Premium reading
+        name, notes = self.pick(idx, XTTS, snaps)
+        self.assertEqual(name, SALES)
+        self.assertIn("never measured, taken only with the dashboard button: %s, %s" % (THANGLT, SUPPORT), notes)
+        self.assertEqual(acct._premium_order(snaps, XTTS)[-2:], [THANGLT, SUPPORT])  # last, after spent ones
+        snaps = {e: snap(95, 95, 3, 90) for e in acct.ROTATION_EMAILS}
+        del snaps[KIENLT]
+        self.assertIsNone(self.pick(idx, XTTS, snaps, spent=False)[0])  # every measured one spent: not kienlt
+        self.assertIsNone(self.pick(idx, XTTS, {})[0])
 
     def test_an_account_at_a_threshold_ranks_last_even_with_a_low_7_day(self):
         # 25/10: truongnv had 7-day 47 % but 5-hour 81 %; the others 7-day 90-91 %
@@ -142,10 +149,23 @@ class CandidateTests(unittest.TestCase):
         del idx["accounts"][SALES]
         with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
                      patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == CONTACT else "ok")):
-            name, notes = acct._next_premium(idx, XTTS, {})
+            name, notes = acct._next_premium(idx, XTTS, {e: snap(0, 0) for e in acct.ROTATION_EMAILS})
         self.assertEqual(name, HIEUNX)
         self.assertIn("%s (not logged in on this machine)" % SALES, notes)
         self.assertIn("%s (login expired/revoked)" % CONTACT, notes)
+
+    def test_dashboard_lists_never_measured_then_not_logged_in_accounts_last_without_figures(self):
+        idx = pool_index(premium=XTTS)
+        del idx["accounts"][XTG3]
+        snaps = {e: snap(10, 95, 2, 90) for e in acct.ROTATION_EMAILS}  # all spent
+        for e in (XTG3, XTG4):
+            del snaps[e]
+        with Patches(*stored()):
+            rows = acct._account_rows(idx, None, {"premium": XTTS, "backup": INFO, "snapshots": snaps})
+        pool = [r for r in rows if r["role"] == "rotation"]
+        self.assertEqual([r["email"] for r in pool[-2:]], [XTG4, XTG3])  # never measured, then not logged in
+        self.assertEqual((pool[-1]["five_hour"] if "five_hour" in pool[-1] else None, pool[-2].get("seven_day")), (None, None))
+        self.assertEqual(pool[-1]["status"], "not logged in on machine 2")
 
     def test_dashboard_rows_show_estimates_for_accounts_without_a_seat(self):
         idx = pool_index(**{XTTS: (40, 10), INFO: (5, 6)}, premium=XTTS)
@@ -421,8 +441,11 @@ class FakePool:
     """The pool server as machine 2 sees it."""
 
     def __init__(self, phase="STABLE", premium=None, workers=()):
-        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "last_used": {}, "snapshots": {},
+        self.state = {"phase": phase, "premium": premium, "target": None, "backup": INFO, "last_used": {},
                       "updated_at": 100.0}
+        # every account measured at 0 % unless a test says otherwise (a never-measured one is not taken)
+        self.state["snapshots"] = {e: snap(0, 0, tier="premium" if e in acct.ROTATION_EMAILS else "standard")
+                                   for e in acct.POOL_EMAILS}
         self.workers = list(workers)
         self.puts = []
 
@@ -957,8 +980,8 @@ class RotationPreviewTests(unittest.TestCase):
         idx = pool_index(**{SALES: (85, 46)}, premium=SALES)
         snaps = {XTTS: snap(5, 95, 2, 90), CONTACT: snap(10, 50, 2, 90), HIEUNX: snap(10, 50, 1, 90)}
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "snapshots": snaps})
-        self.assertIn("Next Premium: **%s**" % TRUONGNV, text)  # never read: 0 %
-        self.assertIn(" → ".join([TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTG3, XTG4, XTG5, HIEUNX, CONTACT, XTTS]), text)
+        self.assertIn("Next Premium: **%s**" % HIEUNX, text)  # never measured ones are not taken
+        self.assertIn(" → ".join([HIEUNX, CONTACT, XTTS, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTG3, XTG4, XTG5]), text)
 
 
 class RotationLogTests(unittest.TestCase):
