@@ -973,6 +973,7 @@ ROTATION_EMAILS = (  # the accounts that take turns holding Premium (least recen
     "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn",
     "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
     "xtg1@xtgroup.vn", "xtg2@xtgroup.vn", "support@xtgroup.vn",
+    "xtg3@xtgroup.vn", "xtg4@xtgroup.vn", "xtg5@xtgroup.vn",
 )
 POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 

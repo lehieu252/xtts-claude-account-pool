@@ -27,7 +27,7 @@ os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 
 INFO, CAREERS = acct.BACKUP_EMAILS
-XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT = acct.ROTATION_EMAILS
+XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTG3, XTG4, XTG5 = acct.ROTATION_EMAILS
 CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 
 
@@ -181,8 +181,8 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn"))
         self.assertFalse(set(acct.BACKUP_EMAILS) & set(acct.ROTATION_EMAILS))
         self.assertNotIn("hieule252uet@gmail.com", acct.POOL_EMAILS)
-        self.assertEqual(len(acct.ROTATION_EMAILS), 10)
-        self.assertEqual(acct.ROTATION_EMAILS[-3:], ("xtg1@xtgroup.vn", "xtg2@xtgroup.vn", "support@xtgroup.vn"))
+        self.assertEqual(len(acct.ROTATION_EMAILS), 13)
+        self.assertEqual(acct.ROTATION_EMAILS[-3:], ("xtg3@xtgroup.vn", "xtg4@xtgroup.vn", "xtg5@xtgroup.vn"))
         self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
 
 
@@ -767,7 +767,7 @@ class MoverTests(unittest.TestCase):
         with patch.object(acct, "_mover_state", return_value={}):
             self.run_once(idx, pool)
         rows = {r["email"]: r for r in pool.accounts}
-        self.assertEqual(len(rows), 12)
+        self.assertEqual(len(rows), 15)
         self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
         self.assertEqual((rows[INFO]["role"], rows[INFO]["seat"]), ("backup", "Standard"))
         self.assertEqual((rows[CAREERS]["seat"], rows[XTTS]["seat"]), ("No seat", "No seat"))
@@ -933,7 +933,7 @@ class LoginAllTests(unittest.TestCase):
             out = _p["out"]
             acct.cmd_login(argparse.Namespace(name=None, email=None))
         term.assert_not_called()
-        self.assertIn("All 12 pool accounts", out.getvalue())
+        self.assertIn("All 15 pool accounts", out.getvalue())
 
 
 class RotationPreviewTests(unittest.TestCase):
@@ -958,7 +958,7 @@ class RotationPreviewTests(unittest.TestCase):
         snaps = {XTTS: snap(5, 95, 2, 90), CONTACT: snap(10, 50, 2, 90), HIEUNX: snap(10, 50, 1, 90)}
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "snapshots": snaps})
         self.assertIn("Next Premium: **%s**" % TRUONGNV, text)  # never read: 0 %
-        self.assertIn(" → ".join([TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, HIEUNX, CONTACT, XTTS]), text)
+        self.assertIn(" → ".join([TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, SUPPORT, XTG3, XTG4, XTG5, HIEUNX, CONTACT, XTTS]), text)
 
 
 class RotationLogTests(unittest.TestCase):
