@@ -177,7 +177,7 @@ No target:                      P keeps the seat, the reason is logged
 
 **One seat move, step by step.**
 
-1. Machine 2 runs every 30 s. Once a minute it reads the usage of P and of the backup account with the Standard seat (one request per account per minute; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 5 minutes to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
+1. Machine 2 runs every 30 s. Once a minute it reads the usage of P and of the backup account with the Standard seat (one request per account per minute; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 2 minutes to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
 2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
 3. Every working machine, before its next request: sees `PREPARING`, **switches account to the backup account** and reports it.
 4. Machine 2 waits until every machine seen in the last 5 minutes reports the backup account (at most 120 s; idle machines are not waited for).

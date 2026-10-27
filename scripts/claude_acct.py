@@ -985,7 +985,7 @@ WEEKLY_THRESHOLD = 90
 # dashboard table (the usage API limits each account). Seats are read every SEAT_CHECK_EVERY to notice a seat
 # moved by hand, and always again right before machine 2 changes one.
 USAGE_READ_EVERY = 60
-SEAT_CHECK_EVERY = 300
+SEAT_CHECK_EVERY = 120
 
 # Pool server (server/pool_server.py on the xtts server): the shared phase, the machines, the log.
 POOL_URL = "https://xtts.xtgroup.vn/pool"

@@ -181,5 +181,5 @@ const context = browser.contexts()[0];
     }
     throw error;
   }
-  console.log(`Seats set: ${changes.map((c) => `${c.email} → ${c.tier}`).join(", ")}.`);
+  console.log(`Seats set: ${changes.map((c) => `${c.email} -> ${c.tier}`).join(", ")}.`);
 process.exit(0); // Disconnect from CDP without closing the user's Chrome instance.

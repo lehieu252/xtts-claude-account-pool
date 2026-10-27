@@ -578,7 +578,7 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(phases[-1], ("STABLE", XTTS))  # and again once the seat is on the new Premium
         self.assertEqual(pool.published[-1][2][0]["email"], XTTS)
 
-    def test_one_usage_reading_per_minute_and_seats_every_5_minutes(self):
+    def test_one_usage_reading_per_minute_and_seats_every_2_minutes(self):
         pool = FakePool("STABLE", SALES)
         idx = pool_index(**{SALES: (10, 10)}, premium=SALES)
         with Patches(patch.object(acct, "read_stored_creds", return_value=CREDS),
@@ -593,7 +593,7 @@ class MoverTests(unittest.TestCase):
             acct._mover_once(argparse.Namespace(force=False, manual=False))
         self.assertEqual({c.kwargs.get("ttl") for c in p["usage"].call_args_list}, {acct.USAGE_READ_EVERY})
         self.assertEqual({c.kwargs.get("ttl") for c in p["seat"].call_args_list}, {acct.SEAT_CHECK_EVERY})
-        self.assertEqual((acct.USAGE_READ_EVERY, acct.SEAT_CHECK_EVERY), (60, 300))
+        self.assertEqual((acct.USAGE_READ_EVERY, acct.SEAT_CHECK_EVERY), (60, 120))
 
     def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)
