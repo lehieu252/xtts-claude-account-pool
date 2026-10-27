@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, urlparse
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PHASES = ("STABLE", "PREPARING", "MOVING")
 ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
-MOVER_STALE_SEC = 120  # the dashboard flags machine 2 after this long without a report
+MOVER_STALE_SEC = 300  # the dashboard flags machine 2 after this long without a report (a seat move takes up to ~4 min)
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
 ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "estimated", "eligible", "measured_at", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",

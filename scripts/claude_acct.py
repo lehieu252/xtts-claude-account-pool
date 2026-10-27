@@ -1520,7 +1520,11 @@ def _run_request(idx, state, request, holder, live):
         ok = _move_seat(idx, holder, _saved_name(idx, email), live, {"premium": current}, state,
                         reason="asked on the dashboard")
         if not ok:
-            return _request_done(request, "fail", "the seat move failed: see the phase history")
+            try:  # the reason machine 2 published with the phase it fell back to
+                reason = pool_call("GET", "/api/state", mover=True).get("message") or "the seat move failed"
+            except AcctError:
+                reason = "the seat move failed"
+            return _request_done(request, "fail", reason)
         ms["premium_manual"] = {"email": email, "at": time.time()}
     else:
         try:

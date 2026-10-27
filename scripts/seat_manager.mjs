@@ -86,13 +86,45 @@ const context = browser.contexts()[0];
   if (/login|signin/i.test(page.url())) {
     throw new Error("The connected browser is not signed in to Claude. Sign in as an organization owner or admin and retry.");
   }
-  // The sidebar includes a Members label before the member table finishes loading.
-  // Wait for both target emails so subsequent row lookups don't race the table render.
-  for (const email of readEmails || changes.map((c) => c.email)) {
-    await page.getByText(email, { exact: true }).first().waitFor({ state: "attached", timeout: 30000 });
-  }
+  // The sidebar includes a Members label before the member table finishes loading: wait for the table.
+  const tableLoaded = () => page.locator('[role="combobox"][aria-label^="Tier for"]').first()
+    .waitFor({ state: "attached", timeout: 30000 });
+  await tableLoaded();
 
   const triggerFor = (email) => page.locator(`[role="combobox"][aria-label="Tier for ${email}"]`);
+  // The table shows 15 members a page: a member on another page is found with the "Search members" box,
+  // or else by turning the pages. All through the DOM, like the clicks (the page may be hidden).
+  // Present, and still present a moment later: the search results are re-rendered once more after typing.
+  const settled = async (email) => {
+    for (let wait = 0; wait < 60; wait++) {
+      if (await triggerFor(email).count()) {
+        await page.waitForTimeout(1200);
+        if (await triggerFor(email).count()) return true;
+      } else {
+        await page.waitForTimeout(250);
+      }
+    }
+    return false;
+  };
+  const findMember = async (email) => {
+    if (await triggerFor(email).count()) return;
+    const searched = await page.evaluate((value) => {
+      const input = document.querySelector('input[name="members-search"], input[aria-label="Search members"]');
+      if (!input) return false;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }, email);
+    if (searched && await settled(email)) return;
+    for (let turn = 0; turn < 20; turn++) {
+      const next = page.locator('button[aria-label="Next page"]');
+      if (!(await next.count()) || await next.first().evaluate((b) => b.disabled || b.getAttribute("aria-disabled") === "true")) break;
+      await next.first().evaluate((b) => b.click());
+      await page.waitForTimeout(1500);
+      if (await triggerFor(email).count() && await settled(email)) return;
+    }
+  };
   const rowFor = async (email) => {
     const byRole = page.getByRole("row", { includeHidden: true }).filter({ hasText: email });
     if (await byRole.count()) return byRole.first();
@@ -101,6 +133,7 @@ const context = browser.contexts()[0];
     throw new Error(`Could not find member ${email} on the Members page.`);
   };
   const tierControl = async (email) => {
+    await findMember(email);
     const trigger = triggerFor(email);
     if (await trigger.count()) return trigger.first();
     // Older page: the seat tier is the last combobox (or a Standard/Premium button) of the member's row.
@@ -129,7 +162,7 @@ const context = browser.contexts()[0];
       for (let wait = 0; wait < 8 && !(await expanded()); wait++) await page.waitForTimeout(250);
     }
     let picked = false;
-    for (let attempt = 0; attempt < 20 && !picked; attempt++) {
+    for (let attempt = 0; attempt < 40 && !picked; attempt++) {
       await page.waitForTimeout(250);
       picked = await control.evaluate((el, pattern) => {
         const popup = document.getElementById(el.getAttribute("aria-controls") || "") || document;
@@ -146,9 +179,24 @@ const context = browser.contexts()[0];
       throw new Error(`The seat picker did not offer "${tier}".`);
     }
   };
+  const reload = async () => {
+    await page.goto(membersUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await tableLoaded();
+    await page.waitForTimeout(2000);  // let the page attach its handlers before the first click
+  };
   const setTier = async (email, tier) => {
     if ((await tierOf(email)) === tier) return;
-    await chooseTier(await tierControl(email), tier);
+    // The picker sometimes does not open, or opens empty, for a while: reload the page and try again.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await chooseTier(await tierControl(email), tier);
+        break;
+      } catch (error) {
+        if (attempt >= 3 || !/did not offer/.test(error.message)) throw error;
+        await reload();
+        if ((await tierOf(email)) === tier) return;
+      }
+    }
     let actual;
     for (let attempt = 0; attempt < 40; attempt++) {
       actual = await tierOf(email);
