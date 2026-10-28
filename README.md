@@ -73,7 +73,7 @@ bash "$PLUGIN_ROOT/scripts/acct.sh" doctor
 
 Shell variables do not survive between tool calls, so in the next steps `$ACCT` stands for `bash "<PLUGIN_ROOT>/scripts/acct.sh"` with the absolute path printed above written out in full. The slash commands and hooks of a newly installed plugin are only loaded by a new session, but the script works right away, so steps 4 to 7 run it directly in the current session.
 
-**4. Log in to the pool accounts.** The fifteen accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
+**4. Log in to the pool accounts.** The eighteen accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
 
 ```bash
 $ACCT login
@@ -154,8 +154,8 @@ The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `info@`, `careers@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 80% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the other one, so the ones at rest can reset. Every working machine must be logged in to both |
-| 1–13 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@`, `xtg2@`, `support@`, `xtg3@`, `xtg4@`, `xtg5@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
+| — | `info@`, `careers@`, `support@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 80% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the best ranked other one, so the ones at rest can reset. Every working machine must be logged in to all three |
+| 1–15 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@` … `xtg8@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
 
 ```
 Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
@@ -187,7 +187,7 @@ No target:                      P keeps the seat, the reason is logged
 
 If the move fails, machine 2 writes `STABLE` with the account that really holds the seat (P after the rollback), the working machines switch back to it, and machine 2 waits 15 minutes before it tries again; the dashboard shows the error (for example, the admin browser needs a new sign-in). If the pool server cannot be reached, a working machine follows the seat it reads on claude.ai, and machine 2 does not move the seat. A request that is already running always finishes with the account it started with.
 
-**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), all fifteen accounts logged in (`/acct:login`), the admin browser signed in (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
+**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), all eighteen accounts logged in (`/acct:login`), the admin browser signed in (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
 
 - macOS: a launch agent (`vn.xtgroup.acct-mover`) runs `acct.sh auto serve-once` every 30 seconds through `~/.claude-acct/bin/acct-mover.sh`, which always starts the installed plugin version.
 - Windows (for example Windows Server over RDP): a Task Scheduler task (`XTTS_Acct_Mover`) starts at logon in the user's interactive session and runs `~/.claude-acct/bin/acct-mover.py`, a loop that calls `auto serve-once` every 30 seconds without opening a window (Task Scheduler cannot repeat faster than once a minute). Leave the RDP session with **Disconnect**, never **Sign out**, so the task, the logins and Chrome keep running. Output goes to `~/.claude-acct/mover.out.log`.

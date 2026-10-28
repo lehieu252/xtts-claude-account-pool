@@ -1,6 +1,6 @@
 {
   "name": "acct",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "Manage multiple Claude accounts, monitor usage, and automatically rotate an organization Premium seat between saved accounts.",
   "author": {
     "name": "Hieu Le",
