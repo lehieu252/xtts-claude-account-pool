@@ -27,7 +27,8 @@ os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 
 INFO, CAREERS, SUPPORT = acct.BACKUP_EMAILS
-XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTG3, XTG4, XTG5, XTG6, XTG7, XTG8 = acct.ROTATION_EMAILS
+(XTTS, SALES, CONTACT, HIEUNX, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTG3, XTG4, XTG5, XTG6, XTG7, XTG8,
+ XTG9, XTG10, XTG11) = acct.ROTATION_EMAILS
 CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 
 
@@ -201,8 +202,8 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(acct.BACKUP_EMAILS, ("info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn"))
         self.assertFalse(set(acct.BACKUP_EMAILS) & set(acct.ROTATION_EMAILS))
         self.assertNotIn("hieule252uet@gmail.com", acct.POOL_EMAILS)
-        self.assertEqual(len(acct.ROTATION_EMAILS), 15)
-        self.assertEqual(acct.ROTATION_EMAILS[-3:], ("xtg6@xtgroup.vn", "xtg7@xtgroup.vn", "xtg8@xtgroup.vn"))
+        self.assertEqual(len(acct.ROTATION_EMAILS), 18)
+        self.assertEqual(acct.ROTATION_EMAILS[-3:], ("xtg9@xtgroup.vn", "xtg10@xtgroup.vn", "xtg11@xtgroup.vn"))
         self.assertIn("kienlt@xtgroup.vn", acct.ROTATION_EMAILS)
 
 
@@ -819,7 +820,7 @@ class MoverTests(unittest.TestCase):
         with patch.object(acct, "_mover_state", return_value={}):
             self.run_once(idx, pool)
         rows = {r["email"]: r for r in pool.accounts}
-        self.assertEqual(len(rows), 18)
+        self.assertEqual(len(rows), 21)
         self.assertEqual((rows[SALES]["seat"], rows[SALES]["five_hour"], rows[SALES]["seven_day"]), ("Premium", 50, 40))
         self.assertEqual((rows[INFO]["role"], rows[INFO]["seat"]), ("backup", "Standard"))
         self.assertEqual((rows[CAREERS]["seat"], rows[XTTS]["seat"]), ("No seat", "No seat"))
@@ -985,7 +986,7 @@ class LoginAllTests(unittest.TestCase):
             out = _p["out"]
             acct.cmd_login(argparse.Namespace(name=None, email=None))
         term.assert_not_called()
-        self.assertIn("All 18 pool accounts", out.getvalue())
+        self.assertIn("All 21 pool accounts", out.getvalue())
 
 
 class RotationPreviewTests(unittest.TestCase):
@@ -1011,7 +1012,7 @@ class RotationPreviewTests(unittest.TestCase):
         text = self.preview(idx, {"phase": "STABLE", "premium": SALES, "snapshots": snaps})
         self.assertIn("Next Premium: **%s**" % HIEUNX, text)  # never measured ones are not taken
         self.assertIn(" → ".join([HIEUNX, CONTACT, XTTS, TRUONGNV, THANGLT, KIENLT, XTG1, XTG2, XTG3, XTG4, XTG5, XTG6,
-                                  XTG7, XTG8]), text)
+                                  XTG7, XTG8, XTG9, XTG10, XTG11]), text)
 
 
 class RotationLogTests(unittest.TestCase):
