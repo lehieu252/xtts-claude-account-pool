@@ -243,6 +243,47 @@ class TokenRefreshTests(unittest.TestCase):
             self.assertEqual(acct.refresh_usage(meta, creds, force=True), "ok")
         self.assertNotIn("usage_blocked_until", meta)
 
+    def http_429(self, retry_after=None):
+        headers = {} if retry_after is None else {"Retry-After": retry_after}
+        return urllib.error.HTTPError(acct.USAGE_URL, 429, "Too Many Requests", headers, io.BytesIO(b""))
+
+    def test_a_429_with_retry_after_0_waits_and_backs_off(self):
+        # /api/oauth/usage answers "retry-after: 0" while it limits: that must not mean "ask again at once"
+        meta = {}
+        creds = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": (time.time() + 3600) * 1000}}
+        for expected in (300, 600, 1200, 1800, 1800):  # doubled at each 429 in a row, up to USAGE_RETRY_MAX
+            with patch.object(acct, "fetch_usage", side_effect=self.http_429("0")):
+                self.assertTrue(acct.refresh_usage(meta, creds, force=True).startswith("rate limited until"))
+            self.assertAlmostEqual(meta["usage_blocked_until"], time.time() + expected, delta=5)
+            meta["usage_blocked_until"] = time.time() - 1  # the wait is over
+        with patch.object(acct, "fetch_usage", side_effect=self.http_429()):  # no header: the same rule
+            acct.refresh_usage(meta, creds, force=True)
+        self.assertAlmostEqual(meta["usage_blocked_until"], time.time() + 1800, delta=5)
+        meta["usage_blocked_until"] = time.time() - 1
+        with patch.object(acct, "fetch_usage", return_value={"five_hour": {"utilization": 12}}):
+            self.assertEqual(acct.refresh_usage(meta, creds, force=True), "ok")
+        self.assertNotIn("usage_429_streak", meta)  # a reading starts the next streak over at 300 s
+        with patch.object(acct, "fetch_usage", side_effect=self.http_429("0")):
+            acct.refresh_usage(meta, creds, force=True)
+        self.assertAlmostEqual(meta["usage_blocked_until"], time.time() + 300, delta=5)
+
+    def test_a_seat_read_429_is_not_asked_again_before_the_wait(self):
+        meta = {"seat": {"fetchedAt": 0, "tier": "team_tier_1"}}
+        creds = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": (time.time() + 3600) * 1000}}
+        with patch.object(acct, "fetch_usage", side_effect=self.http_429("0")) as fetch:
+            self.assertTrue(acct.refresh_seat(meta, creds, force=True).startswith("rate limited until"))
+            self.assertTrue(acct.refresh_seat(meta, creds, force=True).startswith("rate limited until"))
+            self.assertEqual(fetch.call_count, 1)
+        self.assertAlmostEqual(meta["seat_blocked_until"], time.time() + 300, delta=5)
+        self.assertEqual(meta["seat"]["tier"], "team_tier_1")  # the last known seat is kept
+        self.assertNotIn("usage_blocked_until", meta)  # usage and seat are limited apart
+        meta["seat_blocked_until"] = time.time() - 1
+        with patch.object(acct, "fetch_usage", return_value={"organization": {"seat_tier": "team_standard"}}):
+            self.assertEqual(acct.refresh_seat(meta, creds, force=True), "ok")
+        self.assertEqual(meta["seat"]["tier"], "team_standard")
+        self.assertNotIn("seat_blocked_until", meta)
+        self.assertNotIn("seat_429_streak", meta)
+
     def test_expired_token_without_refresh_name_is_left_alone(self):
         with patch.object(acct, "_post_token_refresh") as post:
             status = acct.refresh_usage({}, acct.read_stored_creds("b"))

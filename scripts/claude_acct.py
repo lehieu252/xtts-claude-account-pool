@@ -46,7 +46,11 @@ LIVE_SERVICE = "Claude Code-credentials"
 STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
 USAGE_CACHE_TTL = 180  # seconds, to avoid HTTP 429
-USAGE_RETRY_DEFAULT = 300  # seconds to wait after a 429 without a Retry-After header
+# After a 429 the endpoint is not asked again for USAGE_RETRY_DEFAULT seconds when Retry-After is 0 or missing
+# (what /api/oauth/usage answers while it limits; Claude Code waits 5 minutes then too). Each further 429 in a row
+# doubles the wait, up to USAGE_RETRY_MAX; a longer Retry-After is always kept.
+USAGE_RETRY_DEFAULT = 300
+USAGE_RETRY_MAX = 1800
 # OAuth refresh as Claude Code 2.1.29x does it (unofficial); access tokens last about 8 hours.
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -433,6 +437,30 @@ def refresh_stored_token(name, meta, creds):
             pass
 
 
+def _rate_limited(meta, key, now):
+    """Why `key` ("usage" or "seat") must not be asked yet, or None. Asking before the wait is over only keeps
+    the account limited longer."""
+    until = meta.get(key + "_blocked_until") or 0
+    return "rate limited until %s" % time.strftime("%H:%M", time.localtime(until)) if now < until else None
+
+
+def _note_429(meta, key, e, now):
+    """Record a 429 on `key` and return the status; see USAGE_RETRY_DEFAULT for the wait."""
+    try:
+        after = int(e.headers.get("Retry-After") or 0)
+    except (TypeError, ValueError, AttributeError):
+        after = 0
+    streak = meta.get(key + "_429_streak", 0) + 1
+    meta[key + "_429_streak"] = streak
+    meta[key + "_blocked_until"] = now + max(after, min(USAGE_RETRY_DEFAULT * 2 ** (streak - 1), USAGE_RETRY_MAX))
+    return _rate_limited(meta, key, now)
+
+
+def _clear_429(meta, key):
+    meta.pop(key + "_blocked_until", None)
+    meta.pop(key + "_429_streak", None)
+
+
 def refresh_usage(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_TTL):
     """Update meta['usage'] if the access token is still valid. Return a status string.
 
@@ -443,9 +471,9 @@ def refresh_usage(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_T
     now = time.time()
     if cache and not force and now - cache.get("fetchedAt", 0) < ttl:
         return "cache"
-    blocked = meta.get("usage_blocked_until") or 0
-    if now < blocked:  # asking again before Retry-After only keeps the account blocked longer
-        return "rate limited until %s" % time.strftime("%H:%M", time.localtime(blocked))
+    limited = _rate_limited(meta, "usage", now)
+    if limited:
+        return limited
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
         if not refresh_name:
@@ -460,19 +488,14 @@ def refresh_usage(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_T
         if e.code == 401:  # a non-expired token that is rejected has been revoked
             meta["revoked"] = True
             return "revoked"
-        if e.code == 429:  # the usage API limits each account: wait as long as it says
-            try:
-                wait = int(e.headers.get("Retry-After") or USAGE_RETRY_DEFAULT)
-            except (TypeError, ValueError):
-                wait = USAGE_RETRY_DEFAULT
-            meta["usage_blocked_until"] = now + max(wait, 1)
-            return "rate limited until %s" % time.strftime("%H:%M", time.localtime(now + max(wait, 1)))
+        if e.code == 429:
+            return _note_429(meta, "usage", e, now)
         return "http %d" % e.code
     except Exception as e:  # network error, timeout, ...
         return "error: %s" % net_error(e)
     meta["usage"] = {"fetchedAt": now, "data": data}
     meta.pop("revoked", None)
-    meta.pop("usage_blocked_until", None)
+    _clear_429(meta, "usage")
     return "ok"
 
 
@@ -485,6 +508,9 @@ def refresh_seat(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_TT
     now = time.time()
     if cache and not force and now - cache.get("fetchedAt", 0) < ttl:
         return "cache"
+    limited = _rate_limited(meta, "seat", now)
+    if limited:
+        return limited
     o = creds.get("claudeAiOauth", {})
     if not o.get("accessToken") or (o.get("expiresAt") or 0) < now * 1000 + EXPIRY_MARGIN_MS:
         if not refresh_name:
@@ -495,9 +521,14 @@ def refresh_seat(meta, creds, force=False, refresh_name=None, ttl=USAGE_CACHE_TT
         o = creds.get("claudeAiOauth", {})
     try:
         org = fetch_usage(o["accessToken"], PROFILE_URL).get("organization") or {}
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return _note_429(meta, "seat", e, now)
+        return "http %d" % e.code
     except Exception as e:  # the usage column already reports token problems
         return "error: %s" % net_error(e)
     meta["seat"] = {"fetchedAt": now, "tier": org.get("seat_tier")}
+    _clear_429(meta, "seat")
     return "ok"
 
 
