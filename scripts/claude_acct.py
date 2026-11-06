@@ -45,7 +45,7 @@ IS_MAC = sys.platform == "darwin" and os.environ.get("CLAUDE_ACCT_BACKEND") != "
 LIVE_SERVICE = "Claude Code-credentials"
 STORE_SERVICE = os.environ.get("CLAUDE_ACCT_KEYCHAIN_SERVICE", "claude-acct")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"  # unofficial
-USAGE_CACHE_TTL = 120  # seconds, to avoid HTTP 429
+USAGE_CACHE_TTL = 180  # seconds, to avoid HTTP 429
 USAGE_RETRY_DEFAULT = 300  # seconds to wait after a 429 without a Retry-After header
 # OAuth refresh as Claude Code 2.1.29x does it (unofficial); access tokens last about 8 hours.
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -978,14 +978,14 @@ ROTATION_EMAILS = (  # the accounts that take turns holding Premium (least recen
 POOL_EMAILS = BACKUP_EMAILS + ROTATION_EMAILS
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
-DAILY_THRESHOLD = 80
+DAILY_THRESHOLD = 70
 WEEKLY_THRESHOLD = 90
 # Machine 2 reads the usage of the two accounts with a seat (Premium, and the backup account with the Standard
 # seat) once per USAGE_READ_EVERY: that one reading serves the threshold check, the usage kept for ranking and the
 # dashboard table (the usage API limits each account). Seats are read every SEAT_CHECK_EVERY to notice a seat
 # moved by hand, and always again right before machine 2 changes one.
-USAGE_READ_EVERY = 60
-SEAT_CHECK_EVERY = 120
+USAGE_READ_EVERY = 180  # /api/oauth/usage: one request per account every 3 minutes
+SEAT_CHECK_EVERY = 180  # /api/oauth/profile: the same
 
 # Pool server (server/pool_server.py on the xtts server): the shared phase, the machines, the log.
 POOL_URL = "https://xtts.xtgroup.vn/pool"

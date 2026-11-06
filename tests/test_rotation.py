@@ -192,9 +192,9 @@ class ThresholdTests(unittest.TestCase):
         return acct._usage_reached_threshold(account(five, seven)["usage"]["data"])
 
     def test_default_rule(self):
-        # 5-hour >= 80% or 7-day >= 90% (or any window used up).
-        self.assertFalse(self.reached(79, 89))
-        self.assertTrue(self.reached(80, 0))
+        # 5-hour >= 70% or 7-day >= 90% (or any window used up).
+        self.assertFalse(self.reached(69, 89))
+        self.assertTrue(self.reached(70, 0))
         self.assertTrue(self.reached(0, 90))
         self.assertTrue(self.reached(100, 0))
 
@@ -594,14 +594,14 @@ class MoverTests(unittest.TestCase):
             acct._mover_once(argparse.Namespace(force=False, manual=False))
         self.assertEqual({c.kwargs.get("ttl") for c in p["usage"].call_args_list}, {acct.USAGE_READ_EVERY})
         self.assertEqual({c.kwargs.get("ttl") for c in p["seat"].call_args_list}, {acct.SEAT_CHECK_EVERY})
-        self.assertEqual((acct.USAGE_READ_EVERY, acct.SEAT_CHECK_EVERY), (60, 120))
+        self.assertEqual((acct.USAGE_READ_EVERY, acct.SEAT_CHECK_EVERY), (180, 180))
 
     def test_the_backup_account_keeps_the_standard_seat_until_it_is_spent(self):
         pool = FakePool("STABLE", SALES)
-        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (79, 89)}, premium=SALES), pool)
-        self.assertEqual(pool.state["backup"], INFO)  # below 80% and 90%: kept
+        move = self.run_once(pool_index(**{SALES: (50, 40), INFO: (69, 89)}, premium=SALES), pool)
+        self.assertEqual(pool.state["backup"], INFO)  # below 70% and 90%: kept
         move.assert_not_called()
-        for usage in ((80, 50), (10, 90)):  # the Premium thresholds: 5-hour 80% or 7-day 90%
+        for usage in ((70, 50), (10, 90)):  # the Premium thresholds: 5-hour 70% or 7-day 90%
             os.unlink(os.path.join(acct.store_dir(), "mover-state.json")) if os.path.exists(os.path.join(acct.store_dir(), "mover-state.json")) else None
             pool = FakePool("STABLE", SALES)
             # careers' own usage is not read (it has no seat): even a spent reading does not stop the change

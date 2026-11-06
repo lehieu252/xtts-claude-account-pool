@@ -154,11 +154,11 @@ The accounts are fixed in `scripts/claude_acct.py`:
 
 | | Account | Role |
 |---|---|---|
-| — | `info@`, `careers@`, `support@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 80% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the best ranked other one, so the ones at rest can reset. Every working machine must be logged in to all three |
+| — | `info@`, `careers@`, `support@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 70% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the best ranked other one, so the ones at rest can reset. Every working machine must be logged in to all three |
 | 1–18 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@` … `xtg11@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
 
 ```
-Move the seat when (machine 2):  P.5h ≥ 80%  OR  P.7d ≥ 90%   (or any window at 100%)
+Move the seat when (machine 2):  P.5h ≥ 70%  OR  P.7d ≥ 90%   (or any window at 100%)
 Target (the next Premium):      ranked by the last usage machine 2 read of each account while it held
                                 the seat (kept on the pool server; a window past its reset counts 0 %):
                                 below the thresholds first → min 7d → min 5h → earliest 5h reset
@@ -177,7 +177,7 @@ No target:                      P keeps the seat, the reason is logged
 
 **One seat move, step by step.**
 
-1. Machine 2 runs every 30 s. Once a minute it reads the usage of P and of the backup account with the Standard seat (one request per account per minute; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 2 minutes to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
+1. Machine 2 runs every 30 s. Every 3 minutes it reads the usage of P and of the backup account with the Standard seat (one request per account every 3 minutes; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 3 minutes (one request per account) to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
 2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
 3. Every working machine, before its next request: sees `PREPARING`, **switches account to the backup account** and reports it.
 4. Machine 2 waits until every machine seen in the last 5 minutes reports the backup account (at most 120 s; idle machines are not waited for).
@@ -225,7 +225,7 @@ An account is flagged **🔴 Log in again** when its refresh token has expired (
 
 - The 30-second Keychain cache comes from reading Claude Code's own code, not from documentation, and may change in a future version.
 - **The Seat column comes from an unofficial API** (`api.anthropic.com/api/oauth/profile`, field `organization.seat_tier`): `team_tier_1` is shown as Premium and `team_standard` as Standard; any other value is shown as is. It needs a valid access token, like usage, so an account you have not used for a while shows its last known seat.
-- **Usage comes from an unofficial API** (`api.anthropic.com/api/oauth/usage`, the same data as `/usage`). Anthropic can change it at any time. Results are cached for 2 minutes to avoid HTTP 429.
+- **Usage comes from an unofficial API** (`api.anthropic.com/api/oauth/usage`, the same data as `/usage`). Anthropic can change it at any time. Results are cached for 3 minutes to avoid HTTP 429.
 - Access tokens last about 8 hours. For a saved account that is **not** the one Claude Code is using, the script refreshes an expired access token itself (the same OAuth refresh Claude Code does, `platform.claude.com/v1/oauth/token`) and saves the new token, so `list` and rotation see current usage even for accounts that have been idle for days. It never refreshes the token of the account Claude Code is logged in with. If the refresh token is rejected, the account is flagged **🔴 Log in again**.
 - The claude.ai login can ask you to paste a code, and the chat box cannot take input, so `/acct:login` opens a separate terminal window (macOS: Terminal; Windows: a Git Bash window; Linux: the default terminal). If none can be opened, it prints the command to run yourself.
 - In the VS Code extension, plugin commands may not appear in the `/` suggestion menu (known Claude Code issue). Typing the full command, e.g. `/acct:list`, works.
