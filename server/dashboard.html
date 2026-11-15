@@ -150,6 +150,11 @@ function render(d) {
   const pool = (d.accounts || []).filter((a) => a.role === "rotation" && a.estimated);
   if (pool.length && pool.every((a) => a.eligible === false))
     alerts.push(["warn", "Mọi account trong pool đều đang chạm ngưỡng: Premium giữ nguyên tới khi dùng hết một cửa sổ."]);
+  // A login saved on machine 2 lasts about 4 weeks from the login; warn a week ahead (RELOGIN_WARN_DAYS).
+  const relogin = (d.accounts || []).filter((a) => a.status === "log in again");
+  if (relogin.length) alerts.push(["bad", `Cần login lại trên máy 2 (<span class="mono">/acct:login</span>): ${relogin.map((a) => esc(a.email)).join(", ")}. Máy 2 không chuyển seat được sang các account này.`]);
+  const ending = (d.accounts || []).filter((a) => a.status !== "log in again" && loginLeft(a, now) !== null);
+  if (ending.length) alerts.push(["warn", `Login trên máy 2 sắp hết hạn (mỗi lần login dùng được khoảng 4 tuần): ${ending.map((a) => `${esc(a.email)} (${loginLeft(a, now)})`).join(", ")}. Login lại trước khi hết hạn bằng <span class="mono">/acct:login &lt;email&gt;</span> trên máy 2.`]);
   const r0 = st.request;
   if (r0 && ["pending", "running"].includes(r0.status) && now - r0.at < 900)
     alerts.push(["warn", `Đang chuyển ${r0.kind === "premium" ? "Premium" : "Standard"} sang ${esc(r0.email)} (yêu cầu từ dashboard, ${r0.status === "running" ? "máy 2 đang thực hiện" : "chờ máy 2"}).`]);
@@ -199,7 +204,7 @@ function render(d) {
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
       <td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
-      <td class="${a.status ? "mismatch" : "muted"}">${esc(a.status || (a.estimated
+      <td class="${a.status || loginLeft(a, now) ? "mismatch" : "muted"}">${esc(a.status || (loginLeft(a, now) ? "Login hết hạn " + loginLeft(a, now) : null) || (a.estimated
         ? (a.measured_at ? "Lần cuối cập nhật: " + clock(a.measured_at) : "Chưa cập nhật")
         : "ok"))}</td>
       <td>${g !== "premium" && a.email !== (g === "backup" ? backup : st.premium)
@@ -219,6 +224,14 @@ function render(d) {
   $("updated").textContent = "Làm mới lúc " + new Date().toLocaleTimeString("vi-VN", { hour12: false }) + " · mỗi 5 giây";
 }
 
+
+const LOGIN_WARN_SEC = 7 * 86400;
+// "sau N ngày" / "trong hôm nay" when the login saved on machine 2 ends within a week, else null.
+function loginLeft(a, now) {
+  const left = a.login_expires ? a.login_expires - now : null;
+  if (left === null || left < 0 || left >= LOGIN_WARN_SEC) return null;
+  return left < 86400 ? "trong hôm nay" : `sau ${Math.floor(left / 86400)} ngày`;
+}
 
 function usageCell(pct, reset) {
   if (pct === null || pct === undefined) return `<span class="muted">—</span>`;

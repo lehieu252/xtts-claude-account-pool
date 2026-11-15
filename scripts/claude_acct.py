@@ -372,6 +372,24 @@ def token_state(meta, creds):
     return "ok"
 
 
+# A saved login lasts about 28-30 days from the login (refreshing does not extend it): /acct:list and the
+# dashboard warn this long before it ends, so it can be renewed before it stops a seat move.
+RELOGIN_WARN_DAYS = 7
+
+
+def login_expires_at(creds):
+    """Epoch seconds the saved login (its refresh token) ends at, or None when unknown."""
+    rexp = (creds or {}).get("claudeAiOauth", {}).get("refreshTokenExpiresAt")
+    return rexp / 1000 if isinstance(rexp, (int, float)) and rexp else None
+
+
+def login_ends_soon(creds, now=None):
+    """Whole days left (0 = less than one) when the login ends within RELOGIN_WARN_DAYS, else None."""
+    end = login_expires_at(creds)
+    left = None if end is None else end - (now or time.time())
+    return int(left // 86400) if left is not None and 0 <= left < RELOGIN_WARN_DAYS * 86400 else None
+
+
 def _post_token_refresh(oauth):
     body = {"grant_type": "refresh_token", "refresh_token": oauth["refreshToken"], "client_id": OAUTH_CLIENT_ID}
     if oauth.get("scopes"):
@@ -828,11 +846,12 @@ def cmd_list(args):
     # Pool accounts without a seat have no usage to read (claude.ai answers 429): read only the Premium account
     # and the backup account with the Standard seat, plus any account outside the pool.
     seated = {(pool.get("premium") or "").lower(), _backup_of(pool)} if pool else None
-    rows, need_login = [], []
+    rows, need_login, soon = [], [], []
     for name in sorted(idx["accounts"]):
         meta = idx["accounts"][name]
         email = ((meta.get("profile") or {}).get("emailAddress") or "").lower()
         unseated = seated is not None and email in POOL_EMAILS and email not in seated
+        creds = None
         try:
             creds = read_stored_creds(name)
             if unseated:
@@ -850,6 +869,10 @@ def cmd_list(args):
         if state == "relogin":
             badge = "🔴 Log in again: `/acct:login %s`" % name
             need_login.append(name)
+        elif login_ends_soon(creds) is not None:
+            days = login_ends_soon(creds)
+            badge = "🟠 Login ends %s: `/acct:login %s`" % ("in %d day(s)" % days if days else "today", name)
+            soon.append(name)
         note = ("updated " + fmt_age(fetched)) if fetched else "no data yet"
         if unseated:
             note = "no seat: not read"
@@ -876,6 +899,9 @@ def cmd_list(args):
     if need_login:
         print("\n🔴 %d account(s) need a new login: %s" % (len(need_login), ", ".join(
             "`/acct:login %s`" % n for n in need_login)))
+    if soon:
+        print("\n🟠 %d login(s) end within %d days (a login lasts about 4 weeks; using it does not extend it): %s" % (
+            len(soon), RELOGIN_WARN_DAYS, ", ".join("`/acct:login %s`" % n for n in soon)))
     if not cur:
         email = (live_profile or {}).get("emailAddress") or "(unknown)"
         same_email = [n for n in sorted(idx["accounts"])
@@ -1805,12 +1831,20 @@ def _account_rows(idx, live, state):
         role = "premium" if email == premium else "rotation" if email in ROTATION_EMAILS else "backup"
         row = {"email": email, "role": role, "last_used": last_used.get(email), "rank": rank.get(email)}
         name = _saved_name(idx, email)
+        if name:  # when the login saved on machine 2 ends (the dashboard warns RELOGIN_WARN_DAYS ahead)
+            try:
+                creds = read_stored_creds(name)
+                login = token_state(idx["accounts"][name], creds)
+                row["login_expires"] = login_expires_at(creds)
+            except AcctError:
+                login = "relogin"
         if email not in (premium, backup):
             # No seat, so no usage to read: show the estimate from its last reading with the seat it would get.
             snap = snapshots.get(email) or {}
             est = _estimate(snap, "premium" if role == "rotation" else "standard")
             iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat() if t else None
-            row.update(seat="No seat", status=None if name else "not logged in on machine 2", estimated=True,
+            row.update(seat="No seat", estimated=True,
+                       status="not logged in on machine 2" if not name else "log in again" if login == "relogin" else None,
                        measured_at=snap.get("at") if est else None)
             if est:  # never measured: no figure (it is not 0 %)
                 row.update(eligible=not _over(est), five_hour=est[0], five_hour_reset=iso(est[1]),

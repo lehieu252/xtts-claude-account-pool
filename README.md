@@ -216,6 +216,8 @@ If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login
 
 An account is flagged **🔴 Log in again** when its refresh token has expired (`refreshTokenExpiresAt`) or the usage API rejects a still-valid token with HTTP 401 (the token was revoked). An expired short-lived access token is **not** flagged: Claude Code refreshes it automatically the next time you switch to that account.
 
+A login lasts about **4 weeks (28–30 days) from the moment you log in**; using the account or refreshing its access token (about every 8 hours) does not extend it. These figures were observed, not documented. A week before a login ends, `/acct:list` flags it **🟠 Login ends in N day(s)** and the dashboard lists it (logins saved on machine 2), so it can be renewed with `/acct:login <email>` before it stops a seat move. The dashboard also lists the accounts machine 2 must log in to again.
+
 ## Troubleshooting
 
 - **Usage shows "no data yet (error: …)" for every account**: the script cannot reach `api.anthropic.com`. Run `/acct:doctor` and look at the "HTTPS to api.anthropic.com" line. A Python installed from python.org on macOS has no CA certificates until you run `/Applications/Python 3.x/Install Certificates.command`; the plugin falls back to the macOS system root certificates (or `certifi` when installed) by itself, so this only remains when that fallback is not available. Otherwise check the network, proxy or firewall.

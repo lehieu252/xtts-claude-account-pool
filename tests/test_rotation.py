@@ -186,6 +186,21 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual([r["role"] for r in rows[-2:]], ["backup", "backup"])
         self.assertEqual(self.pick(idx, XTTS, snaps)[0], rows[1]["email"])  # rank 1 is the next Premium
 
+    def test_dashboard_rows_carry_when_each_login_ends_and_flag_expired_ones(self):
+        idx = pool_index(**{XTTS: (40, 10)}, premium=XTTS)
+        ends = time.time() + 3 * 86400
+        creds = {"claudeAiOauth": {"refreshToken": "r", "refreshTokenExpiresAt": ends * 1000}}
+        with Patches(patch.object(acct, "read_stored_creds", return_value=creds),
+                     patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] in (SALES, INFO) else "ok"),
+                     patch.object(acct, "refresh_usage", return_value="cache"), patch.object(acct, "refresh_seat", return_value="cache")):
+            rows = acct._account_rows(idx, None, {"premium": XTTS, "backup": INFO, "snapshots": {}})
+        by = {r["email"]: r for r in rows}
+        self.assertAlmostEqual(by[XTG1]["login_expires"], ends, delta=1)
+        self.assertAlmostEqual(by[XTTS]["login_expires"], ends, delta=1)  # the seated rows too
+        self.assertEqual(by[SALES]["status"], "log in again")  # no seat, expired login: shown before anyone picks it
+        self.assertEqual(by[INFO]["status"], "log in again")  # the backup account with the Standard seat
+        self.assertIsNone(by[XTG1]["status"])
+
 
 class ThresholdTests(unittest.TestCase):
     def reached(self, five, seven):
@@ -320,6 +335,34 @@ class TokenRefreshTests(unittest.TestCase):
             status = acct.refresh_usage(meta, acct.read_stored_creds("b"), refresh_name="b")
         self.assertEqual(status, "refresh error: OSError")
         self.assertNotIn("revoked", meta)
+
+    def test_a_login_ending_within_a_week_is_flagged(self):
+        now = time.time()
+        creds = lambda days: {"claudeAiOauth": {"refreshToken": "r", "refreshTokenExpiresAt": (now + days * 86400) * 1000}}
+        self.assertEqual(acct.login_ends_soon(creds(3.5), now), 3)
+        self.assertEqual(acct.login_ends_soon(creds(0.2), now), 0)  # today
+        self.assertIsNone(acct.login_ends_soon(creds(8), now))  # more than RELOGIN_WARN_DAYS left
+        self.assertIsNone(acct.login_ends_soon(creds(-1), now))  # already ended: "log in again" instead
+        self.assertIsNone(acct.login_ends_soon({"claudeAiOauth": {"refreshToken": "r"}}, now))  # unknown
+        self.assertAlmostEqual(acct.login_expires_at(creds(2)), now + 2 * 86400, delta=1)
+
+    def test_list_flags_a_login_that_ends_soon(self):
+        idx = {"accounts": {"a": {"profile": {"emailAddress": "a@x.com"}}, "b": {"profile": {"emailAddress": "b@x.com"}}}}
+        ends = (time.time() + 2.5 * 86400) * 1000
+        self.store["a"] = {"claudeAiOauth": {"accessToken": "x", "refreshToken": "ra", "expiresAt": 1}}
+        self.store["b"] = {"claudeAiOauth": {"accessToken": "y", "refreshToken": "rb", "expiresAt": 1,
+                                             "refreshTokenExpiresAt": ends}}
+        out = io.StringIO()
+        with patch.object(acct, "load_index", return_value=idx), patch.object(acct, "save_index"), \
+             patch.object(acct, "current_name", return_value=None), patch.object(acct, "read_live_profile", return_value={}), \
+             patch.object(acct, "_pool_view", return_value=({}, [])), \
+             patch.object(acct, "refresh_seat"), patch.object(acct, "refresh_usage", return_value="cache"), \
+             patch.object(acct.sys, "stdout", out):
+            acct.cmd_list(argparse.Namespace(refresh=False))
+        text = out.getvalue()
+        self.assertIn("🟠 Login ends in 2 day(s): `/acct:login b`", text)
+        self.assertNotIn("/acct:login a`", text)
+        self.assertIn("1 login(s) end within 7 days", text)
 
     def test_list_never_refreshes_the_live_account(self):
         idx = {"accounts": {"a": {"profile": {"emailAddress": "a@x.com"}}, "b": {"profile": {"emailAddress": "b@x.com"}}}}
