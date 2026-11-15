@@ -168,13 +168,15 @@ class PoolServerTests(unittest.TestCase):
 
     def test_only_machine_2_publishes_the_account_usage_table(self):
         rows = [{"email": "info@x.vn", "role": "backup", "seat": "Standard", "five_hour": 0, "seven_day": 100},
-                {"email": "a@x.vn", "role": "rotation", "seat": "Premium", "five_hour": 40.0, "seven_day": 12.0, "secret": "x"}]
+                {"email": "a@x.vn", "role": "rotation", "seat": "Premium", "five_hour": 40.0, "seven_day": 12.0, "secret": "x",
+                 "login_expires": 1794826164.7}]
         self.assertEqual(self.call("POST", "/api/accounts", {"accounts": rows}, key=API)[0], 403)
         self.assertEqual(self.call("POST", "/api/accounts", {"accounts": rows}, mover=MOVER), (200, "ok"))
         got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["accounts"]
         self.assertEqual([a["email"] for a in got], ["info@x.vn", "a@x.vn"])
         self.assertEqual(got[1]["seat"], "Premium")
         self.assertNotIn("secret", got[1])
+        self.assertEqual(got[1]["login_expires"], 1794826164.7)  # when its login on machine 2 ends
 
     def test_transitions_are_recorded(self):
         for body in ({"phase": "PREPARING", "premium": "a", "target": "b"}, {"phase": "MOVING", "premium": "a", "target": "b"},
