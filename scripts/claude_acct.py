@@ -1050,6 +1050,11 @@ STATE_TTL = 5  # seconds a machine reuses the state it last fetched
 PREPARE_TIMEOUT = 120  # seconds machine 2 waits for the working machines to switch to the backup account
 MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move before it tries again
 SEAT_CHANGE_TIMEOUT = 330  # seconds one run of seat_manager.mjs may take: two changes and their rollback, retries included
+# claude.ai sometimes applies a seat change minutes after the seat manager gave up on it. For RECHECK_FOR seconds after
+# a failed change, machine 2 reads the seats of the accounts it touched every RECHECK_EVERY (not SEAT_CHECK_EVERY),
+# so the pool follows such a late change within a minute.
+RECHECK_FOR = 600
+RECHECK_EVERY = 60
 MOVER_LABEL = "vn.xtgroup.acct-mover"  # launchd label (macOS)
 MOVER_TASK = "XTTS_Acct_Mover"  # Task Scheduler name (Windows)
 MOVER_INTERVAL = 30  # seconds between two runs of the seat-moving service
@@ -1661,6 +1666,7 @@ def _rest_backup(idx, state, live):
     except Exception as e:
         ms["backup_backoff_until"] = time.time() + MOVE_BACKOFF
         _save_mover_state(ms)
+        _note_failed_change(current, other)
         log_event("backup_change_fail", str(e)[-800:])
         return state
     names = [n for n in (_saved_name(idx, e) for e in BACKUP_EMAILS) if n]
@@ -1722,6 +1728,7 @@ def _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email
         ms = _mover_state()
         ms["backoff_until"] = time.time() + MOVE_BACKOFF
         _save_mover_state(ms)
+        _note_failed_change(p_email, t_email)
         log_event("move_fail", "%ds: %s" % (time.time() - started, str(e)[-800:]), target=t_email, **fields)
         return False
     _put_state("STABLE", t_email, message="moved from %s" % p_email)
@@ -1729,6 +1736,25 @@ def _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email
     save_index(idx)
     log_event("move_ok", "%ds" % (time.time() - started), target=t_email, **fields)
     return True
+
+
+def _note_failed_change(*emails):
+    """A seat change on these accounts failed: read their seats again soon (see RECHECK_FOR)."""
+    ms = _mover_state()
+    ms["recheck"] = {"emails": [e for e in emails if e], "until": time.time() + RECHECK_FOR}
+    _save_mover_state(ms)
+
+
+def _recheck_seats(idx, live):
+    """Read the seats of the accounts a failed change touched, at most every RECHECK_EVERY, while RECHECK_FOR lasts.
+    The readings land in the seat cache that _seat_holder and _sync_backup then use."""
+    recheck = _mover_state().get("recheck") or {}
+    if time.time() >= recheck.get("until", 0):
+        return
+    for email in recheck.get("emails") or []:
+        name = _saved_name(idx, email)
+        if name:
+            _seat_tier(idx, name, live, ttl=RECHECK_EVERY)
 
 
 def _mover_once(args):
@@ -1740,22 +1766,26 @@ def _mover_once(args):
     state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
     request = state.get("request") or {}
     asked = request.get("status") == "pending"
-    # A seat asked for on the dashboard is not held back by the wait after a failed automatic move.
-    if time.time() < _mover_state().get("backoff_until", 0) and not args.force and not asked:
-        return
+    # After a failed move machine 2 changes no seat for MOVE_BACKOFF (a seat asked for on the dashboard is not held
+    # back), but it keeps following claude.ai and sending the usage table meanwhile: a change claude.ai applied late
+    # must not leave the pool on an account without a seat.
+    backing_off = time.time() < _mover_state().get("backoff_until", 0) and not args.force and not asked
     hold = state.get("hold")
     if hold:  # a machine lent the Standard seat to log an account in: move nothing until it gives it back
         if time.time() < hold.get("until", 0):
             log_event("hold", "%s is logging in %s: seats stay as they are" % (hold.get("name"), hold.get("account")),
                       every=QUIET_EVERY)
             return
-        _end_hold(hold)
+        if not backing_off:
+            _end_hold(hold)
         return
+    _recheck_seats(idx, live)
     missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
     if missing:
         log_event("not_logged_in", "machine 2 is missing: %s (run /acct:login)" % ", ".join(missing), every=QUIET_EVERY)
     holder = _seat_holder(idx, live, first=_saved_name(idx, state.get("premium")))
     if not holder:
+        save_index(idx)  # keep the seat readings, so the next run does not ask again before their time
         log_event("no_holder", "no rotation account holds Premium on claude.ai", every=QUIET_EVERY)
         return
     h_email = _email_of(idx, holder)
@@ -1772,9 +1802,10 @@ def _mover_once(args):
     if asked:
         _run_request(idx, state, request, holder, live)
         return
-    state = _rest_backup(idx, state, live)
+    if not backing_off:
+        state = _rest_backup(idx, state, live)
     test = st.get("test_move") or {}
-    if test.get("target") and time.time() < test.get("until", 0):
+    if test.get("target") and time.time() < test.get("until", 0) and not backing_off:
         # One seat move asked by `auto test-move`, whatever the usage: the full flow, on demand.
         st.pop("test_move", None)
         save_pool_settings(st)
@@ -1794,7 +1825,7 @@ def _mover_once(args):
         return
     usage = (meta.get("usage") or {}).get("data") or {}
     _remember_usage(state, h_email, meta, "premium")
-    if not _usage_reached_threshold(usage):
+    if backing_off or not _usage_reached_threshold(usage):
         return
     manual = _mover_state().get("premium_manual") or {}
     if manual.get("email") == h_email and time.time() - manual.get("at", 0) < MANUAL_PREMIUM_GRACE:

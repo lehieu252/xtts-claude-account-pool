@@ -888,6 +888,52 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(pool.puts, [])
         move.assert_not_called()
 
+    def test_a_change_claude_ai_applies_late_is_followed_while_backing_off(self):
+        # 2026-11-14: the seat manager gave up, claude.ai gave the seat to the target minutes later, and the pool kept
+        # every machine on the old account (without a seat) for the 15 minutes machine 2 backed off.
+        pool = FakePool("STABLE", SALES)
+        idx = pool_index(**{SALES: (85, 40)}, premium=SALES)
+        self.run_once(idx, pool, move_error=acct.AcctError("did not become Premium"))
+        recheck = acct._mover_state()["recheck"]
+        self.assertEqual(recheck["emails"][0], SALES)
+        target = recheck["emails"][1]
+        self.assertGreater(recheck["until"], time.time() + acct.RECHECK_FOR - 5)
+        # claude.ai applies the change late: the next readings show it
+        idx["accounts"][SALES]["seat"] = {"fetchedAt": time.time(), "tier": None}
+        idx["accounts"][target]["seat"] = {"fetchedAt": time.time(), "tier": acct.PREMIUM_TIER}
+        pool.puts.clear()
+        move = self.run_once(idx, pool)
+        self.assertEqual(pool.puts, [("STABLE", target, None)])  # followed at once, not after the back-off
+        move.assert_not_called()  # still backing off: no seat is changed
+
+    def test_backing_off_changes_no_seat_but_still_sends_the_usage_table(self):
+        acct._save_mover_state({"backoff_until": time.time() + 600})
+        pool = FakePool("STABLE", SALES)
+        move = self.run_once(pool_index(**{SALES: (95, 40), INFO: (90, 50)}, premium=SALES), pool)  # both spent
+        move.assert_not_called()
+        self.assertEqual(pool.puts, [])
+        self.assertTrue(getattr(pool, "published", []))  # the dashboard does not go stale meanwhile
+
+    def test_after_a_failed_change_its_seats_are_read_every_minute_for_a_while(self):
+        acct._note_failed_change(SALES, XTG2)
+        ttls = []
+
+        def tier(meta, creds, force=False, refresh_name=None, ttl=None):
+            ttls.append((meta["profile"]["emailAddress"], ttl))
+            return "ok"
+
+        idx = pool_index(**{SALES: (10, 10)}, premium=SALES)
+        with patch.object(acct, "refresh_seat", side_effect=tier):
+            self.run_once_raw(idx, FakePool("STABLE", SALES))
+        self.assertEqual(ttls[:2], [(SALES, acct.RECHECK_EVERY), (XTG2, acct.RECHECK_EVERY)])
+        ms = acct._mover_state()
+        ms["recheck"]["until"] = time.time() - 1  # the window is over: back to SEAT_CHECK_EVERY
+        acct._save_mover_state(ms)
+        ttls.clear()
+        with patch.object(acct, "refresh_seat", side_effect=tier):
+            self.run_once_raw(idx, FakePool("STABLE", SALES))
+        self.assertNotIn(acct.RECHECK_EVERY, [t for _, t in ttls])
+
     def test_seat_moved_by_hand_during_the_move_is_published_not_moved_again(self):
         pool = FakePool("STABLE", SALES)
         move = self.run_once(pool_index(**{SALES: (85, 40)}, premium=SALES), pool, seat_after={KIENLT: acct.PREMIUM_TIER})
