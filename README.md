@@ -220,6 +220,7 @@ A login lasts about **4 weeks (28–30 days) from the moment you log in**; using
 
 ## Troubleshooting
 
+- **"Seat tier for … did not become Premium (currently No seat)"**: since 2026-11-14 claude.ai sometimes leaves a seat given right after it was freed unassigned, or applies it minutes later. The seat manager checks each click for 20 s and again after a reload, clicks a second time, and before rolling back reads every member again (a change applied late counts as done). When it still fails, the message says what the page showed right after the click (toasts, dialogs, "N (M available)" seats), and machine 2 keeps a screenshot and those notes in `~/.claude-acct/seat-fail/` (the last 40 files).
 - **Usage shows "no data yet (error: …)" for every account**: the script cannot reach `api.anthropic.com`. Run `/acct:doctor` and look at the "HTTPS to api.anthropic.com" line. A Python installed from python.org on macOS has no CA certificates until you run `/Applications/Python 3.x/Install Certificates.command`; the plugin falls back to the macOS system root certificates (or `certifi` when installed) by itself, so this only remains when that fallback is not available. Otherwise check the network, proxy or firewall.
 - **"no data yet" without an error**: the account has no usage reading yet; `/acct:list` fetches it (and refreshes an expired access token first). Plugin versions before 0.8.4 did not refresh tokens, so update the plugin.
 

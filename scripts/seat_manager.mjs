@@ -1,5 +1,8 @@
 import { chromium } from "playwright-core";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // Usage: seat_manager.mjs <email>=<tier> ... applied in order, where <tier> is Premium, Standard or "No seat".
 // The organization has one Premium and one Standard seat: free a seat before giving it to someone else.
@@ -151,6 +154,34 @@ const context = browser.contexts()[0];
     if (!tier) throw new Error(`Could not read the seat tier of ${email} ("${text.trim()}").`);
     return tier[1];
   };
+  // What the page shows besides the table: toasts, alerts, dialogs, and the "N (M available)" seat count.
+  // Kept right after each click and saved with a screenshot when a change does not take, to see why.
+  const notes = () => page.evaluate(() => {
+    const clean = (s) => (s || "").replace(/\s+/g, " ").trim().slice(0, 200);
+    const shown = [...document.querySelectorAll('[role="alert"],[role="alertdialog"],[role="dialog"],[role="status"],[data-sonner-toast]')]
+      .map((n) => clean(n.textContent)).filter((t) => t && !/^Showing \d/.test(t) && !/^No seat assigned/.test(t));
+    const seats = ((document.body ? document.body.innerText : "").match(/([^\n]*)\n\s*Total seats/) || [])[1];
+    return { shown: [...new Set(shown)].slice(0, 6), seats: seats ? clean(seats) : null };
+  }).catch((error) => ({ shown: [], seats: null, error: String(error).slice(0, 200) }));
+  let afterClick = null;
+  const storeDir = process.env.CLAUDE_ACCT_HOME || path.join(os.homedir(), ".claude-acct");
+  const describe = (n) => !n ? "-" : [n.seats && `seats ${n.seats}`, n.shown.length && `shown "${n.shown.join(" | ")}"`,
+    n.error && `unreadable (${n.error})`].filter(Boolean).join(", ") || "nothing shown";
+  const capture = async (label) => {
+    const now = await notes();
+    let saved = "";
+    try {
+      const dir = path.join(storeDir, "seat-fail");
+      fs.mkdirSync(dir, { recursive: true });
+      const base = path.join(dir, new Date().toISOString().replace(/[:.]/g, "-"));
+      fs.writeFileSync(base + ".json", JSON.stringify({ at: new Date().toISOString(), label, url: page.url(), afterClick, now }, null, 1));
+      // A hidden page (RDP disconnected) may never paint: the screenshot is a bonus, never a reason to wait.
+      await page.screenshot({ path: base + ".png", fullPage: true, timeout: 10000 }).catch(() => {});
+      for (const old of fs.readdirSync(dir).sort().slice(0, -40)) fs.rmSync(path.join(dir, old), { force: true });
+      saved = ` Saved ${base}.json (.png).`;
+    } catch {}
+    return ` Page after the click: ${describe(afterClick)}; now: ${describe(now)}.${saved}`;
+  };
   const chooseTier = async (control, tier) => {
     // Open the tier picker and click the "<tier> seat" option, all through the DOM.
     // Right after the page loads the picker ignores clicks until its handlers are attached, so
@@ -178,32 +209,53 @@ const context = browser.contexts()[0];
       await page.keyboard.press("Escape").catch(() => {});
       throw new Error(`The seat picker did not offer "${tier}".`);
     }
+    await page.waitForTimeout(1500);  // a toast or dialog answering the click shows up within a moment
+    afterClick = await notes();
   };
   const reload = async () => {
     await page.goto(membersUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     await tableLoaded();
     await page.waitForTimeout(2000);  // let the page attach its handlers before the first click
   };
-  const setTier = async (email, tier) => {
-    if ((await tierOf(email)) === tier) return;
-    // The picker sometimes does not open, or opens empty, for a while: reload the page and try again.
+  // Click the option; false when the tier turned out to be set already. The picker sometimes does not open,
+  // or opens empty, for a while: reload the page and try again.
+  const pick = async (email, tier) => {
     for (let attempt = 1; ; attempt++) {
       try {
         await chooseTier(await tierControl(email), tier);
-        break;
+        return true;
       } catch (error) {
         if (attempt >= 3 || !/did not offer/.test(error.message)) throw error;
         await reload();
-        if ((await tierOf(email)) === tier) return;
+        if ((await tierOf(email)) === tier) return false;
       }
     }
+  };
+  // null once the tier is set, else the tier still shown after `rounds` checks half a second apart.
+  const waitTier = async (email, tier, rounds) => {
     let actual;
-    for (let attempt = 0; attempt < 40; attempt++) {
+    for (let attempt = 0; attempt < rounds; attempt++) {
       actual = await tierOf(email);
-      if (actual === tier) return;
+      if (actual === tier) return null;
       await page.waitForTimeout(500);
     }
-    throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}).`);
+    return actual;
+  };
+  const CLICKS = 2;
+  const setTier = async (email, tier) => {
+    if ((await tierOf(email)) === tier) return;
+    // Since 2026-11-14 claude.ai sometimes leaves a Premium seat given right after it was freed on "No seat", or
+    // applies it minutes later. Each click is checked for 20 s, then once more after a reload (the table can lag);
+    // a second click follows only if the tier is still not set. About 80 s in all before giving up.
+    let actual;
+    for (let click = 1; click <= CLICKS; click++) {
+      if (!(await pick(email, tier))) return;
+      if (!(actual = await waitTier(email, tier, 40))) return;
+      await reload();
+      if (!(actual = await waitTier(email, tier, 20))) return;
+    }
+    throw new Error(`Seat tier for ${email} did not become ${tier} (currently ${actual}) after ${CLICKS} clicks.`
+      + await capture(`${email} -> ${tier}`));
   };
 
   if (readEmails) {
@@ -222,12 +274,27 @@ const context = browser.contexts()[0];
       await setTier(change.email, change.tier);
     }
   } catch (error) {
-    // Best-effort rollback, in reverse order, so a failed step never leaves the seats half moved.
+    // A change claude.ai applied late is a success: read every member again before undoing anything.
+    try {
+      await reload();
+      let applied = true;
+      for (const change of changes) if ((await tierOf(change.email)) !== change.tier) { applied = false; break; }
+      if (applied) {
+        console.log(`Seats set: ${changes.map((c) => `${c.email} -> ${c.tier}`).join(", ")} (applied late).`);
+        process.exit(0);
+      }
+    } catch {}
+    // Rollback, in reverse order, so a failed step never leaves the seats half moved. A rollback that fails too
+    // is reported (machine 2 then reads the seats on claude.ai instead of trusting the old ones).
+    const undone = [];
     for (const { email } of done.reverse()) {
       const original = before.find((b) => b.email === email);
-      try { await setTier(email, original.tier); } catch {}
+      try { await setTier(email, original.tier); }
+      catch (e) { undone.push(`${email} -> ${original.tier}: ${String(e.message || e).split("\n")[0].slice(0, 300)}`); }
     }
-    throw error;
+    // The message alone, without a stack trace, so the log and the dashboard show the reason in full.
+    console.error(error.message + (undone.length ? ` Rollback failed: ${undone.join("; ")}.` : " Rolled back."));
+    process.exit(1);
   }
   console.log(`Seats set: ${changes.map((c) => `${c.email} -> ${c.tier}`).join(", ")}.`);
 process.exit(0); // Disconnect from CDP without closing the user's Chrome instance.

@@ -1049,6 +1049,7 @@ POOL_URL = "https://xtts.xtgroup.vn/pool"
 STATE_TTL = 5  # seconds a machine reuses the state it last fetched
 PREPARE_TIMEOUT = 120  # seconds machine 2 waits for the working machines to switch to the backup account
 MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move before it tries again
+SEAT_CHANGE_TIMEOUT = 330  # seconds one run of seat_manager.mjs may take: two changes and their rollback, retries included
 MOVER_LABEL = "vn.xtgroup.acct-mover"  # launchd label (macOS)
 MOVER_TASK = "XTTS_Acct_Mover"  # Task Scheduler name (Windows)
 MOVER_INTERVAL = 30  # seconds between two runs of the seat-moving service
@@ -2316,8 +2317,10 @@ def _set_seats(changes, cfg):
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
     env = seat_manager_env(cfg)
     try:
+        # Up to about 80 s for each change that does not take at once, and as long again to roll it back
+        # (seat_manager.mjs setTier): a timeout kills it half way, with no rollback at all.
         r = subprocess.run([node, script] + ["%s=%s" % c for c in changes], capture_output=True, text=True,
-                           timeout=120, env=env)
+                           timeout=SEAT_CHANGE_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise AcctError("Could not run seat automation: %s. Check Node.js, Playwright, and the Chrome CDP connection." % e)
     if r.returncode != 0:

@@ -299,6 +299,17 @@ class TokenRefreshTests(unittest.TestCase):
         self.assertNotIn("seat_blocked_until", meta)
         self.assertNotIn("seat_429_streak", meta)
 
+    def test_the_seat_manager_has_time_for_its_retries_and_rollback(self):
+        # setTier tries 2 clicks of about 40 s each, and a failed change is rolled back the same way: a timeout
+        # would kill it half way, with no rollback at all. The whole move must still fit the mover lock (600 s).
+        ok = acct.subprocess.CompletedProcess([], 0, "Seats set: a -> Premium.", "")
+        with patch.object(acct, "ensure_node_deps"), patch.object(acct, "seat_manager_env", return_value={}), \
+             patch.object(acct.subprocess, "run", return_value=ok) as run, patch.object(acct.sys, "stdout", io.StringIO()):
+            acct._set_seats([("a@x.vn", "No seat"), ("b@x.vn", "Premium")], {})
+        self.assertEqual(run.call_args.kwargs["timeout"], acct.SEAT_CHANGE_TIMEOUT)
+        self.assertGreaterEqual(acct.SEAT_CHANGE_TIMEOUT, 2 * 2 * 80)
+        self.assertLess(acct.PREPARE_TIMEOUT + acct.SEAT_CHANGE_TIMEOUT + 60, 600)
+
     def test_expired_token_without_refresh_name_is_left_alone(self):
         with patch.object(acct, "_post_token_refresh") as post:
             status = acct.refresh_usage({}, acct.read_stored_creds("b"))
