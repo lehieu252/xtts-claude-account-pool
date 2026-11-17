@@ -150,6 +150,12 @@ function render(d) {
   const pool = (d.accounts || []).filter((a) => a.role === "rotation" && a.estimated);
   if (pool.length && pool.every((a) => a.eligible === false))
     alerts.push(["warn", "Mọi account trong pool đều đang chạm ngưỡng: Premium giữ nguyên tới khi dùng hết một cửa sổ."]);
+  // BACKUP_FULL: the machines would be blocked on it while Premium moves, so machine 2 first gives Standard to an
+  // account with room on it, or the Premium seat waits (unless Premium has used a window up).
+  const std = (d.accounts || []).find((a) => a.role === "backup");
+  const stdFull = std && [["5h", std.five_hour], ["7d", std.seven_day]].filter(([, v]) => v !== null && v !== undefined && v >= 95);
+  if (stdFull && stdFull.length)
+    alerts.push(["warn", `Account tạm ${esc(std.email)} đang đầy (${stdFull.map(([k, v]) => `${k} ${Math.round(v)}%`).join(", ")}): trước khi chuyển Premium, máy 2 chuyển seat Standard sang account khác còn dùng được; nếu không có account nào, Premium chờ (trừ khi Premium đã dùng hết 100%).`]);
   // A login saved on machine 2 lasts about 4 weeks from the login; warn a week ahead (RELOGIN_WARN_DAYS).
   const relogin = (d.accounts || []).filter((a) => a.status === "log in again");
   if (relogin.length) alerts.push(["bad", `Cần login lại trên máy 2 (<span class="mono">/acct:login</span>): ${relogin.map((a) => esc(a.email)).join(", ")}. Máy 2 không chuyển seat được sang các account này.`]);

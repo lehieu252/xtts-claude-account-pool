@@ -252,11 +252,14 @@ class StandardPickTests(unittest.TestCase):
     def test_when_none_fits_the_holder_keeps_it_unless_it_used_a_window_up_or_a_premium_move_needs_one(self):
         snaps = {SALES: snap(10, 40), CONTACT: snap(0, 40), XTG6: snap(5, 30), XTG1: snap(30, 60)}
         self.assertIsNone(self.pick(snaps))
-        self.assertIsNone(self.pick(snaps, backup_spent=True))  # each would be used up on Standard too (7-day x5)
-        self.assertEqual(self.pick(snaps, must=True), CONTACT)  # the best ranked after the next Premium (xtg6)
-        snaps[XTG6] = snap(5, 18)  # 25 %/90 % on Standard: at a threshold, not used up
+        self.assertIsNone(self.pick(snaps, backup_spent=True))  # each would be full on Standard too (7-day x5)
+        self.assertIsNone(self.pick(snaps, must=True))  # not even for a Premium move: no room on Standard
+        snaps[XTG6] = snap(5, 18)  # 25 %/90 % on Standard: at a threshold, but room for a few minutes
         self.assertIsNone(self.pick(snaps))
         self.assertEqual(self.pick(snaps, backup_spent=True), XTG6)
+        self.assertEqual(self.pick(snaps, must=True), XTG6)
+        snaps[XTG6] = snap(5, 19)  # 95 % on Standard: full
+        self.assertIsNone(self.pick(snaps, must=True))
 
     def test_never_premium_the_holder_an_excluded_one_or_one_machine_2_cannot_use(self):
         idx = pool_index(premium=XTTS)
@@ -926,6 +929,35 @@ class MoverTests(unittest.TestCase):
         self.assertEqual(seats, {XTTS: acct.PREMIUM_TIER, CONTACT: acct.STANDARD_TIER, SALES: None, XTG1: None,
                                  XTG6: None, INFO: None})
         self.assertEqual((pool.state["premium"], pool.state["backup"]), (XTTS, CONTACT))
+
+    def test_a_full_standard_account_hands_its_seat_to_one_with_room_before_premium_moves(self):
+        # 17/11: info held Standard at 5-hour 100 %; the machines would have waited on it, blocked
+        pool = FakePool("STABLE", SALES)
+        pool.state["snapshots"].update({XTTS: snap(0, 50), CONTACT: snap(0, 5), XTG1: snap(0, 10), XTG6: snap(0, 50)})
+        acct._save_mover_state({"backup_manual": {"email": INFO, "at": time.time()}})  # not handed on while at rest
+        move = self.run_once(pool_index(**{SALES: (85, 40), INFO: (100, 44)}, premium=SALES), pool)
+        self.assertEqual([c.args[0] for c in move.call_args_list],
+                         [[(INFO, "No seat"), (XTG1, "Standard")], [(SALES, "No seat"), (CONTACT, "Premium")]])
+        self.assertEqual(pool.puts[1], ("PREPARING", SALES, CONTACT))
+        self.assertEqual(pool.state["backup"], XTG1)
+
+    def test_with_no_account_with_room_on_standard_the_premium_seat_waits_unless_it_is_used_up(self):
+        pool = FakePool("STABLE", SALES)
+        pool.state["snapshots"].update({XTTS: snap(80, 54), CONTACT: snap(0, 40), XTG1: snap(0, 48), XTG6: snap(27, 44)})
+        pool.state["request"] = {"id": "1", "kind": "premium", "email": CONTACT, "status": "pending"}
+        acct._save_mover_state({"backup_manual": {"email": INFO, "at": time.time()}})
+        idx = pool_index(**{SALES: (22, 43), INFO: (100, 44)}, premium=SALES)
+        move = self.run_once(idx, pool)  # the dashboard button, with the numbers of 17/11 16:39
+        move.assert_not_called()
+        self.assertEqual(pool.puts, [])
+        self.assertEqual(pool.state["request"]["status"], "fail")
+        self.assertIn("%s, the Standard account, is full (5-hour 100%%)" % INFO, pool.state["request"]["message"])
+        # Premium used up: staying blocks everyone for hours, so it moves, the machines waiting on info meanwhile
+        pool = FakePool("STABLE", SALES)
+        pool.state["snapshots"].update({XTTS: snap(80, 54), CONTACT: snap(0, 40), XTG1: snap(0, 48), XTG6: snap(27, 44)})
+        move = self.run_once(pool_index(**{SALES: (100, 43), INFO: (100, 44)}, premium=SALES), pool)
+        self.assertEqual(move.call_args.args[0], [(SALES, "No seat"), (CONTACT, "Premium")])
+        self.assertEqual(pool.state["backup"], INFO)
 
     def test_the_dashboard_button_gives_the_standard_seat_to_a_pool_account(self):
         pool = FakePool("STABLE", SALES)

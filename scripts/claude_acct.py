@@ -1043,6 +1043,10 @@ STANDARD_PICK_SEVEN_DAY = 15
 # The same usage reads about this many times higher on a Standard seat than on Premium (Premium ~6.25x Pro, Standard
 # ~1.25x Pro). Machine 2 logs the first reading of an account it gave Standard to (standard_reading) to check it.
 STANDARD_PER_PREMIUM = 5
+# At BACKUP_FULL % of a window the Standard account is full: the machines waiting on it while Premium moves would be
+# blocked. Before a Premium move machine 2 then gives the Standard seat to an account with room on it (both windows
+# below BACKUP_FULL % once on Standard); with none, the Premium seat waits, unless it has used a window up.
+BACKUP_FULL = 95
 
 # Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
 DAILY_THRESHOLD = 70
@@ -1426,8 +1430,8 @@ def _next_standard(idx, snapshots, premium, backup, backup_spent=False, exclude=
     """The pool account to give the Standard seat to (every machine waits on it while Premium moves), or None.
     Candidates: no seat, usable by machine 2, measured; the next Premium (#1) only when no other one fits. In order:
     5-hour <= STANDARD_PICK_FIVE_HOUR and 7-day <= STANDARD_PICK_SEVEN_DAY (Premium figures), best ranked first; else
-    the best ranked one still below the thresholds once on Standard; else, when the holder has used a window up, the
-    best ranked one not used up on Standard either; else, with `must` (a Premium move needs one), the best ranked one."""
+    the best ranked one still below the thresholds once on Standard; else, when the holder has used a window up or with
+    `must` (a Premium move needs one), the best ranked one with room on Standard (both windows below BACKUP_FULL %)."""
     skip = {premium, backup} | set(exclude)
     emails = [e for e in POOL_EMAILS if e not in skip and not _usable(idx, e)]
     order = [e for e in _premium_order(snapshots, premium, idx, backup) if e not in skip]
@@ -1442,11 +1446,11 @@ def _next_standard(idx, snapshots, premium, backup, backup_spent=False, exclude=
     for e, _ in ranked:
         if not _over(on_standard[e]):
             return e
-    if backup_spent:
+    if backup_spent or must:
         for e, _ in ranked:
-            if on_standard[e][0] < 100 and on_standard[e][2] < 100:
+            if on_standard[e][0] < BACKUP_FULL and on_standard[e][2] < BACKUP_FULL:
                 return e
-    return ranked[0][0] if must and ranked else None
+    return None
 
 
 def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
@@ -1733,30 +1737,78 @@ def _check_standard_probe(idx, email, name):
     _save_mover_state(ms)
 
 
+def _backup_full(idx, email, live):
+    """Which windows of the Standard account are at BACKUP_FULL % or more ("5-hour 100%"), else None (also when its
+    usage cannot be read: then it is not taken for full)."""
+    name = _saved_name(idx, email)
+    if not name:
+        return None
+    meta = idx["accounts"][name]
+    try:
+        status = refresh_usage(meta, read_stored_creds(name), refresh_name=None if name == live else name,
+                               ttl=USAGE_READ_EVERY)
+    except AcctError:
+        return None
+    if status not in ("ok", "cache"):
+        return None
+    values = _usage_window_values((meta.get("usage") or {}).get("data") or {})
+    full = ["%s %d%%" % ({"five_hour": "5-hour", "seven_day": "7-day"}[k], round(v)) for k, v in values.items()
+            if v >= BACKUP_FULL]
+    return ", ".join(full) or None
+
+
+def _used_up(idx, email):
+    """True when the last usage read of this account has a window at 100 %."""
+    name = _saved_name(idx, email)
+    usage = ((idx["accounts"][name].get("usage") or {}).get("data") or {}) if name else {}
+    return any(v >= 100 for v in _usage_window_values(usage).values())
+
+
 def _ensure_backup(idx, state, live, p_email, t_email):
-    """Before a Premium move: the account every machine waits on must hold the Standard seat on claude.ai and must not
-    be the target. Follows a Standard seat moved by hand, else gives the Standard seat to an account first.
-    Returns (state, that account or None: then the Premium seat does not move)."""
+    """Before a Premium move: the account every machine waits on must hold the Standard seat on claude.ai, must not
+    be the target, and must not be full (BACKUP_FULL). Follows a Standard seat moved by hand, else gives the Standard
+    seat to an account with room on it first. Returns (state, the account to wait on or None, why the Premium seat
+    must not move or None). With no account to wait on, the Premium seat still moves once it has used a window up:
+    staying blocks every machine for hours, moving for a few minutes."""
     current = _backup_of(state)
     name = _saved_name(idx, current)
+    full = None
     if current and current != t_email:
         if not name:
-            return state, current  # not logged in on machine 2: its seat cannot be read, trust the pool
+            return state, current, None  # not logged in on machine 2: its seat cannot be read, trust the pool
         status, tier = _seat_tier(idx, name, live, force=True)
-        if status != "ok" or tier == STANDARD_TIER:
-            return state, current  # unreadable: trust the pool
-    if current != t_email:
+        if status != "ok":
+            return state, current, None  # unreadable: trust the pool
+        if tier == STANDARD_TIER:
+            full = _backup_full(idx, current, live)
+            if not full:
+                return state, current, None
+    if current != t_email and not full:
         holder = _seat_holder(idx, live, force=True, tier=STANDARD_TIER, exclude=(current, p_email, t_email))
         if holder:
-            email = _email_of(idx, holder)
+            current = _email_of(idx, holder)
             log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (
-                current or "no account", email))
-            return _put_state("STABLE", p_email, message="Standard account synced with claude.ai: %s" % email,
-                              backup=email), email
-        current = None
-    why = "before the Premium seat moves to %s: %s" % (t_email, "it holds the Standard seat" if current
-                                                        else "no pool account holds the Standard seat")
-    return _give_standard(idx, state, live, current, why, exclude=(t_email,), must=True)
+                _backup_of(state) or "no account", current))
+            state = _put_state("STABLE", p_email, message="Standard account synced with claude.ai: %s" % current,
+                               backup=current)
+            full = _backup_full(idx, current, live)
+            if not full:
+                return state, current, None
+        else:
+            current = None
+    problem = ("%s, the Standard account, is full (%s)" % (current, full) if full
+               else "%s, the target, holds the Standard seat" % current if current
+               else "no pool account holds the Standard seat")
+    state, got = _give_standard(idx, state, live, current, "before the Premium seat moves to %s: %s" % (t_email, problem),
+                                exclude=(t_email,), must=True)
+    if got:
+        return state, got, None
+    why = "%s and no other pool account has room on the Standard seat" % problem
+    if _used_up(idx, p_email):
+        log_event("backup_full", "%s; %s has used a window up, so the Premium seat moves anyway" % (why, p_email),
+                  target=t_email)
+        return state, (current if full else None), None
+    return state, None, why + ": the Premium seat waits (it moves anyway once %s uses a window up)" % p_email
 
 
 def _rest_backup(idx, state, live):
@@ -1813,9 +1865,8 @@ def _wait_for_backup(prepared_at, backup, poll=5):
 def _move_seat(idx, premium, target, live, fields, state=None, reason="threshold reached"):
     """PREPARING → wait for the backup account → MOVING → seat move → STABLE. Returns True on success."""
     p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
-    state, backup = _ensure_backup(idx, state or {}, live, p_email, t_email)
-    if not backup:
-        why = "no pool account can take the Standard seat for the machines to wait on: the Premium seat stays"
+    state, backup, why = _ensure_backup(idx, state or {}, live, p_email, t_email)
+    if why:
         log_event("move_skipped", why, target=t_email, every=QUIET_EVERY, **fields)
         ms = _mover_state()
         ms["move_error"] = why
@@ -1834,7 +1885,8 @@ def _move_seat(idx, premium, target, live, fields, state=None, reason="threshold
 
 def _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email, t_email):
     prepared = _put_state("PREPARING", p_email, t_email, reason, backup=backup)
-    waiting = _wait_for_backup(prepared["updated_at"], backup)
+    # No account to wait on (the Premium account used a window up, see _ensure_backup): no wait.
+    waiting = _wait_for_backup(prepared["updated_at"], backup) if backup else []
     if waiting:
         log_event("prepare_timeout", "still not on %s after %ds: %s" % (backup, PREPARE_TIMEOUT, ", ".join(waiting)),
                   target=t_email, **fields)

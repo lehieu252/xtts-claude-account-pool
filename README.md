@@ -179,11 +179,15 @@ New Standard account:            an account without a seat, never the next Premi
                                  other one fits; in this order:
                                  1. 5h = 0% and 7d ≤ 15% (Premium figures), the best ranked first
                                  2. the best ranked one still below the thresholds once on Standard
-                                 3. when S has used a window up: the best ranked one not used up on Standard
+                                 3. when S has used a window up: the best ranked one with room on Standard
+                                    (both windows below 95%)
                                  none: S keeps it
-Before every Premium move:       the account the machines will wait on must hold Standard on claude.ai
-                                 and must not be the target; else machine 2 gives Standard to one first
-                                 (the best ranked if none fits); if it cannot, the Premium seat stays
+Before every Premium move:       the account the machines will wait on must hold Standard on claude.ai,
+                                 must not be the target, and must not be full (a window ≥ 95%); else
+                                 machine 2 first gives Standard to the account rules 1–3 pick (rule 3
+                                 always applies here); with none, the Premium seat waits and the reason
+                                 is logged (move_skipped) — unless P has used a window up: then it moves
+                                 anyway (staying blocks every machine for hours, moving for minutes)
 ```
 
 **Premium and Standard figures.** The same usage reads about 5 times higher on a Standard seat than on Premium (Premium is about 6.25x Pro, Standard about 1.25x Pro; `STANDARD_PER_PREMIUM`). Machine 2 keeps the last reading of each account with the seat it had and converts it: an account that held Standard ranks for Premium at a fifth of what it read, and an account at 7-day 16% as Premium reads about 80% once on Standard, so late in the week rule 2 rarely finds one and S keeps the seat. The dashboard shows every account without a seat in Premium figures. The first reading of an account given Standard is logged against its last Premium one (`standard_reading`), to check the ratio.
