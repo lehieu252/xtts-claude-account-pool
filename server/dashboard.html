@@ -134,9 +134,9 @@ function render(d) {
   $("phase").innerHTML = `<span class="pill ${esc(st.phase)}">${esc(st.phase)}</span>`;
   $("premium").textContent = st.premium || "—";
   $("target").textContent = st.phase === "STABLE" ? "—" : (st.target || "—");
-  // Older servers and movers send no backup account: the first one is used until machine 2 picks another.
-  const backup = st.backup || "info@xtgroup.vn";
-  $("backup").textContent = backup;
+  // The account with the Standard seat, where every machine waits while Premium moves (machine 2 publishes it).
+  const backup = st.backup || null;
+  $("backup").textContent = backup || "—";
 
   const movers = d.machines.filter((m) => m.role === "mover");
   const mover = movers.sort((a, b) => b.last_seen - a.last_seen)[0];
@@ -191,15 +191,17 @@ function render(d) {
   current = { premium: st.premium, backup, accounts };
   // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
   const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
-  const groups = [["premium", "Premium"], ["rotation", "Pool · thứ tự lên Premium tiếp theo (dưới ngưỡng trước, rồi 7d, 5h thấp nhất)"], ["backup", "Account tạm"]];
+  const groups = [["premium", "Premium"], ["rotation", "Không có seat · thứ tự lên Premium tiếp theo (dưới ngưỡng trước, rồi 7d, 5h thấp nhất; số liệu theo Premium)"], ["backup", "Account tạm · seat Standard"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
     const rows = accounts.filter((a) => groupOf(a) === g);
     if (!rows.length) return "";
     return `<tr class="group ${g}"><td colspan="6">${title}</td></tr>` + rows.map((a) => {
-      const tag = g === "premium" ? `<span class="chip premium">Premium</span>`
-        : g === "backup" ? `<span class="chip backup">${a.email === backup ? "đang dùng" : "chờ"}</span>`
+      const tag = (g === "premium" ? `<span class="chip premium">Premium</span>`
+        : g === "backup" ? `<span class="chip backup">Standard</span>`
         : a.rank === 1 ? `<span class="chip next">#1 · tiếp theo</span>`
-        : a.rank ? `<span class="chip">#${a.rank}</span>` : "";
+        : a.rank ? `<span class="chip">#${a.rank}</span>` : "")
+        + (a.standard_next ? ` <span class="chip backup">Standard tiếp theo</span>` : "");
+      const use = (kind, label) => `<button class="use" data-kind="${kind}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>${label}</button>`;
       return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${g === "backup" && a.email !== backup ? "idle" : ""}">
       <td class="mono">${esc(a.email)} ${tag}</td>
       <td>${esc(a.seat || "—")}</td>
@@ -207,9 +209,8 @@ function render(d) {
       <td class="${a.status || loginLeft(a, now) ? "mismatch" : "muted"}">${esc(a.status || (loginLeft(a, now) ? "Login hết hạn " + loginLeft(a, now) : null) || (a.estimated
         ? (a.measured_at ? "Lần cuối cập nhật: " + clock(a.measured_at) : "Chưa cập nhật")
         : "ok"))}</td>
-      <td>${g !== "premium" && a.email !== (g === "backup" ? backup : st.premium)
-        ? `<button class="use" data-kind="${g === "backup" ? "standard" : "premium"}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>Dùng</button>`
-        : ""}</td></tr>`;
+      <td>${g === "rotation" ? use("premium", "Premium") + " " + use("standard", "Standard")
+        : g === "backup" ? use("premium", "Premium") : ""}</td></tr>`;
     }).join("");
   }).join("") : `<tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
@@ -251,7 +252,8 @@ document.addEventListener("click", async (ev) => {
   const row = current.accounts.find((a) => a.email === email) || {};
   const seat = kind === "premium" ? "Premium" : "Standard";
   let text = `Chuyển seat ${seat} từ ${from || "—"} sang ${email}?`
-    + (kind === "premium" ? "\n\nCác máy sẽ về account tạm trong lúc chuyển (khoảng 1–3 phút)." : "");
+    + (kind === "premium" ? "\n\nCác máy sẽ về account tạm trong lúc chuyển (khoảng 1–3 phút)." : "")
+    + (kind === "premium" && email === current.backup ? "\n\nAccount này đang giữ seat Standard: máy 2 chuyển seat Standard sang account khác trước." : "");
   if (row.eligible === false) text += `\n\nLưu ý: theo lần cập nhật cuối, ${email} đang chạm ngưỡng usage.`;
   if (row.status) text += `\n\nLưu ý: ${row.status}.`;
   if (!confirm(text)) return;

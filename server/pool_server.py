@@ -45,7 +45,7 @@ MOVER_STALE_SEC = 300  # the dashboard flags machine 2 after this long without a
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
 ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "estimated", "eligible", "measured_at", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
-                  "status", "read_at", "login_expires")
+                  "status", "read_at", "login_expires", "standard_next")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
 

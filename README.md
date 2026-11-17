@@ -73,7 +73,7 @@ bash "$PLUGIN_ROOT/scripts/acct.sh" doctor
 
 Shell variables do not survive between tool calls, so in the next steps `$ACCT` stands for `bash "<PLUGIN_ROOT>/scripts/acct.sh"` with the absolute path printed above written out in full. The slash commands and hooks of a newly installed plugin are only loaded by a new session, but the script works right away, so steps 4 to 7 run it directly in the current session.
 
-**4. Log in to the pool accounts.** The twenty-one accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
+**4. Log in to the pool accounts.** The six accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
 
 ```bash
 $ACCT login
@@ -150,12 +150,15 @@ Two words with two meanings, never mixed:
 - **Move the seat**: change the seat tier of two accounts on the organization's Members page, P (Premium now) to No seat assigned and the target to Premium (the organization has one Premium and one Standard seat). It affects the whole organization and needs an admin browser. **Only the service on machine 2 does it.**
 - **Switch account**: change the account Claude Code on one machine is logged in with. It affects only that machine. **The hooks of each working machine do it for that machine.**
 
-The accounts are fixed in `scripts/claude_acct.py`:
+The accounts are fixed in `scripts/claude_acct.py` (`POOL_EMAILS`): `xtts@`, `sales@`, `contact@`, `xtg1@`, `xtg6@`, `info@xtgroup.vn`, in the order that breaks ties. claude.ai gives a seat to at most 4 new people a week in an organization, besides those that already hold one ("This organization has reached its weekly limit on how many people can use this seat type"), so the pool is 2 seats + 4 accounts, and every seat change stays among them. With a third seat it would be 7 accounts.
 
-| | Account | Role |
+| Seat | Who | Role |
 |---|---|---|
-| — | `info@`, `careers@`, `support@xtgroup.vn` | Backup accounts, never Premium. The one in use holds the Standard seat: every working machine waits on it while the Premium seat moves. Once it reaches the Premium thresholds, 5-hour ≥ 70% or 7-day ≥ 90% or a window used up (and nothing is moving), machine 2 gives the Standard seat to the best ranked other one, so the ones at rest can reset. Every working machine must be logged in to all three |
-| 1–18 | `xtts@`, `sales@`, `contact@`, `hieunx@`, `truongnv@`, `thanglt@`, `kienlt@`, `xtg1@` … `xtg11@xtgroup.vn` | Take turns holding Premium; without the seat they have no seat at all; the order breaks ties |
+| Premium | one pool account (P) | Every working machine works on it |
+| Standard | one other pool account (the "account tạm", S) | Every working machine waits on it while the Premium seat moves |
+| No seat | the other four | Wait their turn; their usage cannot be read, so they are ranked by their last reading |
+
+Any pool account can take either seat. Every working machine must be logged in to all six. The accounts of the former pools (`careers@`, `support@`, `hieunx@` … `xtg11@`) are no longer used: a machine still on one goes back to the Premium account.
 
 ```
 Move the seat when (machine 2):  P.5h ≥ 70%  OR  P.7d ≥ 90%   (or any window at 100%)
@@ -166,28 +169,42 @@ Target (the next Premium):      ranked by the last usage machine 2 read of each 
                                 an account never measured comes last and is taken only with the
                                 dashboard "Dùng" button
                                 (skips accounts not logged in on machine 2 or with an expired login)
+                                (never the account with the Standard seat)
 No target below the thresholds: P keeps the seat until it uses a window up, then the best ranked one
-Backup accounts:                the same ranking (readings taken with the Standard seat)
 No target:                      P keeps the seat, the reason is logged
+
+Hand the Standard seat on when:  S.5h ≥ 70%  OR  S.7d ≥ 90%  (or any window at 100%), nothing moving;
+                                 or when no pool account holds it
+New Standard account:            an account without a seat, never the next Premium (#1) unless no
+                                 other one fits; in this order:
+                                 1. 5h = 0% and 7d ≤ 15% (Premium figures), the best ranked first
+                                 2. the best ranked one still below the thresholds once on Standard
+                                 3. when S has used a window up: the best ranked one not used up on Standard
+                                 none: S keeps it
+Before every Premium move:       the account the machines will wait on must hold Standard on claude.ai
+                                 and must not be the target; else machine 2 gives Standard to one first
+                                 (the best ranked if none fits); if it cannot, the Premium seat stays
 ```
 
-**"Dùng" button on the dashboard.** Each account of the pool and each backup account has a button that gives it the seat, like moving it by hand on the Members page: a confirmation, then machine 2 does it on its next run (30 s at most). Premium goes through the full move (every machine waits on the backup account first, about 1–3 minutes); Standard is changed at once. The account is then kept like a seat given by hand. One request at a time, refused while a seat moves; the dashboard shows its progress and any error. Anyone with the dashboard password can use it.
+**Premium and Standard figures.** The same usage reads about 5 times higher on a Standard seat than on Premium (Premium is about 6.25x Pro, Standard about 1.25x Pro; `STANDARD_PER_PREMIUM`). Machine 2 keeps the last reading of each account with the seat it had and converts it: an account that held Standard ranks for Premium at a fifth of what it read, and an account at 7-day 16% as Premium reads about 80% once on Standard, so late in the week rule 2 rarely finds one and S keeps the seat. The dashboard shows every account without a seat in Premium figures. The first reading of an account given Standard is logged against its last Premium one (`standard_reading`), to check the ratio.
+
+**"Premium" / "Standard" buttons on the dashboard.** Each account without a seat has both buttons, and the Standard account a "Premium" one; each gives it that seat, like moving it by hand on the Members page: a confirmation, then machine 2 does it on its next run (30 s at most). Premium goes through the full move (every machine waits on the Standard account first, about 1–3 minutes; Premium for the Standard account first hands Standard to another one); Standard is changed at once. The account that would take Standard next is tagged "Standard tiếp theo". The account is then kept like a seat given by hand. One request at a time, refused while a seat moves; the dashboard shows its progress and any error. Anyone with the dashboard password can use it.
 
 **Pool server.** `server/pool_server.py` runs on the xtts server (port 5680, `https://xtts.xtgroup.vn/pool/` through nginx) and holds the shared phase (`STABLE`, `PREPARING`, `MOVING`), the Premium account, the target, the machines that report, and the log. Its dashboard (password from `/etc/account-pool.env`) shows all of it and refreshes every 5 seconds. Deploy it with `bash server/deploy.sh`; the API key, the mover key and the dashboard password are created on the server the first time and never stored in git.
 
 **One seat move, step by step.**
 
-1. Machine 2 runs every 30 s. Every 3 minutes it reads the usage of P and of the backup account with the Standard seat (one request per account every 3 minutes; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 3 minutes (one request per account) to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
-2. Threshold reached: machine 2 picks the target and writes `PREPARING (P → target)`.
-3. Every working machine, before its next request: sees `PREPARING`, **switches account to the backup account** and reports it.
-4. Machine 2 waits until every machine seen in the last 5 minutes reports the backup account (at most 120 s; idle machines are not waited for).
+1. Machine 2 runs every 30 s. Every 3 minutes it reads the usage of P and of the account with the Standard seat (one request per account every 3 minutes; that reading serves the threshold check, the usage kept for ranking and the dashboard table, sent right after it). Seats are read every 3 minutes (one request per account) to notice one moved by hand, and again right before any seat change. Below the thresholds, nothing happens.
+2. Threshold reached: machine 2 picks the target, makes sure an account holds Standard (see above), and writes `PREPARING (P → target)` with it.
+3. Every working machine, before its next request: sees `PREPARING`, **switches account to the Standard account** and reports it.
+4. Machine 2 waits until every machine seen in the last 5 minutes reports the Standard account (at most 120 s; idle machines are not waited for).
 5. Machine 2 writes `MOVING`, reads the seat of P again, and **moves the seat** in Chrome: P to No seat assigned, then the target to Premium, both checked on the page. A failure rolls both back.
 6. Machine 2 writes `STABLE, premium = target`.
 7. Every working machine, before its next request: **switches account to the new Premium**. An idle machine does it before its first request when it wakes up, so no request is ever sent with the old account.
 
 If the move fails, machine 2 writes `STABLE` with the account that really holds the seat (P after the rollback), the working machines switch back to it, and machine 2 waits 15 minutes before it tries again; the dashboard shows the error (for example, the admin browser needs a new sign-in). If the pool server cannot be reached, a working machine follows the seat it reads on claude.ai, and machine 2 does not move the seat. A request that is already running always finishes with the account it started with.
 
-**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), all twenty-one accounts logged in (`/acct:login`), the admin browser signed in (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
+**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), all six pool accounts logged in (`/acct:login`), the admin browser signed in (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
 
 - macOS: a launch agent (`vn.xtgroup.acct-mover`) runs `acct.sh auto serve-once` every 30 seconds through `~/.claude-acct/bin/acct-mover.sh`, which always starts the installed plugin version.
 - Windows (for example Windows Server over RDP): a Task Scheduler task (`XTTS_Acct_Mover`) starts at logon in the user's interactive session and runs `~/.claude-acct/bin/acct-mover.py`, a loop that calls `auto serve-once` every 30 seconds without opening a window (Task Scheduler cannot repeat faster than once a minute). Leave the RDP session with **Disconnect**, never **Sign out**, so the task, the logins and Chrome keep running. Output goes to `~/.claude-acct/mover.out.log`.
@@ -196,7 +213,7 @@ If the move fails, machine 2 writes `STABLE` with the account that really holds 
 
 Claude Code's own `autoContinueAtUsageLimit` (v2.1.234 or later) waits for the reset time of the account that hit the limit; it does not notice that the plugin switched to an account with usage left. The plugin's wake-up does not depend on it. Whether the two interact has not been verified on a real usage limit; turn `autoContinueAtUsageLimit` off if the wake-up is held.
 
-**Rotation log.** Every decision and failure is written as one JSON line to `~/.claude-acct/rotation.log` and, once the machine has joined, uploaded in the background to the pool server (dashboard → Log): heartbeats, thresholds without a target and why each account was skipped, seat moves (start, success, failure, timeout waiting for the backup account), account switches, unreadable usage, usage-limit recoveries and any other error. Each line names the machine by `git config --global user.name` and carries the plugin version. No token or credential is ever logged.
+**Rotation log.** Every decision and failure is written as one JSON line to `~/.claude-acct/rotation.log` and, once the machine has joined, uploaded in the background to the pool server (dashboard → Log): heartbeats, thresholds without a target and why each account was skipped, seat moves (start, success, failure, timeout waiting for the Standard account), Standard seat changes and the first reading after one (`standard_reading`), account switches, unreadable usage, usage-limit recoveries and any other error. Each line names the machine by `git config --global user.name` and carries the plugin version. No token or credential is ever logged.
 
 If `/acct:list` shows **🔴 Log in again** for an account, run the `/acct:login <name>` command it shows. Nothing else in the table needs your attention.
 
