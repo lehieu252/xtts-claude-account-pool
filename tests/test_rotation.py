@@ -410,8 +410,13 @@ class MoverTests(unittest.TestCase):
     """The service on machine 2 picks the active account and moves the seats of xtgroup.com.vn; it never switches
     account itself."""
 
+    MOVES = True  # these tests cover the seat moves; SeatMovesOffTests the default (off)
+
     def setUp(self):
         acct.save_pool_settings({"mover_key": "mk", "machine_id": "m2"})
+        acct.save_rotation({})
+        self.moves = patch.object(acct, "SEAT_MOVES", self.MOVES)
+        self.moves.start()
         for f in ("mover-state.json", "log-state.json"):
             try:
                 os.unlink(os.path.join(acct.store_dir(), f))
@@ -419,7 +424,9 @@ class MoverTests(unittest.TestCase):
                 pass
 
     def tearDown(self):
+        self.moves.stop()
         acct.save_pool_settings({})
+        acct.save_rotation({})
 
     def run_once(self, pool, claude, idx=None):
         idx = idx or pool_index()
@@ -568,6 +575,55 @@ class MoverTests(unittest.TestCase):
         acct.save_pool_settings({"api_key": "k", "machine_id": "m"})
         with self.assertRaises(acct.AcctError):
             acct._mover_once(argparse.Namespace(force=False, manual=False))
+
+
+class SeatMovesOffTests(unittest.TestCase):
+    """Since 1.0.34 machine 2 moves no seat by default: the machines only switch between accounts that hold one."""
+
+    setUp = MoverTests.setUp
+    tearDown = MoverTests.tearDown
+    run_once = MoverTests.run_once
+    near = MoverTests.near
+    MOVES = False
+
+    def test_off_by_default(self):
+        self.assertFalse(acct.SEAT_MOVES)
+
+    def test_no_seat_moves_even_when_every_account_with_a_seat_is_near_a_threshold(self):
+        pool, claude = FakePool(active=X0), self.near()
+        self.run_once(pool, claude)
+        self.assertEqual(claude.changes, [])
+        self.assertFalse(pool.pool["seat_moves"])
+        self.assertIsNone(pool.pool["swap_note"])
+        claude.usage[X0] = (80, 50)
+        self.run_once(pool, claude)
+        self.assertEqual(pool.state["active"], T2)  # the best one still below the thresholds
+        self.assertEqual(claude.changes, [])
+
+    def test_a_seat_given_by_hand_is_used_at_once(self):
+        # 18/11: xtg@ and xtg3@ hold the seats of xtgroup.com.vn, xtg1@ none
+        seats = {P: acct.PREMIUM_TIER, T1: acct.STANDARD_TIER, T2: acct.STANDARD_TIER, X0: acct.STANDARD_TIER,
+                 X3: acct.STANDARD_TIER}
+        pool, claude = FakePool(active=P), Claude({P: (100, 14, 2), T1: (100, 18), T2: (0, 100), X0: (40, 30)}, seats)
+        self.run_once(pool, claude)
+        self.assertEqual((pool.state["active"], pool.state["seated"]), (X3, [P, T1, T2, X0, X3]))
+        self.assertEqual(pool.state["fallbacks"], [X0])
+        self.assertEqual(claude.changes, [])
+
+    def test_the_dashboard_cannot_give_a_seat(self):
+        pool = FakePool(active=P, request={"id": "4", "kind": "seat", "email": X2, "status": "pending"})
+        claude = Claude()
+        self.run_once(pool, claude)
+        self.assertEqual(claude.changes, [])
+        self.assertEqual(pool.results[-1][0], "fail")
+        self.assertIn("seat moves are turned off", pool.results[-1][1])
+
+    def test_machine_2_s_rotation_json_turns_them_back_on(self):
+        acct.save_rotation({"seatMoves": True})
+        pool, claude = FakePool(active=X0), self.near()
+        self.run_once(pool, claude)
+        self.assertEqual(claude.changes, [([(X1, "No seat"), (X2, "Standard")], ORG_B)])
+        self.assertTrue(pool.pool["seat_moves"])
 
 
 class TokenRefreshTests(unittest.TestCase):

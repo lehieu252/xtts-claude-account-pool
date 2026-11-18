@@ -152,7 +152,9 @@ function render(d) {
   $("premium").innerHTML = esc(st.premium || "—") + (pool.premium_back_at
     ? `<span class="sub">dùng lại được lúc ${short(pool.premium_back_at)}</span>`
     : prem && prem.eligible ? `<span class="sub">còn dưới ngưỡng</span>` : "");
-  $("swaps").innerHTML = (pool.swaps_week ?? "—") + ` <span class="muted" style="font-size:13px;font-weight:400">lần tuần này</span>`
+  $("swaps").innerHTML = pool.seat_moves === false
+    ? `Tắt<span class="sub">máy 2 không chuyển seat; các máy chỉ dùng account đang có seat</span>`
+    : (pool.swaps_week ?? "—") + ` <span class="muted" style="font-size:13px;font-weight:400">lần tuần này</span>`
     + (pool.swap_blocked_until ? `<span class="sub">${pool.swap_limit ? "claude.ai chặn tới" : "thử lại sau"} ${short(pool.swap_blocked_until)}</span>` : "");
 
   const movers = d.machines.filter((m) => m.role === "mover");
@@ -169,7 +171,7 @@ function render(d) {
     alerts.push(["bad", `claude.ai đã chặn chuyển seat ở xtgroup.com.vn tới ${short(pool.swap_blocked_until)} (giới hạn tuần). Các máy vẫn chạy trên những account đang có seat.`]);
   else if (pool.swap_blocked_until && pool.swap_error)
     alerts.push(["bad", `Chuyển seat thất bại, máy 2 thử lại sau ${short(pool.swap_blocked_until)}: ${esc(pool.swap_error.slice(-300))}`]);
-  if (pool.swap_note && !pool.swap_blocked_until) alerts.push(["warn", `Chưa chuyển seat: ${esc(pool.swap_note)}`]);
+  if (pool.swap_note && !pool.swap_blocked_until && pool.seat_moves !== false) alerts.push(["warn", `Chưa chuyển seat: ${esc(pool.swap_note)}`]);
   if (/used a window up/.test(st.message || "")) alerts.push(["bad", "Mọi account có seat đều đã dùng hết 100%: các máy phải chờ tới khi một cửa sổ reset."]);
   else if (/every account with a seat is at a threshold/.test(st.message || "")) alerts.push(["warn", "Mọi account có seat đều đang chạm ngưỡng: các máy dùng account còn nhiều nhất."]);
   // A login saved on machine 2 lasts about 4 weeks from the login; warn a week ahead (RELOGIN_WARN_DAYS).
@@ -211,7 +213,8 @@ function render(d) {
       const tag = (a.active ? ` <span class="chip active">Đang dùng</span>` : "")
         + (a.next_seat ? ` <span class="chip next">Seat tiếp theo</span>` : "");
       const btn = (kind, label) => `<button class="use" data-kind="${kind}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>${label}</button>`;
-      const action = a.active ? "" : seated ? (a.eligible ? btn("use", "Dùng") : "") : a.role === "swap" ? btn("seat", "Gán seat") : "";
+      const action = a.active ? "" : seated ? (a.eligible ? btn("use", "Dùng") : "")
+        : a.role === "swap" && pool.seat_moves ? btn("seat", "Gán seat") : "";
       const state = a.status || (loginLeft(a, now) ? "Login hết hạn " + loginLeft(a, now) : null) || (a.estimated
         ? (a.measured_at ? "Không có seat · số liệu lúc " + clock(a.measured_at) : "Không có seat · chưa dùng (0%)")
         : a.eligible === false ? "Chạm ngưỡng" : a.near ? "Gần ngưỡng" : "ok");
@@ -226,8 +229,10 @@ function render(d) {
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
   $("rules").textContent = `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
     + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
-    + `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `
-    + `sang account không seat còn nhiều nhất (account chưa dùng tính 0%), trừ khi Premium sắp reset trong 30 phút.`;
+    + (pool.seat_moves === false
+      ? `Máy 2 không chuyển seat: chỉ dùng các account đang có seat; gán seat bằng tay trên trang Members thì account đó được dùng ngay.`
+      : `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `
+      + `sang account không seat còn nhiều nhất (account chưa dùng tính 0%), trừ khi Premium sắp reset trong 30 phút.`);
 
   $("transitions").innerHTML = d.transitions.length ? d.transitions.map((t) => `<tr>
       <td>${clock(t.at)}</td>

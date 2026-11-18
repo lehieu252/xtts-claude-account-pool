@@ -189,6 +189,8 @@ Move a seat of xtgroup.com.vn when ALL of:
   account that holds a seat already.
 ```
 
+**Seat moves are off since 1.0.34** (`SEAT_MOVES = False`): how many moves claude.ai allows a week is not known, so machine 2 moves no seat and the machines only switch between the accounts that hold one. A seat given by hand on the Members page is used at once (machine 2 reads every seat every 3 minutes), and the dashboard shows no "Gán seat" button. `"seatMoves": true` in machine 2's `~/.claude-acct/rotation.json` turns the rules above back on, without a new version.
+
 Machine 2 reads the seat of every account and the usage of every account with a seat every 3 minutes (the usage API limits each account), and keeps on the pool server the last reading of each one, which ranks it once it has no seat. It counts the seat moves of the week (Monday 00:00 UTC) and shows them on the dashboard.
 
 **Seat moves through the API.** `scripts/seat_manager.mjs` opens a tab of its own in the admin Chrome and calls the API the Members page itself uses (`PUT /api/organizations/<org>/members/<account>` with `seat_tier` `team_standard` / `unassigned`), then reads the members again to check. claude.ai answers at once, with its reason when it refuses (the weekly limit and its date, no seat free, …); a failed step rolls back the ones before it. Before 1.0.33 it clicked the page's seat pickers, which broke whenever the page changed (17/11/2026: "Tier for" became "Seat type for"). The organization id of xtgroup.com.vn comes from the saved login of one of its accounts on machine 2; the Chrome account must be an owner or admin of xtgroup.com.vn.

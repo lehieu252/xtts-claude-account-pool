@@ -1036,6 +1036,14 @@ WEEKLY_THRESHOLD = 90
 PREPARE_MARGIN = 10
 # ... unless Premium is back (its window resets) within PREMIUM_SOON seconds: seat moves are scarce.
 PREMIUM_SOON = 1800
+# Since 18/11 (1.0.34) machine 2 moves no seat at all: how many moves claude.ai allows a week is unknown. The machines
+# only switch between the accounts that hold a seat (a seat given by hand on the Members page is used at once).
+# "seatMoves": true in machine 2's rotation.json turns the moves above back on.
+SEAT_MOVES = False
+
+
+def _seat_moves_on():
+    return bool(load_rotation().get("seatMoves", SEAT_MOVES))
 # Machine 2 reads the seat of every pool account once per SEAT_CHECK_EVERY and the usage of every account with a seat
 # once per USAGE_READ_EVERY (the usage API limits each account); an account without a seat keeps its last reading.
 USAGE_READ_EVERY = 180
@@ -1730,7 +1738,8 @@ def _run_request(idx, state, request, rows, now):
                or ("%s is at a threshold" % email if _over(row["est"]) else None))
     elif kind == "seat":
         frm, why = _seat_to_free(rows, (state.get("active") or "").lower())
-        why = ("%s is not an account of %s" % (email, SWAP_ORG) if email not in SWAP_EMAILS
+        why = ("seat moves are turned off: give the seat by hand on the Members page" if not _seat_moves_on()
+               else "%s is not an account of %s" % (email, SWAP_ORG) if email not in SWAP_EMAILS
                else "%s holds a seat already" % email if _seated(row) else row["why"] or why
                or _swap_blocked(_mover_state(), now))
     else:
@@ -1781,7 +1790,7 @@ def _mover_once(args):
         ms.pop("pin", None)
         _save_mover_state(ms)
         log_event("pin_end", "%s, picked on the dashboard, is no longer usable or reached a threshold" % pinned)
-    frm, to, note = _plan_swap(rows, active, now)
+    frm, to, note = _plan_swap(rows, active, now) if _seat_moves_on() else (None, None, None)
     if to:
         blocked = _swap_blocked(_mover_state(), now)
         if blocked:
@@ -1839,7 +1848,7 @@ def _pool_info(rows, state, now):
             "swap_blocked": _swap_blocked(ms, now), "swap_blocked_until": ms.get("swap_blocked_until") if _swap_blocked(ms, now) else None,
             "swap_limit": bool(ms.get("swap_limit")) and bool(_swap_blocked(ms, now)),
             "swap_error": ms.get("swap_error"), "swap_note": ms.get("swap_note"),
-            "pin": (ms.get("pin") or {}).get("email"), "swap_org": SWAP_ORG,
+            "pin": (ms.get("pin") or {}).get("email"), "swap_org": SWAP_ORG, "seat_moves": _seat_moves_on(),
             "thresholds": {"five_hour": DAILY_THRESHOLD, "seven_day": WEEKLY_THRESHOLD, "margin": PREPARE_MARGIN}}
 
 
@@ -2106,8 +2115,10 @@ def cmd_auto_status(args):
     print("Standard (xtgroup.vn, fixed): %s" % ", ".join(FIXED_STANDARD_EMAILS))
     print("Standard (%s, %d seats for %d accounts): %s" % (SWAP_ORG, SWAP_SEATS, len(SWAP_EMAILS), ", ".join(SWAP_EMAILS)))
     print("Order: Premium below the thresholds, else the Standard account with a seat in use until it reaches them, "
-          "else the best ranked one; a seat of %s moves when the active account is %d points below a threshold and no "
-          "other account with a seat is" % (SWAP_ORG, PREPARE_MARGIN))
+          "else the best ranked one with a seat")
+    print("Seat moves: %s" % ("ON (a seat of %s moves when the active account is %d points below a threshold and no other "
+                              "account with a seat is)" % (SWAP_ORG, PREPARE_MARGIN) if _seat_moves_on()
+                              else "OFF: machine 2 moves no seat; give one by hand on the Members page"))
     print("Pool server: %s (%s)" % (_pool_url(st), "joined" if st.get("api_key") else "not joined: /acct:auto join <key>"))
     if st.get("api_key") or st.get("mover_key"):
         try:
