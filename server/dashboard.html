@@ -203,9 +203,10 @@ function render(d) {
   const req = st.request;
   const busy = req && ["pending", "running"].includes(req.status) && now - req.at < 900;
   current = { active, accounts, pool };
-  const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định (1 Premium, 2 Standard)"],
-                  ["comvn", "xtgroup.com.vn", pool.seat_moves === false
-                    ? "xtgroup.com.vn · chỉ các account đang có seat (máy 2 không chuyển seat)"
+  const fixed = pool.seat_moves === false;  // no seat moves: both teams keep their seats, only accounts with a seat count
+  const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định" + (fixed ? "" : " (1 Premium, 2 Standard)")],
+                  ["comvn", "xtgroup.com.vn", fixed
+                    ? "xtgroup.com.vn · seat cố định"
                     : "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, org, title]) => {
     const rows = accounts.filter((a) => (a.org || "") === org);
@@ -232,7 +233,7 @@ function render(d) {
   $("rules").textContent = `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
     + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
     + (pool.seat_moves === false
-      ? `Máy 2 không chuyển seat: chỉ dùng các account đang có seat; gán seat bằng tay trên trang Members thì account đó được dùng ngay.`
+      ? `Cả 2 team dùng seat cố định, máy 2 không chuyển seat: chỉ các account đang có seat được dùng; gán seat bằng tay trên trang Members thì account đó hiện ở đây và được dùng ngay.`
       : `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `
       + `sang account không seat còn nhiều nhất (account chưa dùng tính 0%), trừ khi Premium sắp reset trong 30 phút.`);
 
