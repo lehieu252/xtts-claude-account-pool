@@ -116,22 +116,50 @@ class PoolServerTests(unittest.TestCase):
         self.assertEqual((got["a@x.vn"]["five_hour"], got["b@x.vn"]["five_hour"]), (82.0, 1.0))
         self.assertNotIn("secret", got["a@x.vn"])
 
-    def test_the_dashboard_asks_for_a_seat_and_machine_2_reports_back(self):
-        self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "a@x.vn", "backup": "info@x.vn"}, mover=MOVER)
-        body, dash = {"kind": "premium", "email": "B@x.vn"}, {"X-Pool-Dashboard": "1"}
+    def test_machine_2_publishes_the_active_account_the_fallbacks_and_the_seats(self):
+        body = {"phase": "STABLE", "premium": "p@x.vn", "active": "s1@x.vn", "fallbacks": ["s2@x.vn", 3, ""],
+                "seated": ["p@x.vn", "s1@x.vn", "s2@x.vn"], "message": "Premium at a threshold"}
+        code, st = self.call("PUT", "/api/state", body, mover=MOVER)
+        self.assertEqual((code, st["active"], st["fallbacks"], st["seated"]),
+                         (200, "s1@x.vn", ["s2@x.vn", "3"], ["p@x.vn", "s1@x.vn", "s2@x.vn"]))
+        st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "p@x.vn", "active": "p@x.vn", "fallbacks": []},
+                       mover=MOVER)[1]
+        self.assertEqual((st["active"], st["fallbacks"], st["seated"]), ("p@x.vn", [], ["p@x.vn", "s1@x.vn", "s2@x.vn"]))
+        d = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]
+        self.assertEqual([t["active"] for t in d["transitions"]], ["p@x.vn", "s1@x.vn"])
+
+    def test_machine_2_publishes_the_pool_figures_with_the_usage_table(self):
+        pool_info = {"swaps_week": 3, "swap_blocked_until": 1795000000.0, "swap_limit": True, "secret": "x"}
+        self.assertEqual(self.call("POST", "/api/accounts", {"accounts": [], "pool": pool_info}, mover=MOVER), (200, "ok"))
+        got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["pool"]
+        self.assertEqual((got["swaps_week"], got["swap_limit"]), (3, True))
+        self.assertNotIn("secret", got)
+        self.assertIn("published", got)
+
+    def test_the_dashboard_asks_for_a_change_and_machine_2_reports_back(self):
+        self.call("PUT", "/api/state", {"phase": "STABLE", "premium": "a@x.vn", "active": "a@x.vn",
+                                        "seated": ["a@x.vn", "info@x.vn"]}, mover=MOVER)
+        dash = {"X-Pool-Dashboard": "1"}
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "premium", "email": "b@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 400)  # the kinds before 1.0.33
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "use", "email": "a@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 409)  # every machine is on it already
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "seat", "email": "info@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 409)  # it holds a seat already
+        body = {"kind": "seat", "email": "B@x.vn"}
         self.assertEqual(self.call("POST", "/api/request", body, headers=dash)[0], 401)
         self.assertEqual(self.call("POST", "/api/request", body, viewer="xtts:" + PASS)[0], 403)  # not from the page
         self.assertEqual(self.call("POST", "/api/request", body, key=API, headers=dash)[0], 401)
         code, st = self.call("POST", "/api/request", body, viewer="xtts:" + PASS, headers=dash)
         self.assertEqual((code, st["request"]["email"], st["request"]["status"]), (200, "b@x.vn", "pending"))
-        self.assertEqual(self.call("POST", "/api/request", {"kind": "standard", "email": "c@x.vn"},
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "use", "email": "c@x.vn"},
                                    viewer="xtts:" + PASS, headers=dash)[0], 409)  # one at a time
         rid = st["request"]["id"]
         self.assertEqual(self.call("POST", "/api/request/result", {"id": rid, "status": "ok"}, key=API)[0], 403)
         self.assertEqual(self.call("POST", "/api/request/result", {"id": rid, "status": "ok", "message": "done"}, mover=MOVER)[0], 200)
         self.assertEqual(self.call("GET", "/api/state", key=API)[1]["request"]["status"], "ok")
-        self.assertEqual(self.call("POST", "/api/request", {"kind": "standard", "email": "info@x.vn"},
-                                   viewer="xtts:" + PASS, headers=dash)[0], 409)  # already holds it
+        self.assertEqual(self.call("POST", "/api/request", {"kind": "use", "email": "info@x.vn"},
+                                   viewer="xtts:" + PASS, headers=dash)[0], 200)  # the next one
 
     def test_state_is_validated(self):
         self.assertEqual(self.call("PUT", "/api/state", {"phase": "DONE"}, mover=MOVER)[0], 400)

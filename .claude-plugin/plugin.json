@@ -1,7 +1,7 @@
 {
   "name": "acct",
-  "version": "1.0.32",
-  "description": "Manage multiple Claude accounts, monitor usage, and automatically rotate an organization Premium seat between saved accounts.",
+  "version": "1.0.33",
+  "description": "Manage multiple Claude accounts, monitor usage, and share them as one pool across two claude.ai Teams: every machine switches to the account with usage left; Standard seats move only when needed.",
   "author": {
     "name": "Hieu Le",
     "email": "hieule252uet@gmail.com"

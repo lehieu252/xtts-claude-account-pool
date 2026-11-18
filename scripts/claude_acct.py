@@ -31,6 +31,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import ssl
 import subprocess
@@ -712,10 +713,11 @@ def _login_all():
     if open_terminal(helper):
         print("Opened a **terminal window** to log in to %d account(s), one after the other: %s." % (
             len(todo), ", ".join(e for _, e in todo)))
-        print("For each one: claude.ai refuses Claude Code to an account without a seat, so first give it a seat on the "
-              "Members page by hand (and take it back after). Press Enter in the terminal, open the login link in a "
-              "**private browser window**, sign in as that account, authorize, and paste the whole code into the terminal "
-              "(Windows Git Bash: Shift+Insert). Your current account is NOT changed.")
+        print("For each one: claude.ai refuses Claude Code to an account without a seat, so log in the accounts of %s "
+              "while they hold one (giving a seat by hand counts against claude.ai's weekly limit). Press Enter in the "
+              "terminal, open the login link in a **private browser window**, sign in as that account, authorize, and "
+              "paste the whole code into the terminal (Windows Git Bash: Shift+Insert). Your current account is NOT "
+              "changed." % SWAP_ORG)
     else:
         print("Could not open a terminal window. Open a terminal and run:\n\n    bash %s" % sh_quote(helper))
 
@@ -843,9 +845,9 @@ def cmd_list(args):
             sync_error = str(e)
     live_profile = read_live_profile()
     pool, machines = _pool_view()
-    # Pool accounts without a seat have no usage to read (claude.ai answers 429): read only the Premium account
-    # and the backup account with the Standard seat, plus any account outside the pool.
-    seated = {(pool.get("premium") or "").lower(), _backup_of(pool)} if pool else None
+    # Pool accounts without a seat have no usage to read (claude.ai answers 429): read only the ones machine 2 says
+    # hold a seat, plus any account outside the pool.
+    seated = {e.lower() for e in pool.get("seated") or []} if pool and pool.get("seated") else None
     rows, need_login, soon = [], [], []
     for name in sorted(idx["accounts"]):
         meta = idx["accounts"][name]
@@ -933,40 +935,25 @@ def _pool_view():
 
 
 def _print_rotation_preview(idx, live, state, machines):
-    """The pool phase, the working machines, and where the Premium seat would go next. Changes nothing."""
-    print("\nAccount switching %s · backup %s · seat moves at %s." % (
-        "ON" if load_rotation().get("enabled") else "OFF", _backup_of(state) or "none yet", _trigger_text()))
-    if state:
-        print("Pool phase: %s, Premium: %s%s" % (state.get("phase"), state.get("premium") or "not published yet",
-                                                ", target: %s" % state.get("target") if state.get("phase") != "STABLE" else ""))
+    """The account the pool works on, the ones next, the accounts with a seat and the working machines."""
+    print("\nAccount switching %s · an account is left at %s." % (
+        "ON" if load_rotation().get("enabled") else "OFF", _trigger_text()))
+    if not state:
+        return
+    print("Active account (every machine works on it): %s%s" % (
+        state.get("active") or "not published yet", " (%s)" % state["message"] if state.get("message") else ""))
+    if state.get("fallbacks"):
+        print("Next, below the thresholds: %s" % ", ".join(state["fallbacks"]))
+    if state.get("seated"):
+        print("Accounts with a seat: %s" % ", ".join(state["seated"]))
+    missing = [e for e in [state.get("active")] + list(state.get("fallbacks") or []) if e and not _saved_name(idx, e)]
+    if missing:
+        print("Not logged in on this machine: %s (run /acct:login)" % ", ".join(missing))
     working = [m for m in machines if m.get("active")]
     if working:
         print("Machines seen in the last 5 minutes: %s" % ", ".join(
             "%s%s → %s" % (m.get("name") or m.get("host"), " (machine 2)" if m.get("role") == "mover" else "", m.get("account") or "?")
             for m in working))
-    holder = _saved_name(idx, (state or {}).get("premium")) or _seat_holder(idx, live)
-    if not holder:
-        print("Premium account: not found among the saved rotation accounts.")
-        return
-    usage = ((idx["accounts"][holder].get("usage") or {}).get("data")) or {}
-    values = _usage_window_values(usage)
-    reached = ("reached" if _usage_reached_threshold(usage) else "not reached") if values else "unknown"
-    print("Premium %s: 5-hour %s, 7-day %s; threshold %s." % (
-        holder, "%d%%" % round(values["five_hour"]) if "five_hour" in values else "?",
-        "%d%%" % round(values["seven_day"]) if "seven_day" in values else "?", reached))
-    try:
-        name, skipped = _next_premium(idx, holder, (state or {}).get("snapshots"), live=live,
-                                      premium_spent=any(v >= 100 for v in values.values()), backup=_backup_of(state))
-    except Exception as e:
-        print("Next Premium: could not be determined (%s)." % e)
-        return
-    if name:
-        print("Next Premium: **%s** (order by the last usage read of each: %s)" % (
-            name, " → ".join(_premium_order((state or {}).get("snapshots"), _email_of(idx, holder), idx, _backup_of(state)))))
-    else:
-        print("Next Premium: none below the thresholds; %s keeps the seat until it uses a window up. Notes:" % holder)
-    for reason in skipped:
-        print("- %s" % reason)
 
 
 def cmd_switch(args):
@@ -1016,66 +1003,56 @@ def save_rotation(cfg):
 
 # ---------------------------------------------------------------- the XTGroup pool (fixed)
 
-# The plugin serves one organization, so its accounts are fixed here: no `configure`, no order.
-# The organization has two seats: Premium (the account every machine works on) and Standard (the account every
-# machine waits on while the Premium seat moves). Every other pool account has no seat, so its usage cannot be read.
-# claude.ai lets an organization give a seat to at most 4 new people a week, besides those that hold one: so the
-# pool is these 6 accounts (2 seats + 4) and every seat change stays among them. Any of them can take either seat.
-# Once the Standard account reaches the thresholds, machine 2 gives the Standard seat to another one (_next_standard).
-POOL_EMAILS = (  # the order breaks ties
-    "xtts@xtgroup.vn", "sales@xtgroup.vn", "contact@xtgroup.vn", "xtg1@xtgroup.vn", "xtg6@xtgroup.vn", "info@xtgroup.vn",
-)
-ROTATION_EMAILS = POOL_EMAILS  # the accounts that can take the Premium seat
-MANUAL_BACKUP_GRACE = 180  # seconds an account given the Standard seat by hand keeps it, spent or not
-MANUAL_PREMIUM_GRACE = 180  # the same for an account given the Premium seat by hand (e.g. to log it in)
-# Accounts of former pools (before 1.0.31: 3 backup accounts and 18 rotation accounts): a machine still on one of them
-# goes back to the pool.
+# claude.ai limits, per organization and seat type, how many people may use a seat type in a week and how often a seat
+# may pass from one person to another ("This organization has reached its weekly limit ..."). On 17-18/11 both were
+# used up in xtgroup.vn: an open seat then only went back to its last few holders. So since 1.0.33 the pool spans two
+# claude.ai Teams, and machines switch between accounts that already hold a seat instead of moving seats:
+#   xtgroup.vn      1 Premium + 2 Standard seats, held for good: machine 2 never changes a seat there.
+#   xtgroup.com.vn  2 Standard seats for 4 accounts (SWAP_EMAILS): machine 2 moves one, and only when it is needed.
+# Every machine works on the account machine 2 publishes as "active": Premium while it is below the thresholds, else
+# a Standard account with a seat (kept until it reaches them), and Premium again as soon as its window resets.
+PREMIUM_EMAIL = "sales@xtgroup.vn"
+FIXED_STANDARD_EMAILS = ("truongnv@xtgroup.vn", "xtg2@xtgroup.vn")
+SWAP_EMAILS = ("xtg@xtgroup.com.vn", "xtg1@xtgroup.com.vn", "xtg2@xtgroup.com.vn", "xtg3@xtgroup.com.vn")
+SWAP_ORG = "xtgroup.com.vn"
+SWAP_SEATS = 2  # the Standard seats of xtgroup.com.vn
+STANDARD_EMAILS = FIXED_STANDARD_EMAILS + SWAP_EMAILS  # the order breaks ties
+POOL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS
+# Accounts of former pools (before 1.0.33): a machine still on one of them goes to the active account.
 FORMER_POOL_EMAILS = (
-    "hieule252uet@gmail.com", "careers@xtgroup.vn", "support@xtgroup.vn",
-    "hieunx@xtgroup.vn", "truongnv@xtgroup.vn", "thanglt@xtgroup.vn", "kienlt@xtgroup.vn",
-    "xtg2@xtgroup.vn", "xtg3@xtgroup.vn", "xtg4@xtgroup.vn", "xtg5@xtgroup.vn",
-    "xtg7@xtgroup.vn", "xtg8@xtgroup.vn", "xtg9@xtgroup.vn", "xtg10@xtgroup.vn", "xtg11@xtgroup.vn",
+    "hieule252uet@gmail.com", "xtts@xtgroup.vn", "contact@xtgroup.vn", "xtg1@xtgroup.vn", "xtg6@xtgroup.vn",
+    "info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn", "hieunx@xtgroup.vn", "thanglt@xtgroup.vn",
+    "kienlt@xtgroup.vn", "xtg3@xtgroup.vn", "xtg4@xtgroup.vn", "xtg5@xtgroup.vn", "xtg7@xtgroup.vn",
+    "xtg8@xtgroup.vn", "xtg9@xtgroup.vn", "xtg10@xtgroup.vn", "xtg11@xtgroup.vn",
 )
-# The Standard seat goes to an account without a seat that is not the next Premium (#1), whose last reading
-# (Premium figures) is 5-hour <= STANDARD_PICK_FIVE_HOUR and 7-day <= STANDARD_PICK_SEVEN_DAY, the best ranked first.
-STANDARD_PICK_FIVE_HOUR = 0
-STANDARD_PICK_SEVEN_DAY = 15
-# The same usage reads about this many times higher on a Standard seat than on Premium (Premium ~6.25x Pro, Standard
-# ~1.25x Pro). Machine 2 logs the first reading of an account it gave Standard to (standard_reading) to check it.
-STANDARD_PER_PREMIUM = 5
-# At BACKUP_FULL % of a window the Standard account is full: the machines waiting on it while Premium moves would be
-# blocked. Before a Premium move machine 2 then gives the Standard seat to an account with room on it (both windows
-# below BACKUP_FULL % once on Standard); with none, the Premium seat waits, unless it has used a window up.
-BACKUP_FULL = 95
 
-# Rotation: the Premium account reaches 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD.
-DAILY_THRESHOLD = 70
+# An account is at a threshold at 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD (or a window at 100 %), each
+# read against the limits of its own seat. The machines leave it then for another account with a seat.
+DAILY_THRESHOLD = 80
 WEEKLY_THRESHOLD = 90
-# Machine 2 reads the usage of the two accounts with a seat (Premium, and the backup account with the Standard
-# seat) once per USAGE_READ_EVERY: that one reading serves the threshold check, the usage kept for ranking and the
-# dashboard table (the usage API limits each account). Seats are read every SEAT_CHECK_EVERY to notice a seat
-# moved by hand, and always again right before machine 2 changes one.
-USAGE_READ_EVERY = 180  # /api/oauth/usage: one request per account every 3 minutes
-SEAT_CHECK_EVERY = 180  # /api/oauth/profile: the same
+# PREPARE_MARGIN points below the thresholds the active account is "near" them. If no other account with a seat is
+# below that too, machine 2 gives a seat of xtgroup.com.vn to an account without one that has room, so it holds the
+# seat before the machines need it: a machine only ever switches to an account that holds a seat already.
+PREPARE_MARGIN = 10
+# ... unless Premium is back (its window resets) within PREMIUM_SOON seconds: seat moves are scarce.
+PREMIUM_SOON = 1800
+# Machine 2 reads the seat of every pool account once per SEAT_CHECK_EVERY and the usage of every account with a seat
+# once per USAGE_READ_EVERY (the usage API limits each account); an account without a seat keeps its last reading.
+USAGE_READ_EVERY = 180
+SEAT_CHECK_EVERY = 180
 
-# Pool server (server/pool_server.py on the xtts server): the shared phase, the machines, the log.
+# Pool server (server/pool_server.py on the xtts server): the shared state, the machines, the log.
 POOL_URL = "https://xtts.xtgroup.vn/pool"
 STATE_TTL = 5  # seconds a machine reuses the state it last fetched
-PREPARE_TIMEOUT = 120  # seconds machine 2 waits for the working machines to switch to the backup account
-MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move before it tries again
-SEAT_CHANGE_TIMEOUT = 330  # seconds one run of seat_manager.mjs may take: two changes and their rollback, retries included
-# claude.ai sometimes applies a seat change minutes after the seat manager gave up on it. For RECHECK_FOR seconds after
-# a failed change, machine 2 reads the seats of the accounts it touched every RECHECK_EVERY (not SEAT_CHECK_EVERY),
-# so the pool follows such a late change within a minute.
-RECHECK_FOR = 600
-RECHECK_EVERY = 60
+MOVE_BACKOFF = 900  # seconds machine 2 waits after a failed seat move (other than a claude.ai limit) before the next
+SEAT_CHANGE_TIMEOUT = 150  # seconds one run of seat_manager.mjs may take (a few API calls and their rollback)
 MOVER_LABEL = "vn.xtgroup.acct-mover"  # launchd label (macOS)
 MOVER_TASK = "XTTS_Acct_Mover"  # Task Scheduler name (Windows)
 MOVER_INTERVAL = 30  # seconds between two runs of the seat-moving service
 
 LOG_MAX_BYTES = 5_000_000
 HEARTBEAT_EVERY = 600  # seconds; at most one heartbeat log line per machine
-QUIET_EVERY = 1800  # seconds; repeated states (no destination, unreadable usage) are logged at most this often
+QUIET_EVERY = 1800  # seconds; repeated states (no seat to give, unreadable usage) are logged at most this often
 _hook = None  # the hook event that started this process, set by main()
 
 
@@ -1157,8 +1134,7 @@ def pool_state(account, force=False):
     cache = read_json(cache_path, {}) or {}
     if not force and cache.get("account") == account and time.time() - cache.get("fetched", 0) < STATE_TTL:
         return cache["state"]
-    at_backup = bool(account) and account == ((cache.get("state") or {}).get("backup") or "").lower()
-    state = pool_call("POST", "/api/machine", _machine_report(account, at_backup))
+    state = pool_call("POST", "/api/machine", _machine_report(account, False))
     write_json_atomic(cache_path, {"fetched": time.time(), "account": account, "state": state})
     return state
 
@@ -1325,165 +1301,324 @@ def _remember_usage(state, email, meta, tier):
     state.setdefault("snapshots", {})[email] = snap
 
 
-def _estimate(snap, tier="premium", now=None):
-    """(5-hour %, its reset, 7-day %, its reset) of an account now as a `tier` seat would show it, from its last
-    reading (with either seat: STANDARD_PER_PREMIUM converts), or None if it was never read. A window past its
-    reset time is 0 % with no reset."""
+NEVER_READ = (0.0, None, 0.0, None)  # an account never read: nothing used
+
+
+def _estimate(snap, now=None):
+    """(5-hour %, its reset, 7-day %, its reset) of an account now, from a reading (_snapshot), or None without one.
+    A window past its reset time is 0 % with no reset."""
     now = time.time() if now is None else now
-    if not snap:
+    if not snap or (snap.get("five_hour") is None and snap.get("seven_day") is None):
         return None
-    read_as = snap.get("tier") or tier
-    scale = 1.0 if read_as == tier else (1.0 / STANDARD_PER_PREMIUM if tier == "premium" else STANDARD_PER_PREMIUM)
     out = []
     for key in ("five_hour", "seven_day"):
-        value, reset = min(100.0, float(snap.get(key) or 0) * scale), _parse_reset(snap.get(key + "_reset"))
+        value, reset = min(100.0, float(snap.get(key) or 0)), _parse_reset(snap.get(key + "_reset"))
         if reset is not None and reset <= now:
             value, reset = 0.0, None
         out += [value, reset]
     return tuple(out)
 
 
-def _over(est):
-    return est is not None and (est[0] >= DAILY_THRESHOLD or est[2] >= WEEKLY_THRESHOLD)
+def _over(est, five=None, seven=None):
+    """At a threshold: 5-hour >= `five` or 7-day >= `seven` (DAILY_THRESHOLD / WEEKLY_THRESHOLD), or a window at 100 %."""
+    five = DAILY_THRESHOLD if five is None else five
+    seven = WEEKLY_THRESHOLD if seven is None else seven
+    return est is not None and (est[0] >= five or est[2] >= seven or est[0] >= 100 or est[2] >= 100)
 
 
-def _rank_key(est, pos, usable=True):
-    """Measured and below the thresholds first, then measured at a threshold, then never measured (only taken
-    with the dashboard button), then not usable by machine 2; within a group the lowest 7-day, the lowest
-    5-hour, the earliest 5-hour reset, the earliest 7-day reset (a window not running has none: after one
-    that has), then the list order."""
+def _near(est):
+    """Near a threshold: PREPARE_MARGIN points below it, or above."""
+    return _over(est, DAILY_THRESHOLD - PREPARE_MARGIN, WEEKLY_THRESHOLD - PREPARE_MARGIN)
+
+
+def _used_up(est):
+    return est is not None and (est[0] >= 100 or est[2] >= 100)
+
+
+def _back_at(est, five=None, seven=None):
+    """When every window of `est` at its level (the thresholds by default) has reset: 0 when none is at it, None when
+    one of them has no reset time."""
+    five = DAILY_THRESHOLD if five is None else five
+    seven = WEEKLY_THRESHOLD if seven is None else seven
+    at = 0
+    for value, reset, level in ((est[0], est[1], five), (est[2], est[3], seven)):
+        if value >= level or value >= 100:
+            if reset is None:
+                return None
+            at = max(at, reset)
+    return at
+
+
+def _rank_key(est, pos):
+    """Below the thresholds first, then at one; within each the lowest 7-day, the lowest 5-hour, the earliest 5-hour
+    reset, the earliest 7-day reset (a window not running has none: after one that has), then the list order."""
     inf = float("inf")
-    if not usable:
-        return (3, 0, 0, inf, inf, pos)
-    if est is None:
-        return (2, 0, 0, inf, inf, pos)
     return (1 if _over(est) else 0, est[2], est[0], est[1] if est[1] is not None else inf,
             est[3] if est[3] is not None else inf, pos)
 
 
-def _ranked(emails, snapshots, tier, idx=None):
-    """[(email, estimate or None)] best first. With idx, accounts machine 2 cannot use go last."""
-    rows = [(e, _estimate((snapshots or {}).get(e), tier)) for e in emails]
-    return sorted(rows, key=lambda r: _rank_key(r[1], emails.index(r[0]), idx is None or not _usable(idx, r[0])))
+def _row_rank(row):
+    return _rank_key(row["est"] if row["est"] is not None else (100.0, None, 100.0, None), row["pos"])
 
 
-def _pick(ranked, holder_spent):
-    """The best measured account, or None when it would reach a threshold at once: then the holder keeps its
-    seat, unless it has used a window up, and the best one has not. Never-measured accounts are not taken."""
-    ranked = [r for r in ranked if r[1] is not None]
-    if not ranked:
-        return None
-    email, est = ranked[0]
-    if not _over(est):
-        return email
-    if holder_spent and est[0] < 100 and est[2] < 100:
-        return email
-    return None
+def _hhmm(t):
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%d/%m %H:%M UTC")
 
 
-def _usable(idx, email):
-    """None if machine 2 can switch a working machine to it, else why not."""
-    name = _saved_name(idx, email)
-    if not name:
-        return "not logged in on this machine"
-    try:
-        creds = read_stored_creds(name)
-    except AcctError:
-        return "credentials unavailable"
-    if token_state(idx["accounts"][name], creds) == "relogin":
-        return "login expired/revoked"
-    return None
+def _iso(t):
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat() if t else None
 
 
-def _next_premium(idx, premium, snapshots, live=None, premium_spent=False, backup=None):
-    """The best pool account for the Premium seat, from the last usage read of each (see _rank_key); never the
-    account with the Standard seat (`backup`: every machine waits on it while the seat moves).
-    Returns (name, [notes]); None when every account would reach a threshold at once."""
-    premium_email = _email_of(idx, premium) or premium
-    skipped, emails = [], []
-    for email in ROTATION_EMAILS:
-        if email in (premium_email, backup):
-            continue
-        why = _usable(idx, email)
-        if why:
-            skipped.append("%s (%s)" % (email, why))
+# ---------------------------------------------------------------- machine 2: read the pool
+
+SEAT_NAMES = {PREMIUM_TIER: "Premium", STANDARD_TIER: "Standard"}
+
+
+def _seated(row):
+    return row["seat"] in ("Premium", "Standard")
+
+
+def _ready(row):
+    """The machines can work on it: it holds its seat (Premium for the Premium account, Standard for the others), its
+    login on machine 2 is valid, and its usage is known."""
+    seat = "Premium" if row["email"] == PREMIUM_EMAIL else "Standard"
+    return row["seat"] == seat and not row["why"] and row["est"] is not None
+
+
+def _read_pool(idx, live, state, force=False, now=None):
+    """One row per pool account, in POOL_EMAILS order: email, pos, name (saved on machine 2), seat ("Premium" |
+    "Standard" | "No seat" | None: unknown), est (_estimate), estimated (no seat: from its last reading kept on the
+    pool server, 0 % if never read) with measured_at, read_at, fresh (a new reading, to keep on the pool server),
+    why (the machines cannot use it), status (why its usage could not be read), login_expires."""
+    now = time.time() if now is None else now
+    snaps = state.get("snapshots") or {}
+    rows = []
+    for pos, email in enumerate(POOL_EMAILS):
+        row = {"email": email, "pos": pos, "name": _saved_name(idx, email), "seat": None, "est": None, "why": None,
+               "status": None, "fresh": False, "estimated": False, "measured_at": None, "read_at": None,
+               "login_expires": None}
+        rows.append(row)
+        if row["name"]:
+            _read_account(idx, live, row, force)
         else:
-            emails.append(email)
-    ranked = _ranked(emails, snapshots, "premium")
-    email = _pick(ranked, premium_spent)
-    measured = [r for r in ranked if r[1] is not None]
-    if not email and measured:
-        best, est = measured[0]
-        skipped.append("every account is at a threshold (best: %s, 5-hour %d%%, 7-day %d%%)" % (best, est[0], est[2]))
-    unmeasured = [e for e, est in ranked if est is None]
-    if unmeasured:
-        skipped.append("never measured, taken only with the dashboard button: %s" % ", ".join(unmeasured))
-    return (_saved_name(idx, email) if email else None), skipped
+            row["why"] = "not logged in on machine 2"
+        if row["est"] is None and not _seated(row):
+            snap = snaps.get(email) or {}
+            row.update(est=_estimate(snap, now) or NEVER_READ, estimated=True, measured_at=snap.get("at"))
+    return rows
 
 
-def _premium_order(snapshots, premium=None, idx=None, backup=None):
-    """The pool accounts other than Premium and the Standard one, in the order they would become Premium."""
-    return [e for e, _ in _ranked([e for e in ROTATION_EMAILS if e not in (premium, backup)], snapshots, "premium", idx)]
-
-
-def _next_standard(idx, snapshots, premium, backup, backup_spent=False, exclude=(), must=False):
-    """The pool account to give the Standard seat to (every machine waits on it while Premium moves), or None.
-    Candidates: no seat, usable by machine 2, measured; the next Premium (#1) only when no other one fits. In order:
-    5-hour <= STANDARD_PICK_FIVE_HOUR and 7-day <= STANDARD_PICK_SEVEN_DAY (Premium figures), best ranked first; else
-    the best ranked one still below the thresholds once on Standard; else, when the holder has used a window up or with
-    `must` (a Premium move needs one), the best ranked one with room on Standard (both windows below BACKUP_FULL %)."""
-    skip = {premium, backup} | set(exclude)
-    emails = [e for e in POOL_EMAILS if e not in skip and not _usable(idx, e)]
-    order = [e for e in _premium_order(snapshots, premium, idx, backup) if e not in skip]
-    nxt = order[0] if order else None
-    snaps = snapshots or {}
-    ranked = [(e, est) for e, est in _ranked(emails, snaps, "premium") if est is not None]
-    ranked = [r for r in ranked if r[0] != nxt] + [r for r in ranked if r[0] == nxt]  # #1 last
-    on_standard = {e: _estimate(snaps.get(e), "standard") for e, _ in ranked}
-    for e, est in ranked:
-        if e != nxt and est[0] <= STANDARD_PICK_FIVE_HOUR and est[2] <= STANDARD_PICK_SEVEN_DAY:
-            return e
-    for e, _ in ranked:
-        if not _over(on_standard[e]):
-            return e
-    if backup_spent or must:
-        for e, _ in ranked:
-            if on_standard[e][0] < BACKUP_FULL and on_standard[e][2] < BACKUP_FULL:
-                return e
-    return None
-
-
-def _seat_tier(idx, name, live, force=False, ttl=USAGE_CACHE_TTL):
-    """Return (status, tier) of a saved account's seat. The live login's token is never refreshed here."""
+def _read_account(idx, live, row, force):
+    name = row["name"]
+    meta = idx["accounts"][name]
+    refresh_name = None if name == live else name  # never refresh the token Claude Code is using
     try:
         creds = read_stored_creds(name)
     except AcctError:
-        return "credentials unavailable", None
-    meta = idx["accounts"][name]
-    status = refresh_seat(meta, creds, force=force, refresh_name=None if name == live else name, ttl=ttl)
-    return status, (meta.get("seat") or {}).get("tier")
+        row["why"] = "credentials unavailable"
+        return
+    row["login_expires"] = login_expires_at(creds)
+    if token_state(meta, creds) == "relogin":
+        row["why"] = "log in again"
+        return
+    refresh_seat(meta, creds, force=force, refresh_name=refresh_name, ttl=SEAT_CHECK_EVERY)
+    if meta.get("seat"):  # the last seat read; unknown until one is
+        row["seat"] = SEAT_NAMES.get(meta["seat"].get("tier"), "No seat")
+    if not _seated(row):
+        return
+    status = refresh_usage(meta, creds, force=force, refresh_name=refresh_name, ttl=USAGE_READ_EVERY)
+    if status == "revoked":
+        row["why"] = "log in again"
+    row["status"] = None if status in ("ok", "cache") else status
+    row["fresh"] = status == "ok"
+    row["est"] = _estimate(_snapshot(meta, row["seat"].lower()))  # a failed read keeps the last one
+    row["read_at"] = (meta.get("usage") or {}).get("fetchedAt")
 
 
-def _seat_holder(idx, live, first=None, force=False, tier=PREMIUM_TIER, exclude=()):
-    """The pool account that holds the `tier` seat on claude.ai, or None if no saved account confirms it."""
-    names = [n for n in (_saved_name(idx, e) for e in POOL_EMAILS if e not in exclude) if n]
-    if first in names:
-        names.remove(first)
-        names.insert(0, first)
-    for name in names:
-        status, got = _seat_tier(idx, name, live, force=force, ttl=SEAT_CHECK_EVERY)
-        if status in ("ok", "cache") and got == tier:
-            return name
-    return None
+def _keep_readings(idx, state, rows):
+    for row in rows:
+        if row["fresh"]:
+            _remember_usage(state, row["email"], idx["accounts"][row["name"]], row["seat"].lower())
 
 
 def _forget_seat_readings(idx, *names):
-    """Drop cached seat and usage of accounts whose seat changed: a percentage read against Standard
-    limits would be taken for a Premium one (5x too high) and trigger another rotation."""
+    """Drop the cached seat and usage of accounts whose seat changed: read them again at once."""
     for name in names:
         meta = idx["accounts"].get(name) or {}
         meta.pop("seat", None)
         meta.pop("usage", None)
+
+
+# ---------------------------------------------------------------- machine 2: the active account
+
+def _premium_note(prem):
+    """Why the machines are not on Premium."""
+    if prem["why"]:
+        return "Premium %s: %s" % (prem["email"], prem["why"])
+    if prem["seat"] != "Premium":
+        return "Premium %s: %s" % (prem["email"], "seat unknown" if prem["seat"] is None else "it has no Premium seat")
+    if prem["est"] is None:
+        return "Premium %s: usage unknown (%s)" % (prem["email"], prem["status"] or "not read yet")
+    back = _back_at(prem["est"])
+    return "Premium at a threshold" + (" until %s" % _hhmm(back) if back else "")
+
+
+def _choose_active(rows, current=None, pinned=None):
+    """(email, why) of the account every machine works on; (None, why) leaves them where they are. In order:
+    1. the account picked on the dashboard (`pinned`), while it is below the thresholds;
+    2. Premium, while it is below the thresholds;
+    3. the current Standard account, while it is below them (no switching back and forth);
+    4. the best ranked Standard account with a seat below them (_rank_key);
+    5. none below them: the current one, else the best ranked one, unless it has used a window up."""
+    by = {r["email"]: r for r in rows}
+    pin = by.get(pinned)
+    if pin is not None and _ready(pin) and not _over(pin["est"]):
+        return pinned, "picked on the dashboard"
+    prem = by[PREMIUM_EMAIL]
+    if _ready(prem) and not _over(prem["est"]):
+        return PREMIUM_EMAIL, "Premium"
+    why = _premium_note(prem)
+    ready = [r for r in rows if _ready(r)]
+    cur = by.get(current)
+    standards = [r for r in ready if r["email"] != PREMIUM_EMAIL]
+    if cur is not None and cur in standards and not _over(cur["est"]):
+        return current, why
+    below = [r for r in standards if not _over(r["est"])]
+    if below:
+        return min(below, key=_row_rank)["email"], why
+    left = [r for r in ready if not _used_up(r["est"])]
+    if cur is not None and cur in left:
+        return current, why + "; every account with a seat is at a threshold"
+    if left:
+        return min(left, key=_row_rank)["email"], why + "; every account with a seat is at a threshold"
+    return None, why + "; every account with a seat has used a window up"
+
+
+def _free_order(rows):
+    """The accounts of xtgroup.com.vn without a seat that could take one (logged in on machine 2, below the near
+    level once their windows reset; never read: 0 %), best ranked first."""
+    return sorted((r for r in rows if r["email"] in SWAP_EMAILS and r["seat"] == "No seat" and not r["why"]
+                   and not _near(r["est"])), key=_row_rank)
+
+
+def _seat_to_free(rows, active):
+    """(the account of xtgroup.com.vn whose seat goes, None for a free seat, why not) for a seat move now: the one with
+    a seat that has the least left, never the active one."""
+    swap = [r for r in rows if r["email"] in SWAP_EMAILS]
+    seated = [r for r in swap if _seated(r)]
+    if len(seated) < SWAP_SEATS:
+        unknown = [r["email"] for r in swap if r["seat"] is None]
+        if unknown:  # it may hold the seat that looks free
+            return None, "the seat of %s is unknown" % ", ".join(unknown)
+        return None, None
+    giving = [r for r in seated if r["email"] != active]
+    if not giving:
+        return None, "every seat of %s is in use by the active account" % SWAP_ORG
+    return max(giving, key=_row_rank)["email"], None
+
+
+def _plan_swap(rows, active, now=None):
+    """(from, to, why): the seat of xtgroup.com.vn to move now, from `from` (None: a free seat) to `to`; or (None,
+    None, why not or None). Only when the active account is near a threshold (_near), no other account with a seat
+    is below that level, and Premium is not back within PREMIUM_SOON: then the account without a seat with the most
+    room takes it, so it holds the seat before the machines switch to it."""
+    now = time.time() if now is None else now
+    by = {r["email"]: r for r in rows}
+    act = by.get(active)
+    if act is None or not _ready(act) or not _near(act["est"]):
+        return None, None, None
+    if any(r is not act and _ready(r) and not _near(r["est"]) for r in rows):
+        return None, None, None
+    prem = by[PREMIUM_EMAIL]
+    if _ready(prem):
+        back = (_back_at(prem["est"], DAILY_THRESHOLD - PREPARE_MARGIN, WEEKLY_THRESHOLD - PREPARE_MARGIN)
+                if act is prem else _back_at(prem["est"]))
+        if back is not None and back - now <= PREMIUM_SOON:
+            return None, None, "Premium is back %s: no seat moves before" % ("at " + _hhmm(back) if back else "now")
+    free = _free_order(rows)
+    if not free:
+        return None, None, "%s is near a threshold, but no account of %s without a seat has room" % (active, SWAP_ORG)
+    frm, why_not = _seat_to_free(rows, active)
+    if why_not:
+        return None, None, why_not
+    return frm, free[0]["email"], "%s is near a threshold and no other account with a seat is below it" % active
+
+
+# ---------------------------------------------------------------- machine 2: move a seat of xtgroup.com.vn
+
+LIMIT_DATE = re.compile(r"try again after (\d{4}-\d{2}-\d{2})", re.I)
+
+
+def _week_start(now):
+    """Monday 00:00 UTC of the week of `now`: claude.ai counts its weekly seat limits from there."""
+    d = dt.datetime.fromtimestamp(now, dt.timezone.utc)
+    return (d - dt.timedelta(days=d.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _limit_until(message, now=None):
+    """When claude.ai lets seats move again after it refused one for a weekly limit; None for any other error."""
+    if "weekly limit" not in message and "weekly_seat_limit" not in message:
+        return None
+    m = LIMIT_DATE.search(message)
+    if m:
+        return dt.datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp()
+    return _week_start(time.time() if now is None else now) + 7 * 86400
+
+
+def _swap_org(idx):
+    """The organization id of xtgroup.com.vn, from the login of one of its accounts saved on machine 2."""
+    org = load_rotation().get("swapOrg")
+    for email in SWAP_EMAILS:
+        if org:
+            break
+        name = _saved_name(idx, email)
+        org = ((idx["accounts"].get(name) or {}).get("profile") or {}).get("organizationUuid") if name else None
+    if not org:
+        raise AcctError("No account of %s is logged in on machine 2, so its organization is unknown: run /acct:login."
+                        % SWAP_ORG)
+    return org
+
+
+def _swaps_this_week(ms, now):
+    return [t for t in ms.get("swaps") or [] if t >= _week_start(now)]
+
+
+def _swap_seat(idx, frm, to, why, now=None):
+    """Give the Standard seat of `frm` (None: a free one) to `to`, in xtgroup.com.vn. Returns None, or the error.
+    A refusal for a claude.ai weekly limit stops seat moves until the date claude.ai gives; another failure for
+    MOVE_BACKOFF."""
+    now = time.time() if now is None else now
+    log_event("seat_swap", "%s: a Standard seat of %s goes from %s to %s" % (why, SWAP_ORG, frm or "nobody (free)", to),
+              target=to)
+    try:
+        _set_seats(([(frm, "No seat")] if frm else []) + [(to, "Standard")], load_rotation(), _swap_org(idx))
+    except AcctError as e:
+        msg = str(e)
+        until = _limit_until(msg, now)
+        ms = _mover_state()
+        ms.update(swap_blocked_until=until or now + MOVE_BACKOFF, swap_limit=bool(until), swap_error=msg[-400:])
+        _save_mover_state(ms)
+        log_event("seat_swap_fail", ("claude.ai weekly limit: no seat moves until %s. " % _hhmm(until) if until else "")
+                  + msg[-800:], target=to)
+        return msg
+    ms = _mover_state()
+    ms["swaps"] = _swaps_this_week(ms, now) + [now]
+    for k in ("swap_error", "swap_blocked_until", "swap_limit"):
+        ms.pop(k, None)
+    _save_mover_state(ms)
+    _forget_seat_readings(idx, *[n for n in (_saved_name(idx, e) for e in (frm, to)) if n])
+    save_index(idx)
+    log_event("seat_swap_ok", "%s → %s (%d this week)" % (frm or "free seat", to, len(ms["swaps"])), target=to)
+    return None
+
+
+def _swap_blocked(ms, now):
+    """Why no seat may move now, or None."""
+    until = ms.get("swap_blocked_until") or 0
+    if now >= until:
+        return None
+    return ("claude.ai refuses seat moves until %s (weekly limit)" % _hhmm(until) if ms.get("swap_limit")
+            else "the last seat move failed: next try after %s" % _hhmm(until))
 
 
 # ---------------------------------------------------------------- working machines: switch account
@@ -1498,55 +1633,51 @@ def _logged_switch(cur, target):
     log_event("switch_ok", "", live=cur, target=target)
 
 
-def _wanted_account(idx, cur, args):
-    """(email of the account this session should use, why). None: leave the session as it is."""
-    cur_email = _email_of(idx, cur)
+def _wanted_accounts(idx, cur, args):
+    """([emails], why): the account this session should use (the active one), then the ones it may use when that one
+    is not logged in on this machine. [] leaves the session as it is."""
     try:
-        state = pool_state(cur_email, force=args.force)
+        state = pool_state(_email_of(idx, cur), force=args.force)
     except AcctError as e:
-        # The pool server is down or this machine has not joined: follow the seat on claude.ai.
         if "not joined" not in str(e):
             log_event("read_fail", "pool state: %s" % e, every=QUIET_EVERY, live=cur)
-        # Unconfirmed readings leave the session as it is.
-        holder = _seat_holder(idx, cur, first=cur)
-        return (_email_of(idx, holder), "claude.ai seat") if holder else (None, "unknown")
-    if state.get("phase") in ("PREPARING", "MOVING"):
-        backup = _backup_of(state)  # machine 2 publishes it with PREPARING; none: stay where it is
-        return backup, "seat moving %s → %s" % (state.get("premium"), state.get("target"))
-    if state.get("premium"):
-        return state["premium"].lower(), "Premium"
-    holder = _seat_holder(idx, cur, first=cur)  # machine 2 has not published the Premium account yet
-    return (_email_of(idx, holder), "claude.ai seat") if holder else (None, "unknown")
+        return [], "pool server unknown"
+    active = (state.get("active") or "").lower()
+    if not active:
+        return [], "machine 2 has not published the active account yet"
+    return [active] + [e.lower() for e in state.get("fallbacks") or [] if e.lower() != active], state.get("message") or ""
 
 
 def _worker_check(args):
-    """Switch this session to the account the pool says: the backup while the seat moves, else Premium."""
+    """Switch this session to the account the pool says (the active one), or the next one logged in here."""
     idx = load_index()
     try:
         cur = sync_current(idx)
     except AcctError:
         cur = current_name(idx)
-    if _email_of(idx, cur) not in POOL_EMAILS + FORMER_POOL_EMAILS:
+    cur_email = _email_of(idx, cur)
+    if cur_email not in POOL_EMAILS + FORMER_POOL_EMAILS:
         return  # a login outside the pool (a personal plan, an unsaved account) is left alone
-    want, why = _wanted_account(idx, cur, args)
+    wanted, why = _wanted_accounts(idx, cur, args)
     save_index(idx)
-    if not want or want == _email_of(idx, cur):
+    if not wanted or wanted[0] == cur_email:
         return
-    target = _saved_name(idx, want)
-    if not target:
-        log_event("switch_fail", "%s is not logged in on this machine: run /acct:login" % want, every=QUIET_EVERY,
-                  live=cur, target=want)
+    if not _saved_name(idx, wanted[0]):
+        log_event("switch_fail", "%s is not logged in on this machine: run /acct:login" % wanted[0], every=QUIET_EVERY,
+                  live=cur, target=wanted[0])
         if args.manual:
-            raise _logged_error("The pool wants %s (%s), but it is not logged in on this machine. Run /acct:login." % (want, why))
+            print("The pool works on %s (%s), but it is not logged in on this machine: run /acct:login." % (wanted[0], why))
+    target = next((n for n in (_saved_name(idx, e) for e in wanted) if n), None)
+    if not target or target == cur:
         return
     _logged_switch(cur, target)
-    try:  # tell machine 2 at once: it may be waiting for this machine to reach the backup account
-        pool_state(want, force=True)
+    try:  # report the new account at once
+        pool_state(_email_of(idx, target), force=True)
     except AcctError:
         pass
 
 
-# ---------------------------------------------------------------- machine 2: move the seat
+# ---------------------------------------------------------------- machine 2: the service
 
 def _mover_state():
     return read_json(os.path.join(store_dir(), "mover-state.json"), {}) or {}
@@ -1556,53 +1687,26 @@ def _save_mover_state(ms):
     write_json_atomic(os.path.join(store_dir(), "mover-state.json"), ms)
 
 
-def _put_state(phase, premium, target=None, message=None, backup=None):
-    body = {"phase": phase, "premium": premium, "target": target, "message": message, "by": machine_name()}
-    if backup:  # left out, the server keeps the backup account it has
-        body["backup"] = backup
-    return pool_call("PUT", "/api/state", body, mover=True)
+def _put_state(active, message, fallbacks, seated):
+    return pool_call("PUT", "/api/state", {"phase": "STABLE", "premium": PREMIUM_EMAIL, "active": active,
+                                           "fallbacks": fallbacks, "seated": seated, "message": message,
+                                           "by": machine_name()}, mover=True)
 
 
-def _backup_of(state):
-    """The pool account the pool names as holding the Standard seat, or None."""
-    backup = ((state or {}).get("backup") or "").lower()
-    return backup if backup in POOL_EMAILS else None
-
-
-def _backup_spent(idx, email, live, force=False):
-    """Why a backup account should rest (the Premium thresholds: 5-hour, 7-day, or a window used up), else None."""
-    name = _saved_name(idx, email)
-    if not name:
-        return "not logged in on machine 2"
-    meta = idx["accounts"][name]
-    try:
-        status = refresh_usage(meta, read_stored_creds(name), force=force, refresh_name=None if name == live else name,
-                               ttl=USAGE_READ_EVERY)
-    except AcctError as e:
-        return str(e)
-    if status not in ("ok", "cache"):
-        return "usage unavailable (%s)" % status
-    values = _usage_window_values((meta.get("usage") or {}).get("data") or {})
-    if "five_hour" not in values:
-        return "usage unavailable"
-    if not _usage_reached_threshold((meta.get("usage") or {}).get("data") or {}):
-        return None
-    return "5-hour %d%%, 7-day %d%% (%s)" % (round(values["five_hour"]), round(values.get("seven_day", 0)), _trigger_text())
-
-
-def _end_hold(hold):
-    """The lent seat was not given back in time: give it back from here, then release the hold."""
-    changes = [(hold["account"], "No seat")]
-    if hold.get("backup") and hold.get("backup_tier") == "Standard":
-        changes.append((hold["backup"], "Standard"))
-    try:
-        _set_seats(changes, load_rotation())
-    except Exception as e:
-        log_event("hold_fail", "could not give back the seat lent to %s: %s" % (hold.get("account"), str(e)[-500:]),
-                  every=QUIET_EVERY)
-        return
-    pool_call("DELETE", "/api/hold", mover=True)
-    log_event("hold_end", "gave back the seat lent to %s (not given back within the time)" % hold.get("account"))
+def _publish_state(state, rows, active, why):
+    """Publish the active account, the ones a machine may use instead (below the thresholds, best first) and the
+    accounts with a seat, when one of them changed. Returns the state."""
+    if not active:
+        return state
+    fallbacks = [r["email"] for r in sorted((r for r in rows if r["email"] != active and _ready(r) and not _over(r["est"])),
+                                            key=_row_rank)]
+    seated = [r["email"] for r in rows if _seated(r)]
+    if (state.get("active"), state.get("message"), state.get("fallbacks"), state.get("seated")) == (
+            active, why, fallbacks, seated):
+        return state
+    if active != state.get("active"):
+        log_event("active", "every machine now works on %s (%s)" % (active, why), live=state.get("active"), target=active)
+    return _put_state(active, why, fallbacks, seated)
 
 
 def _request_done(request, status, message=None):
@@ -1613,327 +1717,38 @@ def _request_done(request, status, message=None):
         log_event("read_fail", "dashboard request: %s" % e, every=QUIET_EVERY, key="request")
 
 
-def _run_request(idx, state, request, holder, live):
-    """The buttons of the dashboard: give `email` the Premium seat (the full move: everyone waits on the Standard
-    account first) or the Standard seat. It is then kept like a seat given by hand."""
+def _run_request(idx, state, request, rows, now):
+    """The dashboard buttons: "use" puts every machine on an account with a seat (kept while it is below the
+    thresholds); "seat" gives a Standard seat of xtgroup.com.vn to an account without one."""
     kind, email = request.get("kind"), (request.get("email") or "").lower()
-    current = _email_of(idx, holder) if kind == "premium" else _backup_of(state)
-    why = ("%s is not a pool account" % email if email not in POOL_EMAILS
-           else "%s already holds the seat" % email if email == current
-           else "%s holds the Premium seat" % email if kind == "standard" and email == _email_of(idx, holder)
-           else _usable(idx, email))
+    row = {r["email"]: r for r in rows}.get(email)
+    if row is None:
+        why = "%s is not a pool account" % email
+    elif kind == "use":
+        why = (row["why"] or (None if _ready(row) else "%s has no seat" % email if not _seated(row)
+                              else "the usage of %s is unknown" % email)
+               or ("%s is at a threshold" % email if _over(row["est"]) else None))
+    elif kind == "seat":
+        frm, why = _seat_to_free(rows, (state.get("active") or "").lower())
+        why = ("%s is not an account of %s" % (email, SWAP_ORG) if email not in SWAP_EMAILS
+               else "%s holds a seat already" % email if _seated(row) else row["why"] or why
+               or _swap_blocked(_mover_state(), now))
+    else:
+        why = "unknown request %s" % kind
     if why:
-        log_event("request_fail", "dashboard asked %s → %s: %s" % (kind, email, why))
+        log_event("request_fail", "dashboard asked %s %s: %s" % (kind, email, why))
         return _request_done(request, "fail", why)
     _request_done(request, "running")
-    log_event("request", "dashboard asked the %s seat for %s" % (kind, email))
-    if kind == "premium":
+    log_event("request", "dashboard asked %s %s" % (kind, email))
+    if kind == "use":
         ms = _mover_state()
-        ms.pop("move_error", None)
+        ms["pin"] = {"email": email, "at": now}
         _save_mover_state(ms)
-        ok = _move_seat(idx, holder, _saved_name(idx, email), live, {"premium": current}, state,
-                        reason="asked on the dashboard")
-        ms = _mover_state()  # the move may have changed it (the Standard seat given first, a back-off)
-        if not ok:
-            reason = ms.pop("move_error", None)
-            _save_mover_state(ms)
-            try:  # else the reason machine 2 published with the phase it fell back to
-                reason = reason or pool_call("GET", "/api/state", mover=True).get("message") or "the seat move failed"
-            except AcctError:
-                reason = "the seat move failed"
-            return _request_done(request, "fail", reason)
-        ms["premium_manual"] = {"email": email, "at": time.time()}
-    else:
-        try:
-            _set_seats(([(current, "No seat")] if current else []) + [(email, "Standard")], load_rotation())
-        except Exception as e:
-            log_event("request_fail", "dashboard asked standard → %s: %s" % (email, str(e)[-500:]))
-            return _request_done(request, "fail", str(e)[-300:])
-        _forget_seat_readings(idx, *[n for n in (_saved_name(idx, e) for e in (current, email)) if n])
-        save_index(idx)
-        _put_state("STABLE", state.get("premium"), message="Standard account: %s (dashboard)" % email, backup=email)
-        ms = _mover_state()
-        ms["backup_manual"] = {"email": email, "at": time.time()}
-    _save_mover_state(ms)
-    _request_done(request, "ok", "%s now holds the %s seat" % (email, "Premium" if kind == "premium" else "Standard"))
-
-
-def _sync_backup(idx, state, live, force=False):
-    """While nothing moves: if the account the pool names no longer holds the Standard seat on claude.ai (moved by
-    hand), publish the pool account that does. Returns the state, updated or not; marked "standard_missing" when no
-    pool account holds the Standard seat (then _rest_backup gives it to one)."""
-    if state.get("phase") != "STABLE":
-        return state
-    current = _backup_of(state)
-    name = _saved_name(idx, current)
-    if current and not name:
-        return state  # not logged in on machine 2: its seat cannot be read, keep what the pool says
-    if name:
-        status, tier = _seat_tier(idx, name, live, force=force, ttl=SEAT_CHECK_EVERY)
-        if status not in ("ok", "cache") or tier == STANDARD_TIER:
-            return state  # unreadable: keep what the pool says
-    premium = (state.get("premium") or "").lower()
-    holder = _seat_holder(idx, live, force=force, tier=STANDARD_TIER, exclude=(current, premium))
-    if holder:
-        email = _email_of(idx, holder)
-        log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (
-            current or "no account", email))
-        ms = _mover_state()
-        ms["backup_manual"] = {"email": email, "at": time.time()}
-        _save_mover_state(ms)
-        return _put_state("STABLE", state.get("premium"), message="Standard account synced with claude.ai: %s" % email,
-                          backup=email)
-    log_event("no_backup_holder", "no pool account holds the Standard seat on claude.ai (the pool names %s)" % (
-        current or "none"), every=QUIET_EVERY)
-    return dict(state, standard_missing=True)
-
-
-def _give_standard(idx, state, live, current, why, backup_spent=False, exclude=(), must=False):
-    """Give the Standard seat to the account _next_standard picks, taking it from `current` (None: nobody holds it).
-    Returns (state, the account that now holds it, or None when none fits or the change failed)."""
-    ms = _mover_state()
-    if time.time() < ms.get("backup_backoff_until", 0):
-        return state, None
-    premium = (state.get("premium") or "").lower()
-    other = _next_standard(idx, state.get("snapshots"), premium, current, backup_spent, exclude, must)
-    if not other:
-        log_event("backup_spent", "%s (%s) and no pool account fits the Standard seat%s" % (
-            current or "no pool account holds the Standard seat", why, ": it keeps it" if current else ""), every=QUIET_EVERY)
-        return state, None
-    log_event("backup_change", "%s (%s): the Standard seat goes to %s" % (current or "no account", why, other))
-    try:
-        _set_seats(([(current, "No seat")] if current else []) + [(other, "Standard")], load_rotation())
-    except Exception as e:
-        ms = _mover_state()
-        ms["backup_backoff_until"] = time.time() + MOVE_BACKOFF
-        _save_mover_state(ms)
-        _note_failed_change(current, other)
-        log_event("backup_change_fail", str(e)[-800:])
-        return state, None
-    est = _estimate((state.get("snapshots") or {}).get(other), "premium")
-    ms = _mover_state()
-    ms["standard_probe"] = {"email": other, "premium": [est[0], est[2]] if est else None}
-    _save_mover_state(ms)
-    _forget_seat_readings(idx, *[n for n in (_saved_name(idx, e) for e in (current, other)) if n])
-    save_index(idx)
-    return _put_state("STABLE", state.get("premium"), message="Standard account: %s" % other, backup=other), other
-
-
-def _check_standard_probe(idx, email, name):
-    """The first usage read of an account machine 2 gave the Standard seat to, against its last Premium reading:
-    logged once (standard_reading), to check STANDARD_PER_PREMIUM."""
-    ms = _mover_state()
-    probe = ms.get("standard_probe") or {}
-    values = _usage_window_values(((idx["accounts"][name].get("usage") or {}).get("data")) or {})
-    if probe.get("email") != email or "five_hour" not in values:
-        return
-    before = probe.get("premium")
-    log_event("standard_reading", "%s on the Standard seat: 5-hour %d%%, 7-day %d%%; its last Premium reading (as of now) "
-              "was %s (STANDARD_PER_PREMIUM = %d)" % (
-                  email, round(values["five_hour"]), round(values.get("seven_day", 0)),
-                  "5-hour %d%%, 7-day %d%%" % (round(before[0]), round(before[1])) if before else "none",
-                  STANDARD_PER_PREMIUM))
-    ms.pop("standard_probe", None)
-    _save_mover_state(ms)
-
-
-def _backup_full(idx, email, live):
-    """Which windows of the Standard account are at BACKUP_FULL % or more ("5-hour 100%"), else None (also when its
-    usage cannot be read: then it is not taken for full)."""
-    name = _saved_name(idx, email)
-    if not name:
-        return None
-    meta = idx["accounts"][name]
-    try:
-        status = refresh_usage(meta, read_stored_creds(name), refresh_name=None if name == live else name,
-                               ttl=USAGE_READ_EVERY)
-    except AcctError:
-        return None
-    if status not in ("ok", "cache"):
-        return None
-    values = _usage_window_values((meta.get("usage") or {}).get("data") or {})
-    full = ["%s %d%%" % ({"five_hour": "5-hour", "seven_day": "7-day"}[k], round(v)) for k, v in values.items()
-            if v >= BACKUP_FULL]
-    return ", ".join(full) or None
-
-
-def _used_up(idx, email):
-    """True when the last usage read of this account has a window at 100 %."""
-    name = _saved_name(idx, email)
-    usage = ((idx["accounts"][name].get("usage") or {}).get("data") or {}) if name else {}
-    return any(v >= 100 for v in _usage_window_values(usage).values())
-
-
-def _ensure_backup(idx, state, live, p_email, t_email):
-    """Before a Premium move: the account every machine waits on must hold the Standard seat on claude.ai, must not
-    be the target, and must not be full (BACKUP_FULL). Follows a Standard seat moved by hand, else gives the Standard
-    seat to an account with room on it first. Returns (state, the account to wait on or None, why the Premium seat
-    must not move or None). With no account to wait on, the Premium seat still moves once it has used a window up:
-    staying blocks every machine for hours, moving for a few minutes."""
-    current = _backup_of(state)
-    name = _saved_name(idx, current)
-    full = None
-    if current and current != t_email:
-        if not name:
-            return state, current, None  # not logged in on machine 2: its seat cannot be read, trust the pool
-        status, tier = _seat_tier(idx, name, live, force=True)
-        if status != "ok":
-            return state, current, None  # unreadable: trust the pool
-        if tier == STANDARD_TIER:
-            full = _backup_full(idx, current, live)
-            if not full:
-                return state, current, None
-    if current != t_email and not full:
-        holder = _seat_holder(idx, live, force=True, tier=STANDARD_TIER, exclude=(current, p_email, t_email))
-        if holder:
-            current = _email_of(idx, holder)
-            log_event("backup_follow", "%s no longer holds the Standard seat; published %s found on claude.ai" % (
-                _backup_of(state) or "no account", current))
-            state = _put_state("STABLE", p_email, message="Standard account synced with claude.ai: %s" % current,
-                               backup=current)
-            full = _backup_full(idx, current, live)
-            if not full:
-                return state, current, None
-        else:
-            current = None
-    problem = ("%s, the Standard account, is full (%s)" % (current, full) if full
-               else "%s, the target, holds the Standard seat" % current if current
-               else "no pool account holds the Standard seat")
-    state, got = _give_standard(idx, state, live, current, "before the Premium seat moves to %s: %s" % (t_email, problem),
-                                exclude=(t_email,), must=True)
-    if got:
-        return state, got, None
-    why = "%s and no other pool account has room on the Standard seat" % problem
-    if _used_up(idx, p_email):
-        log_event("backup_full", "%s; %s has used a window up, so the Premium seat moves anyway" % (why, p_email),
-                  target=t_email)
-        return state, (current if full else None), None
-    return state, None, why + ": the Premium seat waits (it moves anyway once %s uses a window up)" % p_email
-
-
-def _rest_backup(idx, state, live):
-    """While nothing moves: once the account with the Standard seat is spent, or when no pool account holds it, give
-    the Standard seat to the account _next_standard picks. Returns the state, updated or not."""
-    if state.get("phase") != "STABLE":
-        return state
-    current = _backup_of(state)
-    if state.get("standard_missing"):
-        return _give_standard(idx, state, live, None, "the machines need it while the Premium seat moves", must=True)[0]
-    if not current:
-        return state
-    why = _backup_spent(idx, current, live)
-    name = _saved_name(idx, current)
-    if name and not (why or "").startswith(("not logged", "usage unavailable", "rate limited")):
-        _remember_usage(state, current, idx["accounts"][name], "standard")
-        _check_standard_probe(idx, current, name)
-    # Only a reading at the limit hands the seat on; an unreadable usage or login is no reason to.
-    if not why or not why.startswith("5-hour"):
-        return state
-    ms = _mover_state()
-    if time.time() < ms.get("backup_backoff_until", 0):
-        return state
-    manual = ms.get("backup_manual") or {}
-    if manual.get("email") == current and time.time() - manual.get("at", 0) < MANUAL_BACKUP_GRACE:
-        log_event("backup_manual", "%s was given the Standard seat by hand: kept for %d min although %s" % (
-            current, MANUAL_BACKUP_GRACE // 60, why), every=QUIET_EVERY)
-        return state
-    # Like a Premium move: read the seat on claude.ai again right before changing it. A seat moved by hand
-    # since the last (cached) reading is followed instead of changed.
-    status, tier = _seat_tier(idx, _saved_name(idx, current), live, force=True)
-    if status in ("ok", "cache") and tier != STANDARD_TIER:
-        return _sync_backup(idx, state, live, force=True)
-    meta = idx["accounts"][name]
-    spent = any(v >= 100 for v in _usage_window_values((meta.get("usage") or {}).get("data") or {}).values())
-    return _give_standard(idx, state, live, current, "rests: " + why, backup_spent=spent)[0]
-
-
-def _wait_for_backup(prepared_at, backup, poll=5):
-    """Wait until every working machine seen in the last 5 minutes reports the backup account."""
-    deadline = time.time() + PREPARE_TIMEOUT
-    waiting = []
-    while True:
-        machines = pool_call("GET", "/api/machines", mover=True)
-        # The account itself, not at_info: a machine on an older version may wait on a former backup account.
-        waiting = [m.get("name") or m.get("host") for m in machines
-                   if m.get("role") == "worker" and m.get("active")
-                   and not ((m.get("account") or "").lower() == backup and m.get("last_seen", 0) >= prepared_at)]
-        if not waiting or time.time() >= deadline:
-            return waiting
-        time.sleep(poll)
-
-
-def _move_seat(idx, premium, target, live, fields, state=None, reason="threshold reached"):
-    """PREPARING → wait for the backup account → MOVING → seat move → STABLE. Returns True on success."""
-    p_email, t_email = _email_of(idx, premium), _email_of(idx, target)
-    state, backup, why = _ensure_backup(idx, state or {}, live, p_email, t_email)
-    if why:
-        log_event("move_skipped", why, target=t_email, every=QUIET_EVERY, **fields)
-        ms = _mover_state()
-        ms["move_error"] = why
-        _save_mover_state(ms)
-        return False
-    log_event("move_start", "%s; backup %s" % (reason, backup), target=t_email, **fields)
-    _publish_accounts(idx, live, state or {}, force=True)  # the dashboard shows the reading behind this move
-    try:
-        return _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email, t_email)
-    finally:
-        try:  # and the seats as they are once it is over, without waiting for the next run
-            _publish_accounts(idx, live, pool_call("GET", "/api/state", mover=True), force=True)
-        except AcctError:
-            pass
-
-
-def _move_seat_steps(idx, premium, target, live, fields, backup, reason, p_email, t_email):
-    prepared = _put_state("PREPARING", p_email, t_email, reason, backup=backup)
-    # No account to wait on (the Premium account used a window up, see _ensure_backup): no wait.
-    waiting = _wait_for_backup(prepared["updated_at"], backup) if backup else []
-    if waiting:
-        log_event("prepare_timeout", "still not on %s after %ds: %s" % (backup, PREPARE_TIMEOUT, ", ".join(waiting)),
-                  target=t_email, **fields)
-    _put_state("MOVING", p_email, t_email)
-    status, tier = _seat_tier(idx, premium, live, force=True)
-    if status == "ok" and tier != PREMIUM_TIER:  # moved by hand meanwhile: publish where it is
-        holder = _seat_holder(idx, live, first=premium, force=True)
-        _put_state("STABLE", _email_of(idx, holder) or p_email, message="seat moved outside the service")
-        log_event("move_skipped", "seat moved outside the service", target=_email_of(idx, holder), **fields)
-        return False
-    started = time.time()
-    try:
-        # One Premium seat: free it first, then give it to the target.
-        _set_seats([(p_email, "No seat"), (t_email, "Premium")], load_rotation())
-    except Exception as e:
-        holder = _seat_holder(idx, live, first=premium, force=True)  # the seat manager rolls back; trust only claude.ai
-        _put_state("STABLE", _email_of(idx, holder) or p_email, message="seat move failed: %s" % str(e)[-300:])
-        ms = _mover_state()
-        ms["backoff_until"] = time.time() + MOVE_BACKOFF
-        _save_mover_state(ms)
-        _note_failed_change(p_email, t_email)
-        log_event("move_fail", "%ds: %s" % (time.time() - started, str(e)[-800:]), target=t_email, **fields)
-        return False
-    _put_state("STABLE", t_email, message="moved from %s" % p_email)
-    _forget_seat_readings(idx, premium, target)
-    save_index(idx)
-    log_event("move_ok", "%ds" % (time.time() - started), target=t_email, **fields)
-    return True
-
-
-def _note_failed_change(*emails):
-    """A seat change on these accounts failed: read their seats again soon (see RECHECK_FOR)."""
-    ms = _mover_state()
-    ms["recheck"] = {"emails": [e for e in emails if e], "until": time.time() + RECHECK_FOR}
-    _save_mover_state(ms)
-
-
-def _recheck_seats(idx, live):
-    """Read the seats of the accounts a failed change touched, at most every RECHECK_EVERY, while RECHECK_FOR lasts.
-    The readings land in the seat cache that _seat_holder and _sync_backup then use."""
-    recheck = _mover_state().get("recheck") or {}
-    if time.time() >= recheck.get("until", 0):
-        return
-    for email in recheck.get("emails") or []:
-        name = _saved_name(idx, email)
-        if name:
-            _seat_tier(idx, name, live, ttl=RECHECK_EVERY)
+        return _request_done(request, "ok", "every machine switches to %s" % email)
+    err = _swap_seat(idx, frm, email, "asked on the dashboard", now)
+    if err:
+        return _request_done(request, "fail", err[-300:])
+    _request_done(request, "ok", "%s now holds a Standard seat%s" % (email, " (taken from %s)" % frm if frm else ""))
 
 
 def _mover_once(args):
@@ -1943,164 +1758,104 @@ def _mover_once(args):
     idx = load_index()
     live = current_name(idx)
     state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
-    request = state.get("request") or {}
-    asked = request.get("status") == "pending"
-    # After a failed move machine 2 changes no seat for MOVE_BACKOFF (a seat asked for on the dashboard is not held
-    # back), but it keeps following claude.ai and sending the usage table meanwhile: a change claude.ai applied late
-    # must not leave the pool on an account without a seat.
-    backing_off = time.time() < _mover_state().get("backoff_until", 0) and not args.force and not asked
-    hold = state.get("hold")
-    if hold:  # a machine lent the Standard seat to log an account in: move nothing until it gives it back
-        if time.time() < hold.get("until", 0):
-            log_event("hold", "%s is logging in %s: seats stay as they are" % (hold.get("name"), hold.get("account")),
-                      every=QUIET_EVERY)
-            return
-        if not backing_off:
-            _end_hold(hold)
-        return
-    _recheck_seats(idx, live)
     missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
     if missing:
         log_event("not_logged_in", "machine 2 is missing: %s (run /acct:login)" % ", ".join(missing), every=QUIET_EVERY)
-    holder = _seat_holder(idx, live, first=_saved_name(idx, state.get("premium")))
-    if not holder:
-        save_index(idx)  # keep the seat readings, so the next run does not ask again before their time
-        log_event("no_holder", "no rotation account holds Premium on claude.ai", every=QUIET_EVERY)
-        return
-    h_email = _email_of(idx, holder)
-    if state.get("phase") != "STABLE" or (state.get("premium") or "").lower() != h_email:
-        # first run, a seat moved by hand, or a move cut short: publish where the seat really is
-        state = _put_state("STABLE", h_email, message="synced with claude.ai")
-        log_event("follow", "published the Premium account found on claude.ai", premium=h_email)
-        ms = _mover_state()
-        ms["premium_manual"] = {"email": h_email, "at": time.time()}
-        _save_mover_state(ms)
-    state = _sync_backup(idx, state, live)
-    if asked:
-        _run_request(idx, state, request, holder, live)
-        return
-    if not backing_off:
-        state = _rest_backup(idx, state, live)
-    test = st.get("test_move") or {}
-    if test.get("target") and time.time() < test.get("until", 0) and not backing_off:
-        # One seat move asked by `auto test-move`, whatever the usage: the full flow, on demand.
-        st.pop("test_move", None)
-        save_pool_settings(st)
-        target = _saved_name(idx, test["target"])
-        if target and target != holder:
-            log_event("test_move", "test move asked by hand", premium=h_email, target=test["target"])
-            _move_seat(idx, holder, target, live, {"premium": h_email}, state)
-        return
-    meta = idx["accounts"][holder]
-    status = refresh_usage(meta, read_stored_creds(holder), force=args.force,
-                           refresh_name=None if holder == live else holder, ttl=USAGE_READ_EVERY)
+    rows = _read_pool(idx, live, state, force=args.force)
+    _keep_readings(idx, state, rows)
     save_index(idx)
-    # Right after the reading, so the dashboard shows the figures the threshold check uses.
-    _publish_accounts(idx, live, state, force=status == "ok")
-    if status not in ("ok", "cache"):
-        log_event("read_fail", "Premium usage: %s" % status, every=QUIET_EVERY, premium=h_email)
-        return
-    usage = (meta.get("usage") or {}).get("data") or {}
-    _remember_usage(state, h_email, meta, "premium")
-    if backing_off or not _usage_reached_threshold(usage):
-        return
-    manual = _mover_state().get("premium_manual") or {}
-    if manual.get("email") == h_email and time.time() - manual.get("at", 0) < MANUAL_PREMIUM_GRACE:
-        log_event("premium_manual", "%s was given the Premium seat by hand: kept for %d min although the threshold "
-                  "is reached" % (h_email, MANUAL_PREMIUM_GRACE // 60), every=QUIET_EVERY, premium=h_email)
-        return
-    fields = dict(premium=h_email, **_usage_fields(meta))
-    spent = any(v >= 100 for v in _usage_window_values(usage).values())
-    target, skipped = _next_premium(idx, holder, state.get("snapshots"), live=live, premium_spent=spent,
-                                    backup=_backup_of(state))
-    if not target:
-        log_event("no_destination", "; ".join(skipped), every=QUIET_EVERY, **fields)
-        return
-    if args.manual:
-        print("Threshold reached on %s: moving the Premium seat to %s..." % (holder, target))
-    _move_seat(idx, holder, target, live, fields, state)
+    fresh = any(r["fresh"] for r in rows)
+    now = time.time()
+    request = state.get("request") or {}
+    if request.get("status") == "pending":
+        _run_request(idx, state, request, rows, now)
+        rows = _read_pool(idx, live, state)  # seats changed: their readings were dropped
+        _keep_readings(idx, state, rows)
+        save_index(idx)
+        fresh = True
+    ms = _mover_state()
+    pinned = (ms.get("pin") or {}).get("email")
+    current = (state.get("active") or "").lower() or None
+    active, why = _choose_active(rows, current, pinned)
+    if pinned and active != pinned:
+        ms.pop("pin", None)
+        _save_mover_state(ms)
+        log_event("pin_end", "%s, picked on the dashboard, is no longer usable or reached a threshold" % pinned)
+    frm, to, note = _plan_swap(rows, active, now)
+    if to:
+        blocked = _swap_blocked(_mover_state(), now)
+        if blocked:
+            note = "a seat should go from %s to %s, but %s" % (frm or "a free seat", to, blocked)
+            log_event("swap_blocked", note, every=QUIET_EVERY)
+        elif not _swap_seat(idx, frm, to, note, now):
+            note = None
+            rows = _read_pool(idx, live, state)
+            _keep_readings(idx, state, rows)
+            save_index(idx)
+            active, why = _choose_active(rows, current, pinned)
+            fresh = True
+        else:
+            note = "the seat move failed: see the log"
+    elif note:
+        log_event("no_swap", note, every=QUIET_EVERY)
+    if not active:
+        log_event("no_account", why, every=QUIET_EVERY)
+    ms = _mover_state()
+    if ms.get("swap_note") != note:
+        ms["swap_note"] = note
+        _save_mover_state(ms)
+    new_state = _publish_state(state, rows, active, why)
+    _publish_accounts(rows, new_state, force=fresh or new_state is not state or args.force)
 
 
 ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the dashboard
 
 
-def _account_rows(idx, live, state):
-    """The pool accounts for the dashboard, in display order: the Premium account, the accounts without a seat in
-    the order they would become Premium (rank 1 = next; standard_next: the one that would take the Standard seat),
-    then the account with the Standard seat (role "backup"). Usage is read only for the two accounts with a seat:
-    the others have none, so they show an estimate from their last reading, in Premium figures."""
-    premium, backup, last_used = (state.get("premium") or "").lower(), _backup_of(state), state.get("last_used") or {}
-    snapshots = state.get("snapshots") or {}
-    order = _premium_order(snapshots, premium, idx, backup)
-    rank = {e: i for i, e in enumerate(order, 1)}
-    std_next = _next_standard(idx, snapshots, premium, backup)
-    rows = []
-    for email in (premium,) + tuple(order) + (backup,):
-        if not email:
-            continue
-        role = "premium" if email == premium else "backup" if email == backup else "rotation"
-        row = {"email": email, "role": role, "last_used": last_used.get(email), "rank": rank.get(email)}
-        if email == std_next:
-            row["standard_next"] = True
-        name = _saved_name(idx, email)
-        if name:  # when the login saved on machine 2 ends (the dashboard warns RELOGIN_WARN_DAYS ahead)
-            try:
-                creds = read_stored_creds(name)
-                login = token_state(idx["accounts"][name], creds)
-                row["login_expires"] = login_expires_at(creds)
-            except AcctError:
-                login = "relogin"
-        if email not in (premium, backup):
-            # No seat, so no usage to read: show the estimate from its last reading, in Premium figures.
-            snap = snapshots.get(email) or {}
-            est = _estimate(snap, "premium")
-            iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat() if t else None
-            row.update(seat="No seat", estimated=True,
-                       status="not logged in on machine 2" if not name else "log in again" if login == "relogin" else None,
-                       measured_at=snap.get("at") if est else None)
-            if est:  # never measured: no figure (it is not 0 %)
-                row.update(eligible=not _over(est), five_hour=est[0], five_hour_reset=iso(est[1]),
-                           seven_day=est[2], seven_day_reset=iso(est[3]))
-            rows.append(row)
-            continue
-        if not name:
-            rows.append(dict(row, status="not logged in on machine 2"))
-            continue
-        meta = idx["accounts"][name]
-        try:
-            creds = read_stored_creds(name)
-            # the readings of this run (USAGE_READ_EVERY / SEAT_CHECK_EVERY): no extra request for the table
-            status = refresh_usage(meta, creds, refresh_name=None if name == live else name, ttl=USAGE_READ_EVERY)
-            refresh_seat(meta, creds, refresh_name=None if name == live else name, ttl=SEAT_CHECK_EVERY)
-            token = token_state(meta, creds)
-        except AcctError as e:
-            status, token = str(e), "relogin"
-        usage = (meta.get("usage") or {}).get("data") or {}
-        tier = (meta.get("seat") or {}).get("tier")
-        row.update(seat=SEAT_LABELS.get(tier, tier) if tier else None,
-                   five_hour=(usage.get("five_hour") or {}).get("utilization"),
-                   five_hour_reset=(usage.get("five_hour") or {}).get("resets_at"),
-                   seven_day=(usage.get("seven_day") or {}).get("utilization"),
-                   seven_day_reset=(usage.get("seven_day") or {}).get("resets_at"),
-                   read_at=(meta.get("usage") or {}).get("fetchedAt"),
-                   status="log in again" if token == "relogin" else (None if status in ("ok", "cache", "expired") else status))
-        rows.append(row)
-    return rows
+def _account_rows(rows, active):
+    """The pool accounts for the dashboard, in POOL_EMAILS order. An account without a seat shows its last reading
+    (estimated), 0 % if never read."""
+    free = _free_order(rows)
+    out = []
+    for r in rows:
+        est = r["est"]
+        row = {"email": r["email"], "org": r["email"].rsplit("@", 1)[-1],
+               "role": "premium" if r["email"] == PREMIUM_EMAIL else "swap" if r["email"] in SWAP_EMAILS else "standard",
+               "seat": r["seat"], "active": r["email"] == active, "estimated": r["estimated"],
+               "measured_at": r["measured_at"], "read_at": r["read_at"], "status": r["why"] or r["status"],
+               "login_expires": r["login_expires"], "eligible": est is not None and not _over(est),
+               "near": est is not None and _near(est), "next_seat": bool(free) and r is free[0]}
+        if est is not None:
+            row.update(five_hour=est[0], five_hour_reset=_iso(est[1]), seven_day=est[2], seven_day_reset=_iso(est[3]))
+        out.append(row)
+    return out
 
 
-def _publish_accounts(idx, live, state, force=False):
+def _pool_info(rows, state, now):
     ms = _mover_state()
-    if not force and time.time() - ms.get("accounts_at", 0) < ACCOUNTS_EVERY:
+    prem = rows[0]
+    back = _back_at(prem["est"]) if prem["est"] is not None and _over(prem["est"]) else None
+    return {"active": state.get("active"), "reason": state.get("message"), "premium_back_at": back or None,
+            "swaps_week": len(_swaps_this_week(ms, now)), "week_start": _week_start(now),
+            "swap_blocked": _swap_blocked(ms, now), "swap_blocked_until": ms.get("swap_blocked_until") if _swap_blocked(ms, now) else None,
+            "swap_limit": bool(ms.get("swap_limit")) and bool(_swap_blocked(ms, now)),
+            "swap_error": ms.get("swap_error"), "swap_note": ms.get("swap_note"),
+            "pin": (ms.get("pin") or {}).get("email"), "swap_org": SWAP_ORG,
+            "thresholds": {"five_hour": DAILY_THRESHOLD, "seven_day": WEEKLY_THRESHOLD, "margin": PREPARE_MARGIN}}
+
+
+def _publish_accounts(rows, state, force=False):
+    ms = _mover_state()
+    now = time.time()
+    if not force and now - ms.get("accounts_at", 0) < ACCOUNTS_EVERY:
         return
     try:
-        rows = _account_rows(idx, live, state)
-        save_index(idx)
-        pool_call("POST", "/api/accounts", {"accounts": rows}, mover=True, timeout=10)
-    except Exception as e:  # the usage table is a convenience: never stop a seat move for it
+        pool_call("POST", "/api/accounts", {"accounts": _account_rows(rows, state.get("active")),
+                                            "pool": _pool_info(rows, state, now)}, mover=True, timeout=10)
+    except Exception as e:  # the usage table is a convenience: never stop the service for it
         log_event("read_fail", "usage table: %s" % e, every=QUIET_EVERY, key="accounts-table")
         return
     ms = _mover_state()
-    ms["accounts_at"] = time.time()
+    ms["accounts_at"] = now
     _save_mover_state(ms)
 
 
@@ -2302,9 +2057,9 @@ def cmd_auto_join(args):
     cfg = load_rotation()
     cfg["enabled"] = True
     save_rotation(cfg)
-    print("Joined the pool at %s. Rotation is ON: before each request this session switches to the account with the "
-          "Standard seat while the seat moves (now %s), then to the Premium account (now %s)." % (
-              _pool_url(st), _backup_of(state) or "not published yet", state.get("premium") or "not published yet"))
+    print("Joined the pool at %s. Switching is ON: before each request this session switches to the account every "
+          "machine works on (now %s). Log in to every pool account with /acct:login." % (
+              _pool_url(st), state.get("active") or "not published yet"))
 
 
 def cmd_auto_mover(args):
@@ -2313,7 +2068,7 @@ def cmd_auto_mover(args):
         st.pop("mover_key", None)
         save_pool_settings(st)
         _uninstall_mover_service()
-        print("This machine no longer moves the Premium seat; the service was removed.")
+        print("This machine no longer runs the pool service; the service was removed.")
         return
     st["mover_key"] = args.key.strip()
     if args.url:
@@ -2321,24 +2076,11 @@ def cmd_auto_mover(args):
     save_pool_settings(st)
     pool_call("POST", "/api/machine", _machine_report(None, False), mover=True)  # proves the key works
     _install_mover_service()
-    print("This machine now moves the Premium seat: %s checks every %ds. Keep it awake and the user logged in "
-          "(on Windows Server: disconnect RDP, never sign out), with every pool account logged in (/acct:login) "
-          "and the admin browser signed in (/acct:auto browser)."
-          % ("the scheduled task " + MOVER_TASK if _is_windows() else "the launchd service " + MOVER_LABEL, MOVER_INTERVAL))
-
-
-def cmd_auto_test_move(args):
-    """Machine 2 only: on its next run, move the seat to <email> through the full flow, ignoring the thresholds."""
-    st = pool_settings()
-    if not st.get("mover_key"):
-        raise AcctError("Only the seat-moving machine can run a test move.")
-    email = args.email.strip().lower()
-    if email not in POOL_EMAILS:
-        raise AcctError("%s is not a pool account (%s)." % (email, ", ".join(POOL_EMAILS)))
-    st["test_move"] = {"target": email, "until": time.time() + 300}
-    save_pool_settings(st)
-    print("Test move queued: within %ds the service moves the Premium seat to %s (PREPARING → backup → MOVING → STABLE). "
-          "Watch https://xtts.xtgroup.vn/pool/." % (MOVER_INTERVAL, email))
+    print("This machine now picks the account every machine works on and moves the Standard seats of %s: %s checks "
+          "every %ds. Keep it awake and the user logged in (on Windows Server: disconnect RDP, never sign out), with "
+          "every pool account logged in (/acct:login) and the admin browser signed in as an admin of %s "
+          "(/acct:auto browser)." % (SWAP_ORG, "the scheduled task " + MOVER_TASK if _is_windows()
+                                      else "the launchd service " + MOVER_LABEL, MOVER_INTERVAL, SWAP_ORG))
 
 
 def cmd_auto_enable(args):
@@ -2359,21 +2101,23 @@ def cmd_auto_status(args):
     st = read_json(pool_settings_path(), {}) or {}
     print("acct plugin %s" % plugin_version())
     print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
-    print("Rotates at: %s" % _trigger_text())
-    print("Pool (any of them takes either seat): %s" % ", ".join(POOL_EMAILS))
-    print("Standard seat (every machine waits on it while Premium moves): handed on at the same thresholds, to an "
-          "account without a seat other than the next Premium, 5-hour <= %d%% and 7-day <= %d%% first"
-          % (STANDARD_PICK_FIVE_HOUR, STANDARD_PICK_SEVEN_DAY))
+    print("An account is left at: %s" % _trigger_text())
+    print("Premium (xtgroup.vn, fixed): %s" % PREMIUM_EMAIL)
+    print("Standard (xtgroup.vn, fixed): %s" % ", ".join(FIXED_STANDARD_EMAILS))
+    print("Standard (%s, %d seats for %d accounts): %s" % (SWAP_ORG, SWAP_SEATS, len(SWAP_EMAILS), ", ".join(SWAP_EMAILS)))
+    print("Order: Premium below the thresholds, else the Standard account with a seat in use until it reaches them, "
+          "else the best ranked one; a seat of %s moves when the active account is %d points below a threshold and no "
+          "other account with a seat is" % (SWAP_ORG, PREPARE_MARGIN))
     print("Pool server: %s (%s)" % (_pool_url(st), "joined" if st.get("api_key") else "not joined: /acct:auto join <key>"))
     if st.get("api_key") or st.get("mover_key"):
         try:
             s = pool_call("GET", "/api/state", mover=not st.get("api_key"))
-            print("Pool phase: %s, Premium: %s%s" % (s.get("phase"), s.get("premium") or "?",
-                                                    ", target: %s" % s.get("target") if s.get("phase") != "STABLE" else ""))
+            print("Active account: %s%s" % (s.get("active") or "not published yet",
+                                             " (%s)" % s["message"] if s.get("message") else ""))
         except AcctError as e:
-            print("Pool phase: unknown (%s)" % e)
+            print("Active account: unknown (%s)" % e)
     if st.get("mover_key"):
-        print("This machine moves the seat: service %s" % ("loaded" if _mover_service_loaded() else "NOT loaded"))
+        print("This machine runs the pool service: %s" % ("loaded" if _mover_service_loaded() else "NOT loaded"))
 
 
 def cmd_auto_browser(args):
@@ -2499,7 +2243,7 @@ def cmd_doctor(args):
     if st.get("api_key") or mover:
         try:
             s = pool_call("GET", "/api/state", mover=not st.get("api_key"))
-            check("Pool server", True, "%s · %s, Premium %s" % (_pool_url(st), s.get("phase"), s.get("premium") or "?"))
+            check("Pool server", True, "%s · active account %s" % (_pool_url(st), s.get("active") or "not published yet"))
         except AcctError as e:
             check("Pool server", False, str(e), "Check the network to %s, or the key (/acct:auto join <key>)." % _pool_url(st))
     else:
@@ -2509,8 +2253,13 @@ def cmd_doctor(args):
     if mover:
         check("Seat-moving service", _mover_service_loaded(), ("task %s" % MOVER_TASK) if _is_windows() else ("launchd %s" % MOVER_LABEL),
               "Reinstall it: /acct:auto mover <mover key>")
+        try:
+            check("Organization %s" % SWAP_ORG, True, _swap_org(idx))
+        except AcctError as e:
+            check("Organization %s" % SWAP_ORG, False, str(e), "Log in to an account of %s: /acct:login" % SWAP_ORG)
         if not os.path.isdir(load_rotation().get("browserProfile") or os.path.join(store_dir(), "browser-profile")):
-            todo.append("Open the admin browser profile once and sign in as an organization owner/admin: /acct:auto browser")
+            todo.append("Open the admin browser profile once and sign in as an owner/admin of %s: /acct:auto browser"
+                        % SWAP_ORG)
     print("| | Check | Detail |")
     print("|---|---|---|")
     for r in rows:
@@ -2523,18 +2272,18 @@ def cmd_doctor(args):
         print("\nEverything is ready.")
 
 
-def _set_seats(changes, cfg):
-    """Change seat tiers on the claude.ai Members page, in order: [(email, "Premium"|"Standard"|"No seat")].
-    The seat manager rolls back the steps it made if a later one fails."""
+def _set_seats(changes, cfg, org):
+    """Change seat tiers in organization `org` (its id), in order: [(email, "Premium"|"Standard"|"No seat")].
+    The seat manager rolls back the steps it made if a later one fails; its error carries claude.ai's own message
+    (e.g. a weekly limit, with the date seats may move again)."""
     ensure_node_deps()
     node = os.environ.get("CLAUDE_ACCT_NODE", "node")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seat_manager.mjs")
     env = seat_manager_env(cfg)
     try:
-        # Up to about 80 s for each change that does not take at once, and as long again to roll it back
-        # (seat_manager.mjs setTier): a timeout kills it half way, with no rollback at all.
+        # A timeout kills it half way, with no rollback at all: SEAT_CHANGE_TIMEOUT leaves room for slow answers.
         # Node writes UTF-8; Windows would decode it as cp1252, fail, and lose the error message ("unknown error").
-        r = subprocess.run([node, script] + ["%s=%s" % c for c in changes], capture_output=True, text=True,
+        r = subprocess.run([node, script, "--org", org] + ["%s=%s" % c for c in changes], capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=SEAT_CHANGE_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise AcctError("Could not run seat automation: %s. Check Node.js, Playwright, and the Chrome CDP connection." % e)
@@ -2668,8 +2417,6 @@ def main(argv=None):
     q = autos.add_parser("mover", help="make this machine the one that moves the seat (machine 2), or 'off'")
     q.add_argument("key"); q.add_argument("--url", help="pool server URL (default %s)" % POOL_URL)
     q.set_defaults(fn=cmd_auto_mover)
-    q = autos.add_parser("test-move", help="machine 2: move the seat to <email> once, ignoring the thresholds (to test the flow)")
-    q.add_argument("email"); q.set_defaults(fn=cmd_auto_test_move)
     q = autos.add_parser("serve-once", help=argparse.SUPPRESS)
     q.add_argument("--force", action="store_true"); q.add_argument("--manual", action="store_true")
     q.set_defaults(fn=cmd_auto_serve, hook="mover")

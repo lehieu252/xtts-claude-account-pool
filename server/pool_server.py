@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Account Pool server: shared state of the Premium seat rotation, the machines of the pool, and their log.
+"""Account Pool server: the account every machine works on, the machines of the pool, and their log.
 
 Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool/. Stdlib only.
 
   GET  /healthz                      no auth
   GET  /api/state                    X-Pool-Key (any machine) or X-Pool-Mover-Key; with last_used
                                      {email: when it last became Premium}, which orders the next Premium
-  PUT  /api/state                    X-Pool-Mover-Key (machine 2 only): {phase, premium, target, message, backup};
-                                     without "backup" the backup account stays as it was
+  PUT  /api/state                    X-Pool-Mover-Key (machine 2 only): {phase, premium, active, fallbacks, seated,
+                                     message}: the account every machine works on (active), the ones a machine may
+                                     use when it lacks that one (fallbacks, best first), the accounts with a seat
   POST /api/machine                  X-Pool-Key: {machine_id, name, host, version, role, account, at_info};
                                      answers with the state, so a follower needs one request per check
   GET  /api/machines                 X-Pool-Key
   POST /api/log                      X-Pool-Key: {"events": [...]}; answers "ok"
-  POST /api/accounts                 X-Pool-Mover-Key: usage of every pool account, read by machine 2
+  POST /api/accounts                 X-Pool-Mover-Key: {accounts: usage of every pool account, read by machine 2,
+                                     pool: {swaps_week, swap_blocked_until, premium_back_at, ...}}
   POST /api/hold                     any key: {machine_id, name, account, backup, backup_tier, seconds}; a machine
                                      lends the Standard seat to `account` to log it in (409 while a seat moves or
                                      another machine holds it); machine 2 moves no seat until it is released
   POST /api/snapshots                X-Pool-Mover-Key: {"snapshots": {email: {tier, five_hour, five_hour_reset,
                                      seven_day, seven_day_reset, at}}}: the last usage machine 2 read of each
                                      account while it held a seat; GET /api/state returns them as "snapshots"
-  POST /api/request                  Basic auth + X-Pool-Dashboard: 1: {kind: premium|standard, email}; the "Dùng"
-                                     button: machine 2 gives that account the seat on its next run (one at a time)
+  POST /api/request                  Basic auth + X-Pool-Dashboard: 1: {kind: use|seat, email}; the dashboard
+                                     buttons: every machine works on that account (use), or it gets a Standard
+                                     seat of xtgroup.com.vn (seat); machine 2 does it on its next run (one at a time)
   POST /api/request/result           X-Pool-Mover-Key: {id, status: running|ok|fail, message}
   DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
@@ -44,8 +47,10 @@ ACTIVE_SEC = 300  # a machine seen within this many seconds counts as working
 MOVER_STALE_SEC = 300  # the dashboard flags machine 2 after this long without a report (a seat move takes up to ~4 min)
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
-ACCOUNT_FIELDS = ("email", "role", "rank", "last_used", "estimated", "eligible", "measured_at", "seat", "five_hour", "five_hour_reset", "seven_day", "seven_day_reset",
-                  "status", "read_at", "login_expires", "standard_next")
+ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligible", "near", "next_seat", "measured_at",
+                  "five_hour", "five_hour_reset", "seven_day", "seven_day_reset", "status", "read_at", "login_expires")
+POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
+               "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "thresholds")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
 
@@ -84,6 +89,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS accounts (email TEXT PRIMARY KEY, position INTEGER, data TEXT NOT NULL,
                     updated REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS snapshots (email TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL);
             """)
             # 1.0.8: the backup account the machines wait on while the seat moves (machine 2 picks it)
             cols = [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]
@@ -93,15 +99,20 @@ class Store:
                 self.db.execute("ALTER TABLE state ADD COLUMN request TEXT")
             if "hold" not in cols:  # 1.0.12: the Standard seat lent to an account so a machine can log it in
                 self.db.execute("ALTER TABLE state ADD COLUMN hold TEXT")
+            for col in ("active", "fallbacks", "seated"):  # 1.0.33: machines switch between accounts with a seat
+                if col not in cols:
+                    self.db.execute("ALTER TABLE state ADD COLUMN %s TEXT" % col)
+            if "active" not in [r["name"] for r in self.db.execute("PRAGMA table_info(transitions)")]:
+                self.db.execute("ALTER TABLE transitions ADD COLUMN active TEXT")
             if not self.db.execute("SELECT 1 FROM state").fetchone():
                 self.db.execute("INSERT INTO state (id, phase, premium, target, message, updated_at, by) VALUES (1, 'STABLE', NULL, NULL, 'not set yet', ?, NULL)", (time.time(),))
 
     def state(self):
         with self.lock:
-            st = dict(self.db.execute("SELECT phase, premium, target, backup, hold, request, message, updated_at, by "
-                                      "FROM state").fetchone())
-        st["hold"] = json.loads(st["hold"]) if st["hold"] else None
-        st["request"] = json.loads(st["request"]) if st["request"] else None
+            st = dict(self.db.execute("SELECT phase, premium, target, backup, active, fallbacks, seated, hold, request, "
+                                      "message, updated_at, by FROM state").fetchone())
+        for k in ("hold", "request", "fallbacks", "seated"):
+            st[k] = json.loads(st[k]) if st[k] else None
         return st
 
     def set_request(self, req):
@@ -112,13 +123,16 @@ class Store:
         with self.lock, self.db:
             self.db.execute("UPDATE state SET hold=? WHERE id=1", (json.dumps(hold, ensure_ascii=False) if hold else None,))
 
-    def set_state(self, phase, premium, target, message, by, backup=None):
+    def set_state(self, phase, premium, target, message, by, backup=None, active=None, fallbacks=None, seated=None):
         now = time.time()
+        dump = lambda v: None if v is None else json.dumps(v, ensure_ascii=False)
         with self.lock, self.db:
             self.db.execute("UPDATE state SET phase=?, premium=?, target=?, message=?, updated_at=?, by=?, "
-                            "backup=COALESCE(?, backup) WHERE id=1", (phase, premium, target, message, now, by, backup))
-            self.db.execute("INSERT INTO transitions (at, phase, premium, target, message, by) VALUES (?,?,?,?,?,?)",
-                            (now, phase, premium, target, message, by))
+                            "backup=COALESCE(?, backup), active=COALESCE(?, active), fallbacks=COALESCE(?, fallbacks), "
+                            "seated=COALESCE(?, seated) WHERE id=1",
+                            (phase, premium, target, message, now, by, backup, active, dump(fallbacks), dump(seated)))
+            self.db.execute("INSERT INTO transitions (at, phase, premium, target, message, by, active) VALUES (?,?,?,?,?,?,?)",
+                            (now, phase, premium, target, message, by, active))
 
     def report(self, m):
         with self.lock, self.db:
@@ -174,6 +188,16 @@ class Store:
             self.db.executemany("INSERT INTO snapshots (email, data, updated) VALUES (?,?,?) ON CONFLICT(email) DO "
                                 "UPDATE SET data=excluded.data, updated=excluded.updated",
                                 [(e, json.dumps(d, ensure_ascii=False), now) for e, d in snaps.items()])
+
+    def set_kv(self, key, data):
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO kv (key, data, updated) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                            "data=excluded.data, updated=excluded.updated", (key, json.dumps(data, ensure_ascii=False), time.time()))
+
+    def kv(self, key):
+        with self.lock:
+            r = self.db.execute("SELECT data, updated FROM kv WHERE key=?", (key,)).fetchone()
+        return dict(json.loads(r["data"]), published=r["updated"]) if r else None
 
     def snapshots(self):
         with self.lock:
@@ -301,6 +325,7 @@ def make_handler(cfg, store):
                     "machines": store.machines(),
                     "transitions": store.transitions(),
                     "accounts": store.accounts(),
+                    "pool": store.kv("pool"),
                     "log": store.log(limit, first("machine"), first("event")),
                     "active_sec": ACTIVE_SEC, "mover_stale_sec": MOVER_STALE_SEC,
                 })
@@ -321,18 +346,15 @@ def make_handler(cfg, store):
                 return self._send(403, {"error": "dashboard only"})
             st = store.state()
             kind, email = b.get("kind"), (_text(b.get("email")) or "").lower()
-            if kind not in ("premium", "standard") or not email:
-                return self._send(400, {"error": "kind (premium|standard) and email required"})
-            if st["phase"] != "STABLE":
-                return self._send(409, {"error": "Đang chuyển seat (%s): thử lại sau ít phút." % st["phase"]})
+            if kind not in ("use", "seat") or not email:
+                return self._send(400, {"error": "kind (use|seat) and email required"})
             req = st.get("request")
             if req and req.get("status") in ("pending", "running") and time.time() - req.get("at", 0) < 900:
-                return self._send(409, {"error": "Đang có yêu cầu khác: %s → %s." % (req.get("kind"), req.get("email"))})
-            if st.get("hold"):
-                return self._send(409, {"error": "Một máy đang mượn seat để login: thử lại sau."})
-            current = (st.get("premium") if kind == "premium" else st.get("backup")) or ""
-            if email == current.lower():
-                return self._send(409, {"error": "%s đã đang giữ seat này." % email})
+                return self._send(409, {"error": "Đang có yêu cầu khác: %s %s." % (req.get("kind"), req.get("email"))})
+            if kind == "use" and email == (st.get("active") or "").lower():
+                return self._send(409, {"error": "Các máy đang dùng %s rồi." % email})
+            if kind == "seat" and email in [e.lower() for e in st.get("seated") or []]:
+                return self._send(409, {"error": "%s đang có seat rồi." % email})
             store.set_request({"id": "%d" % (time.time() * 1000), "kind": kind, "email": email, "at": time.time(),
                                "from": self.client_address[0], "status": "pending", "message": None})
             self._send(200, self._state_payload())
@@ -381,7 +403,9 @@ def make_handler(cfg, store):
                     raise ValueError("%s needs premium and target" % phase)
             except (ValueError, json.JSONDecodeError) as e:
                 return self._send(400, {"error": str(e)})
-            store.set_state(phase, premium, target, _text(b.get("message"), 500), _text(b.get("by")), _text(b.get("backup")))
+            emails = lambda v: [_text(e) for e in v[:20] if _text(e)] if isinstance(v, list) else None
+            store.set_state(phase, premium, target, _text(b.get("message"), 500), _text(b.get("by")), _text(b.get("backup")),
+                            _text(b.get("active")), emails(b.get("fallbacks")), emails(b.get("seated")))
             self._send(200, self._state_payload())
 
         def do_POST(self):
@@ -426,6 +450,8 @@ def make_handler(cfg, store):
                     return self._send(400, {"error": "accounts must be a list"})
                 store.set_accounts([{k: a.get(k) for k in ACCOUNT_FIELDS} for a in accounts[:50]
                                     if isinstance(a, dict) and _text(a.get("email"))])
+                if isinstance(b.get("pool"), dict):
+                    store.set_kv("pool", {k: b["pool"].get(k) for k in POOL_FIELDS})
                 return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/machine":
                 if not _text(b.get("machine_id")):

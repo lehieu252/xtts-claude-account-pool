@@ -41,34 +41,33 @@ h2 { margin: 0 0 10px; font-size: 15px; }
 .tbl { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
-td.wrap { white-space: normal; min-width: 260px; }
+td.note { white-space: normal; min-width: 260px; }
 th { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
 tr:last-child td { border-bottom: 0; }
-.bar { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.bar { display: flex; align-items: center; gap: 8px; min-width: 110px; }
 .bar .track { flex: 0 0 70px; height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; }
 .bar .fill { height: 100%; background: var(--ok); }
 .bar .fill.mid { background: var(--warn); } .bar .fill.high { background: var(--bad); }
 .bar .pct { font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
-.reset { color: var(--muted); font-size: 12px; }
+.reset { color: var(--muted); font-size: 11px; }
 tr.is-premium td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .chip.premium { color: var(--ok); font-weight: 600; } .chip.backup { color: var(--warn); font-weight: 600; }
 .chip.next { color: var(--accent); font-weight: 600; }
+.chip.active { color: var(--surface); background: var(--ok); font-weight: 700; }
+tr.is-active td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.sub { font: 400 13px/1.4 var(--sans); color: var(--muted); display: block; margin-top: 2px; overflow-wrap: anywhere; }
 .use { font: inherit; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--accent); background: transparent; color: var(--accent); }
 .use:hover:not(:disabled) { background: var(--accent); color: var(--surface); }
 .use:disabled { opacity: .35; cursor: not-allowed; }
 tr.group td { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; padding-top: 12px; border-bottom: 1px solid currentColor; }
-tr.group.premium td { color: var(--ok); } tr.group.rotation td { color: var(--accent); } tr.group.backup td { color: var(--warn); }
-tr.g-premium td:first-child { box-shadow: inset 3px 0 var(--ok); }
-tr.g-rotation td:first-child { box-shadow: inset 3px 0 var(--accent); }
-tr.g-backup td:first-child { box-shadow: inset 3px 0 var(--warn); }
-tr.g-backup.idle td { opacity: .6; }
+tr.group.vn td { color: var(--ok); } tr.group.comvn td { color: var(--accent); }
+tr.g-vn td:first-child { box-shadow: inset 3px 0 var(--ok); }
+tr.g-comvn td:first-child { box-shadow: inset 3px 0 var(--accent); }
+tr.noseat td { opacity: .75; }
 .chip { display: inline-block; background: var(--chip); border-radius: 4px; padding: 0 6px; font-size: 12px; }
 .chip.mover { color: var(--accent); font-weight: 600; }
 .mismatch { color: var(--warn); font-weight: 600; }
-.ev-move_fail, .ev-switch_fail, .ev-error, .ev-no_holder { color: var(--bad); font-weight: 600; }
-.ev-move_ok, .ev-switch_ok { color: var(--ok); }
-.ev-no_destination, .ev-read_fail { color: var(--warn); }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
 select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
 </style>
@@ -81,11 +80,10 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
   </header>
 
   <div class="panel hero">
-    <div class="stat"><span class="k">Pha</span><span class="v" id="phase">—</span></div>
-    <div class="stat"><span class="k">Account Premium</span><span class="v mono" id="premium">—</span></div>
-    <div class="stat"><span class="k">Account đích (P mới)</span><span class="v mono" id="target">—</span></div>
-    <div class="stat"><span class="k">Account tạm</span><span class="v mono" id="backup">—</span></div>
-    <div class="stat"><span class="k">Máy 2 (chuyển seat)</span><span class="v" id="mover">—</span></div>
+    <div class="stat"><span class="k">Các máy đang dùng</span><span class="v mono" id="active">—</span></div>
+    <div class="stat"><span class="k">Premium (xtgroup.vn)</span><span class="v mono" id="premium">—</span></div>
+    <div class="stat"><span class="k">Chuyển seat xtgroup.com.vn</span><span class="v" id="swaps">—</span></div>
+    <div class="stat"><span class="k">Máy 2</span><span class="v" id="mover">—</span></div>
   </div>
 
   <div class="alerts" id="alerts"></div>
@@ -96,21 +94,22 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
         <thead><tr><th>Account</th><th>Seat</th><th>5 giờ</th><th>7 ngày</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="accounts"><tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr></tbody>
       </table></div>
+      <p class="muted" style="margin:10px 0 0;font-size:13px" id="rules"></p>
   </div>
 
   <div class="panel">
       <h2>Các máy</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Máy</th><th>Host</th><th>Vai trò</th><th>Account đang dùng</th><th>Ở account tạm</th><th>Version</th><th>Lần cuối</th></tr></thead>
-        <tbody id="machines"><tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr></tbody>
+        <thead><tr><th>Máy</th><th>Host</th><th>Vai trò</th><th>Account đang dùng</th><th>Version</th><th>Lần cuối</th></tr></thead>
+        <tbody id="machines"><tr><td colspan="6" class="muted">Chưa có máy nào báo trạng thái.</td></tr></tbody>
       </table></div>
   </div>
 
   <div class="panel">
-      <h2>Lịch sử pha</h2>
+      <h2>Lịch sử account đang dùng</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Lúc</th><th>Pha</th><th>Premium → đích</th><th>Ghi chú</th></tr></thead>
-        <tbody id="transitions"><tr><td colspan="4" class="muted">Chưa có lần chuyển seat nào.</td></tr></tbody>
+        <thead><tr><th>Lúc</th><th>Account</th><th>Ghi chú</th></tr></thead>
+        <tbody id="transitions"><tr><td colspan="3" class="muted">Chưa có thay đổi nào.</td></tr></tbody>
       </table></div>
   </div>
 
@@ -128,15 +127,33 @@ function ago(sec) {
   return Math.round(sec / 86400) + " ngày trước";
 }
 const clock = (t) => new Date(t * 1000).toLocaleString("vi-VN", { hour12: false });
+const short = (t) => new Date(t * 1000).toLocaleString("vi-VN", { hour12: false, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+// Machine 2 writes its reasons in English; the usual ones in Vietnamese.
+function reasonVi(r) {
+  if (!r) return "";
+  return r.replace(/^Premium$/, "Premium còn dưới ngưỡng")
+    .replace(/^picked on the dashboard$/, "chọn trên dashboard")
+    .replace(/Premium at a threshold until ([\d/]+ [\d:]+) UTC/, (m, t) => `Premium chạm ngưỡng tới ${t} UTC`)
+    .replace(/Premium at a threshold/, "Premium chạm ngưỡng")
+    .replace(/; every account with a seat is at a threshold/, "; mọi account có seat đều chạm ngưỡng")
+    .replace(/; every account with a seat has used a window up/, "; mọi account có seat đều đã dùng hết 100%");
+}
+
+let TH = { five_hour: 80, seven_day: 90, margin: 10 };
 
 function render(d) {
-  const st = d.state, now = st.server_time;
-  $("phase").innerHTML = `<span class="pill ${esc(st.phase)}">${esc(st.phase)}</span>`;
-  $("premium").textContent = st.premium || "—";
-  $("target").textContent = st.phase === "STABLE" ? "—" : (st.target || "—");
-  // The account with the Standard seat, where every machine waits while Premium moves (machine 2 publishes it).
-  const backup = st.backup || null;
-  $("backup").textContent = backup || "—";
+  const st = d.state, now = st.server_time, pool = d.pool || {};
+  if (pool.thresholds) TH = pool.thresholds;
+  const accounts = d.accounts || [];
+  const active = st.active || null;
+  $("active").innerHTML = active ? `${esc(active)}<span class="sub">${esc(reasonVi(st.message))}</span>` : "—";
+  const prem = accounts.find((a) => a.role === "premium");
+  $("premium").innerHTML = esc(st.premium || "—") + (pool.premium_back_at
+    ? `<span class="sub">dùng lại được lúc ${short(pool.premium_back_at)}</span>`
+    : prem && prem.eligible ? `<span class="sub">còn dưới ngưỡng</span>` : "");
+  $("swaps").innerHTML = (pool.swaps_week ?? "—") + ` <span class="muted" style="font-size:13px;font-weight:400">lần tuần này</span>`
+    + (pool.swap_blocked_until ? `<span class="sub">${pool.swap_limit ? "claude.ai chặn tới" : "thử lại sau"} ${short(pool.swap_blocked_until)}</span>` : "");
 
   const movers = d.machines.filter((m) => m.role === "mover");
   const mover = movers.sort((a, b) => b.last_seen - a.last_seen)[0];
@@ -146,87 +163,77 @@ function render(d) {
     : `<span class="dot off"></span>Chưa kết nối`;
 
   const alerts = [];
-  if (!moverOk) alerts.push(["bad", mover ? `Máy 2 không báo trạng thái ${ago(now - mover.last_seen)}: không ai chuyển seat cho đến khi máy 2 chạy lại.` : "Máy 2 chưa kết nối lần nào."]);
-  const pool = (d.accounts || []).filter((a) => a.role === "rotation" && a.estimated);
-  if (pool.length && pool.every((a) => a.eligible === false))
-    alerts.push(["warn", "Mọi account trong pool đều đang chạm ngưỡng: Premium giữ nguyên tới khi dùng hết một cửa sổ."]);
-  // BACKUP_FULL: the machines would be blocked on it while Premium moves, so machine 2 first gives Standard to an
-  // account with room on it, or the Premium seat waits (unless Premium has used a window up).
-  const std = (d.accounts || []).find((a) => a.role === "backup");
-  const stdFull = std && [["5h", std.five_hour], ["7d", std.seven_day]].filter(([, v]) => v !== null && v !== undefined && v >= 95);
-  if (stdFull && stdFull.length)
-    alerts.push(["warn", `Account tạm ${esc(std.email)} đang đầy (${stdFull.map(([k, v]) => `${k} ${Math.round(v)}%`).join(", ")}): trước khi chuyển Premium, máy 2 chuyển seat Standard sang account khác còn dùng được; nếu không có account nào, Premium chờ (trừ khi Premium đã dùng hết 100%).`]);
+  if (!moverOk) alerts.push(["bad", mover ? `Máy 2 không báo trạng thái ${ago(now - mover.last_seen)}: không ai chọn account hay chuyển seat cho đến khi máy 2 chạy lại.` : "Máy 2 chưa kết nối lần nào."]);
+  if (!active) alerts.push(["warn", "Máy 2 chưa công bố account đang dùng (cần plugin 1.0.33 trên máy 2)."]);
+  if (pool.swap_limit && pool.swap_blocked_until)
+    alerts.push(["bad", `claude.ai đã chặn chuyển seat ở xtgroup.com.vn tới ${short(pool.swap_blocked_until)} (giới hạn tuần). Các máy vẫn chạy trên những account đang có seat.`]);
+  else if (pool.swap_blocked_until && pool.swap_error)
+    alerts.push(["bad", `Chuyển seat thất bại, máy 2 thử lại sau ${short(pool.swap_blocked_until)}: ${esc(pool.swap_error.slice(-300))}`]);
+  if (pool.swap_note && !pool.swap_blocked_until) alerts.push(["warn", `Chưa chuyển seat: ${esc(pool.swap_note)}`]);
+  if (/used a window up/.test(st.message || "")) alerts.push(["bad", "Mọi account có seat đều đã dùng hết 100%: các máy phải chờ tới khi một cửa sổ reset."]);
+  else if (/every account with a seat is at a threshold/.test(st.message || "")) alerts.push(["warn", "Mọi account có seat đều đang chạm ngưỡng: các máy dùng account còn nhiều nhất."]);
   // A login saved on machine 2 lasts about 4 weeks from the login; warn a week ahead (RELOGIN_WARN_DAYS).
-  const relogin = (d.accounts || []).filter((a) => a.status === "log in again");
-  if (relogin.length) alerts.push(["bad", `Cần login lại trên máy 2 (<span class="mono">/acct:login</span>): ${relogin.map((a) => esc(a.email)).join(", ")}. Máy 2 không chuyển seat được sang các account này.`]);
-  const ending = (d.accounts || []).filter((a) => a.status !== "log in again" && loginLeft(a, now) !== null);
-  if (ending.length) alerts.push(["warn", `Login trên máy 2 sắp hết hạn (mỗi lần login dùng được khoảng 4 tuần): ${ending.map((a) => `${esc(a.email)} (${loginLeft(a, now)})`).join(", ")}. Login lại trước khi hết hạn bằng <span class="mono">/acct:login &lt;email&gt;</span> trên máy 2.`]);
+  const relogin = accounts.filter((a) => a.status === "log in again" || a.status === "not logged in on machine 2");
+  if (relogin.length) alerts.push(["bad", `Cần login trên máy 2 (<span class="mono">/acct:login</span>): ${relogin.map((a) => esc(a.email)).join(", ")}. Máy 2 không dùng được các account này.`]);
+  const ending = accounts.filter((a) => a.status !== "log in again" && loginLeft(a, now) !== null);
+  if (ending.length) alerts.push(["warn", `Login trên máy 2 sắp hết hạn (mỗi lần login dùng được khoảng 4 tuần): ${ending.map((a) => `${esc(a.email)} (${loginLeft(a, now)})`).join(", ")}. Login lại bằng <span class="mono">/acct:login &lt;email&gt;</span> trên máy 2.`]);
   const r0 = st.request;
+  const what = (r) => r.kind === "use" ? `cho các máy dùng ${esc(r.email)}` : `gán seat Standard cho ${esc(r.email)}`;
   if (r0 && ["pending", "running"].includes(r0.status) && now - r0.at < 900)
-    alerts.push(["warn", `Đang chuyển ${r0.kind === "premium" ? "Premium" : "Standard"} sang ${esc(r0.email)} (yêu cầu từ dashboard, ${r0.status === "running" ? "máy 2 đang thực hiện" : "chờ máy 2"}).`]);
+    alerts.push(["warn", `Đang ${what(r0)} (yêu cầu từ dashboard, ${r0.status === "running" ? "máy 2 đang thực hiện" : "chờ máy 2"}).`]);
   else if (r0 && r0.status === "fail" && now - (r0.done_at || r0.at) < 600)
-    alerts.push(["bad", `Không chuyển được ${r0.kind === "premium" ? "Premium" : "Standard"} sang ${esc(r0.email)}: ${esc(r0.message || "")}`]);
-  if (st.hold) alerts.push(["warn", st.hold.until > now
-    ? `${esc(st.hold.name || "Một máy")} đang mượn seat Standard để login ${esc(st.hold.account)} (tới ${clock(st.hold.until)}): máy 2 tạm không chuyển seat.`
-    : `Hết giờ mượn seat cho ${esc(st.hold.account)}: máy 2 đang trả seat lại.`]);
-  if (st.phase !== "STABLE" && now - st.updated_at > 300) alerts.push(["warn", `Pha ${st.phase} đã kéo dài ${ago(now - st.updated_at).replace(" trước", "")}.`]);
-  // The log is newest first: a seat move that succeeded after the failure clears the alert.
-  const last = d.log.find((r) => r.event === "move_fail" || r.event === "move_ok");
-  const fail = last && last.event === "move_fail" ? last : null;
-  if (fail && now - fail.received < 3600) alerts.push(["bad", `Chuyển seat thất bại lúc ${esc(fail.ts)}: ${esc((fail.message || "").slice(0, 300))}`]);
-  const stale = d.machines.filter((m) => m.active && m.role !== "mover" && st.phase === "STABLE" && st.premium && m.account && m.account !== st.premium && m.account);
-  if (stale.length) alerts.push(["warn", `Máy chưa ở account Premium: ${stale.map((m) => esc(m.name || m.host)).join(", ")}.`]);
+    alerts.push(["bad", `Không ${what(r0)} được: ${esc(r0.message || "")}`]);
+  const stale = d.machines.filter((m) => m.active && m.role !== "mover" && active && m.account && m.account !== active);
+  if (stale.length) alerts.push(["warn", `Máy chưa ở account đang dùng: ${stale.map((m) => `${esc(m.name || m.host)} (${esc(m.account)})`).join(", ")}. Máy đó thiếu login của ${esc(active)} hoặc chưa lên 1.0.33.`]);
   $("alerts").innerHTML = alerts.map(([k, t]) => `<div class="alert ${k === "warn" ? "warn" : ""}">${t}</div>`).join("");
 
   $("machines").innerHTML = d.machines.length ? d.machines.map((m) => {
-    const mismatch = m.role !== "mover" && st.phase === "STABLE" && st.premium && m.account && m.account !== st.premium;
+    const mismatch = m.role !== "mover" && active && m.account && m.account !== active;
     return `<tr>
       <td><span class="dot ${m.active ? "on" : ""}"></span>${esc(m.name || "?")}</td>
       <td class="mono">${esc(m.host)}</td>
-      <td><span class="chip ${m.role === "mover" ? "mover" : ""}">${m.role === "mover" ? "Máy 2 · chuyển seat" : "Làm việc"}</span></td>
+      <td><span class="chip ${m.role === "mover" ? "mover" : ""}">${m.role === "mover" ? "Máy 2" : "Làm việc"}</span></td>
       <td class="mono ${mismatch ? "mismatch" : ""}">${esc(m.account || "—")}</td>
-      <td>${m.role === "mover" ? "—" : (m.account === backup ? "Có" : "Không")}</td>
       <td class="mono">${esc(m.version)}</td>
       <td>${ago(now - m.last_seen)}</td></tr>`;
-  }).join("") : `<tr><td colspan="7" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="muted">Chưa có máy nào báo trạng thái.</td></tr>`;
 
-  const accounts = d.accounts || [];
   const req = st.request;
-  const pending = req && ["pending", "running"].includes(req.status) && now - req.at < 900;
-  const busy = st.phase !== "STABLE" || pending || !!st.hold;
-  current = { premium: st.premium, backup, accounts };
-  // Machine 2 sends the rows in display order; older versions send no "premium" role, so fall back on the seat.
-  const groupOf = (a) => a.role === "backup" ? "backup" : (a.role === "premium" || a.seat === "Premium") ? "premium" : "rotation";
-  const groups = [["premium", "Premium"], ["rotation", "Không có seat · thứ tự lên Premium tiếp theo (dưới ngưỡng trước, rồi 7d, 5h thấp nhất; số liệu theo Premium)"], ["backup", "Account tạm · seat Standard"]];
-  $("accounts").innerHTML = accounts.length ? groups.map(([g, title]) => {
-    const rows = accounts.filter((a) => groupOf(a) === g);
+  const busy = req && ["pending", "running"].includes(req.status) && now - req.at < 900;
+  current = { active, accounts, pool };
+  const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định (1 Premium, 2 Standard)"],
+                  ["comvn", "xtgroup.com.vn", "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
+  $("accounts").innerHTML = accounts.length ? groups.map(([g, org, title]) => {
+    const rows = accounts.filter((a) => (a.org || "") === org);
     if (!rows.length) return "";
     return `<tr class="group ${g}"><td colspan="6">${title}</td></tr>` + rows.map((a) => {
-      const tag = (g === "premium" ? `<span class="chip premium">Premium</span>`
-        : g === "backup" ? `<span class="chip backup">Standard</span>`
-        : a.rank === 1 ? `<span class="chip next">#1 · tiếp theo</span>`
-        : a.rank ? `<span class="chip">#${a.rank}</span>` : "")
-        + (a.standard_next ? ` <span class="chip backup">Standard tiếp theo</span>` : "");
-      const use = (kind, label) => `<button class="use" data-kind="${kind}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>${label}</button>`;
-      return `<tr class="g-${g} ${g === "premium" ? "is-premium" : ""} ${g === "backup" && a.email !== backup ? "idle" : ""}">
-      <td class="mono">${esc(a.email)} ${tag}</td>
-      <td>${esc(a.seat || "—")}</td>
-      <td>${usageCell(a.five_hour, a.five_hour_reset)}</td><td>${usageCell(a.seven_day, a.seven_day_reset)}</td>
-      <td class="${a.status || loginLeft(a, now) ? "mismatch" : "muted"}">${esc(a.status || (loginLeft(a, now) ? "Login hết hạn " + loginLeft(a, now) : null) || (a.estimated
-        ? (a.measured_at ? "Lần cuối cập nhật: " + clock(a.measured_at) : "Chưa cập nhật")
-        : "ok"))}</td>
-      <td>${g === "rotation" ? use("premium", "Premium") + " " + use("standard", "Standard")
-        : g === "backup" ? use("premium", "Premium") : ""}</td></tr>`;
+      const seated = a.seat === "Premium" || a.seat === "Standard";
+      const tag = (a.active ? ` <span class="chip active">Đang dùng</span>` : "")
+        + (a.next_seat ? ` <span class="chip next">Seat tiếp theo</span>` : "");
+      const btn = (kind, label) => `<button class="use" data-kind="${kind}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>${label}</button>`;
+      const action = a.active ? "" : seated ? (a.eligible ? btn("use", "Dùng") : "") : a.role === "swap" ? btn("seat", "Gán seat") : "";
+      const state = a.status || (loginLeft(a, now) ? "Login hết hạn " + loginLeft(a, now) : null) || (a.estimated
+        ? (a.measured_at ? "Không có seat · số liệu lúc " + clock(a.measured_at) : "Không có seat · chưa dùng (0%)")
+        : a.eligible === false ? "Chạm ngưỡng" : a.near ? "Gần ngưỡng" : "ok");
+      return `<tr class="g-${g} ${a.active ? "is-active" : ""} ${seated ? "" : "noseat"}">
+      <td class="mono">${esc(a.email)}${tag}</td>
+      <td>${esc(a.seat || "?")}</td>
+      <td>${usageCell(a.five_hour, a.five_hour_reset, TH.five_hour)}</td><td>${usageCell(a.seven_day, a.seven_day_reset, TH.seven_day)}</td>
+      <td class="${a.status || loginLeft(a, now) || a.eligible === false ? "mismatch" : "muted"}">${esc(state)}</td>
+      <td>${action}</td></tr>`;
     }).join("");
   }).join("") : `<tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
+  $("rules").textContent = `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
+    + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
+    + `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `
+    + `sang account không seat còn nhiều nhất (account chưa dùng tính 0%), trừ khi Premium sắp reset trong 30 phút.`;
 
   $("transitions").innerHTML = d.transitions.length ? d.transitions.map((t) => `<tr>
-      <td>${clock(t.at)}</td><td><span class="pill ${esc(t.phase)}">${esc(t.phase)}</span></td>
-      <td class="mono">${esc(t.premium || "—")}${t.target && t.phase !== "STABLE" ? " → " + esc(t.target) : ""}</td>
-      <td class="wrap">${esc(t.message)}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="muted">Chưa có lần chuyển seat nào.</td></tr>`;
-
+      <td>${clock(t.at)}</td>
+      <td class="mono">${esc(t.active || t.premium || "—")}</td>
+      <td class="note">${esc(reasonVi(t.message))}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="muted">Chưa có thay đổi nào.</td></tr>`;
 
   $("updated").textContent = "Làm mới lúc " + new Date().toLocaleTimeString("vi-VN", { hour12: false }) + " · mỗi 5 giây";
 }
@@ -240,28 +247,25 @@ function loginLeft(a, now) {
   return left < 86400 ? "trong hôm nay" : `sau ${Math.floor(left / 86400)} ngày`;
 }
 
-function usageCell(pct, reset) {
+function usageCell(pct, reset, threshold) {
   if (pct === null || pct === undefined) return `<span class="muted">—</span>`;
-  const p = Math.round(pct), level = p >= 90 ? "high" : p >= 70 ? "mid" : "";
+  const p = Math.round(pct), level = p >= threshold ? "high" : p >= threshold - TH.margin ? "mid" : "";
   const when = reset ? new Date(reset).toLocaleString("vi-VN", { hour12: false, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
   return `<div class="bar"><span class="track"><span class="fill ${level}" style="width:${Math.min(100, p)}%;display:block"></span></span>`
-    + `<span class="pct">${p}%</span>${when ? `<span class="reset">reset ${when}</span>` : ""}</div>`;
+    + `<span class="pct">${p}%</span></div>${when ? `<div class="reset">reset ${when}</div>` : ""}`;
 }
 
-let current = { premium: null, backup: null, accounts: [] };
+let current = { active: null, accounts: [], pool: {} };
 
 document.addEventListener("click", async (ev) => {
   const btn = ev.target.closest && ev.target.closest("button.use");
   if (!btn || btn.disabled) return;
   const kind = btn.dataset.kind, email = btn.dataset.email;
-  const from = kind === "premium" ? current.premium : current.backup;
-  const row = current.accounts.find((a) => a.email === email) || {};
-  const seat = kind === "premium" ? "Premium" : "Standard";
-  let text = `Chuyển seat ${seat} từ ${from || "—"} sang ${email}?`
-    + (kind === "premium" ? "\n\nCác máy sẽ về account tạm trong lúc chuyển (khoảng 1–3 phút)." : "")
-    + (kind === "premium" && email === current.backup ? "\n\nAccount này đang giữ seat Standard: máy 2 chuyển seat Standard sang account khác trước." : "");
-  if (row.eligible === false) text += `\n\nLưu ý: theo lần cập nhật cuối, ${email} đang chạm ngưỡng usage.`;
-  if (row.status) text += `\n\nLưu ý: ${row.status}.`;
+  const swaps = current.pool.swaps_week ?? "?";
+  const text = kind === "use"
+    ? `Cho mọi máy chuyển sang ${email}?\n\nCác máy giữ account này tới khi nó chạm ngưỡng, rồi máy 2 tự chọn lại.`
+    : `Gán seat Standard của xtgroup.com.vn cho ${email}?\n\nMáy 2 lấy seat của account xtgroup.com.vn có seat còn ít nhất (không phải account các máy đang dùng). `
+      + `Mỗi lần chuyển seat bị claude.ai tính vào giới hạn tuần (tuần này đã chuyển ${swaps} lần).`;
   if (!confirm(text)) return;
   btn.disabled = true;
   try {
@@ -275,7 +279,7 @@ document.addEventListener("click", async (ev) => {
 });
 
 async function refresh() {
-  const q = new URLSearchParams({ limit: "50" });  // only for the "seat move failed" alert
+  const q = new URLSearchParams({ limit: "20" });
   try {
     const r = await fetch("api/dashboard?" + q, { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
