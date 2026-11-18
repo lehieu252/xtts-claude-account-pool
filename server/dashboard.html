@@ -204,7 +204,9 @@ function render(d) {
   const busy = req && ["pending", "running"].includes(req.status) && now - req.at < 900;
   current = { active, accounts, pool };
   const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định (1 Premium, 2 Standard)"],
-                  ["comvn", "xtgroup.com.vn", "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
+                  ["comvn", "xtgroup.com.vn", pool.seat_moves === false
+                    ? "xtgroup.com.vn · chỉ các account đang có seat (máy 2 không chuyển seat)"
+                    : "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, org, title]) => {
     const rows = accounts.filter((a) => (a.org || "") === org);
     if (!rows.length) return "";

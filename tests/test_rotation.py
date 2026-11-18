@@ -282,6 +282,17 @@ class ReadPoolTests(unittest.TestCase):
         r, _ = self.read(pool_index(), SEATS, {})
         self.assertEqual(r[-1]["est"], acct.NEVER_READ)
 
+    def test_seat_moves_off_only_the_accounts_with_a_seat_the_fixed_ones_and_one_that_held_a_seat_are_shown(self):
+        idx = pool_index([e for e in acct.POOL_EMAILS if e != X0])
+        snaps = {X0: snap(50, 50)}  # xtg@: logged in no more, but it held a seat
+        r, _ = self.read(idx, SEATS, {}, snaps=snaps)
+        self.assertEqual([x["email"] for x in r if acct._shown(x)], [P, T1, T2, X0, X1])  # not X2, X3 (no seat)
+        with patch.object(acct, "SEAT_MOVES", True):
+            r, _ = self.read(idx, SEATS, {}, snaps=snaps)
+        self.assertEqual([x["email"] for x in r if acct._shown(x)], list(acct.POOL_EMAILS))
+        r, _ = self.read(pool_index([P, T1, T2]), {P: acct.PREMIUM_TIER}, {})  # no seat read, none held before
+        self.assertEqual([x["email"] for x in r if acct._shown(x)], [P, T1, T2])
+
     def test_an_account_not_logged_in_or_to_log_in_again_cannot_be_used(self):
         idx = pool_index()
         del idx["accounts"][T1]
@@ -609,6 +620,19 @@ class SeatMovesOffTests(unittest.TestCase):
         self.assertEqual((pool.state["active"], pool.state["seated"]), (X3, [P, T1, T2, X0, X3]))
         self.assertEqual(pool.state["fallbacks"], [X0])
         self.assertEqual(claude.changes, [])
+
+    def test_accounts_without_a_seat_are_neither_listed_nor_asked_to_log_in(self):
+        # 18/11: xtg@ and xtg3@xtgroup.com.vn hold the seats; xtg1@ and xtg2@ have none, xtg2@ is not even logged in
+        seats = {P: acct.PREMIUM_TIER, T1: acct.STANDARD_TIER, T2: acct.STANDARD_TIER, X0: acct.STANDARD_TIER,
+                 X3: acct.STANDARD_TIER}
+        idx = pool_index([e for e in acct.POOL_EMAILS if e != X2])
+        pool, claude = FakePool(active=P), Claude({P: (40, 20)}, seats)
+        with patch.object(acct, "log_event") as log:
+            self.run_once(pool, claude, idx)
+        self.assertEqual([a["email"] for a in pool.accounts], [P, T1, T2, X0, X3])
+        self.assertFalse(any(a["next_seat"] for a in pool.accounts))
+        self.assertFalse(any(a["status"] for a in pool.accounts))
+        self.assertNotIn("not_logged_in", [c.args[0] for c in log.call_args_list])
 
     def test_the_dashboard_cannot_give_a_seat(self):
         pool = FakePool(active=P, request={"id": "4", "kind": "seat", "email": X2, "status": "pending"})
@@ -974,10 +998,13 @@ class WindowsServiceTests(unittest.TestCase):
 
 
 class LoginAllTests(unittest.TestCase):
+    STATE = {"seated": [P, T1, T2, X0, X1]}  # what machine 2 publishes: the accounts with a seat
+
     def test_logs_in_only_the_missing_or_expired_pool_accounts_in_one_terminal(self):
         idx = pool_index()
         del idx["accounts"][X1]
         with Patches(patch.object(acct, "load_index", return_value=idx),
+                     patch.object(acct, "_pool_state_quiet", return_value=self.STATE),
                      patch.object(acct, "read_stored_creds", return_value=CREDS),
                      patch.object(acct, "token_state", side_effect=lambda m, c: "relogin" if m["profile"]["emailAddress"] == T1 else "ok"),
                      patch.object(acct, "claude_bin", return_value="/bin/claude"),
@@ -991,13 +1018,20 @@ class LoginAllTests(unittest.TestCase):
         self.assertIn("(1/2)", script)
         self.assertIn("while they hold one", _p["out"].getvalue())
 
-    def test_nothing_to_do_when_every_pool_account_is_logged_in(self):
-        with Patches(*stored(), patch.object(acct, "load_index", return_value=pool_index()),
+    def test_nothing_to_do_when_every_account_with_a_seat_is_logged_in(self):
+        # xtg2@ and xtg3@xtgroup.com.vn have no seat: they are not needed, logged in or not
+        idx = pool_index([P, T1, T2, X0, X1])
+        with Patches(*stored(), patch.object(acct, "load_index", return_value=idx),
+                     patch.object(acct, "_pool_state_quiet", return_value=self.STATE),
                      term=patch.object(acct, "open_terminal"),
                      out=patch.object(acct.sys, "stdout", io.StringIO())) as _p:
             acct.cmd_login(argparse.Namespace(name=None, email=None))
         _p["term"].assert_not_called()
-        self.assertIn("All 7 pool accounts", _p["out"].getvalue())
+        self.assertIn("All 5 pool accounts this machine needs", _p["out"].getvalue())
+
+    def test_the_fixed_accounts_are_needed_before_machine_2_publishes_the_seats(self):
+        self.assertEqual(acct._required_emails(None), (P, T1, T2))
+        self.assertEqual(acct._required_emails({"seated": [X3, XTTS]}), (P, T1, T2, X3))  # a former account never
 
 
 class RotationPreviewTests(unittest.TestCase):

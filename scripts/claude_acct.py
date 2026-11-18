@@ -674,11 +674,31 @@ def cmd_login_backup(args):
     _backup_live_login()
 
 
+def _required_emails(state=None):
+    """The pool accounts a machine must be logged in to: the accounts with a seat (machine 2 publishes them) and
+    the fixed ones of xtgroup.vn. The others (xtg1@, xtg2@xtgroup.com.vn while they have no seat) are not needed."""
+    seated = {e.lower() for e in (state or {}).get("seated") or []}
+    return tuple(e for e in POOL_EMAILS if e in seated or e in ALWAYS_EMAILS)
+
+
+def _pool_state_quiet():
+    """The pool state, or None when this machine has not joined or the pool server cannot be reached."""
+    st = read_json(pool_settings_path(), {}) or {}
+    if not (st.get("api_key") or st.get("mover_key")):
+        return None
+    try:
+        return pool_call("GET", "/api/state", mover=not st.get("api_key"))
+    except AcctError:
+        return None
+
+
 def _login_all():
-    """Log in, one after the other in one terminal window, to every pool account this machine lacks."""
+    """Log in, one after the other in one terminal window, to every pool account this machine lacks that it needs
+    (see _required_emails)."""
     idx = load_index()
     todo = []
-    for email in POOL_EMAILS:
+    required = _required_emails(_pool_state_quiet())
+    for email in required:
         name = _saved_name(idx, email)
         if name:
             try:
@@ -688,7 +708,7 @@ def _login_all():
                 pass
         todo.append((name or email, email))
     if not todo:
-        print("All %d pool accounts are logged in on this machine." % len(POOL_EMAILS))
+        print("All %d pool accounts this machine needs are logged in (%s)." % (len(required), ", ".join(required)))
         return
     acct_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "acct.sh")
     work = os.path.join(store_dir(), "login-all")
@@ -1018,6 +1038,7 @@ SWAP_ORG = "xtgroup.com.vn"
 SWAP_SEATS = 2  # the Standard seats of xtgroup.com.vn
 STANDARD_EMAILS = FIXED_STANDARD_EMAILS + SWAP_EMAILS  # the order breaks ties
 POOL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS
+ALWAYS_EMAILS = (PREMIUM_EMAIL,) + FIXED_STANDARD_EMAILS  # shown and logged in on every machine whatever their seat
 # Accounts of former pools (before 1.0.33): a machine still on one of them goes to the active account.
 FORMER_POOL_EMAILS = (
     "hieule252uet@gmail.com", "xtts@xtgroup.vn", "contact@xtgroup.vn", "xtg1@xtgroup.vn", "xtg6@xtgroup.vn",
@@ -1413,7 +1434,15 @@ def _read_pool(idx, live, state, force=False, now=None):
         if row["est"] is None and not _seated(row):
             snap = snaps.get(email) or {}
             row.update(est=_estimate(snap, now) or NEVER_READ, estimated=True, measured_at=snap.get("at"))
+        # Seat moves off: only the accounts with a seat count (and the fixed ones, and one whose seat cannot be read
+        # because its login ended, once it held one); the others are not shown, not asked for a login.
+        row["shown"] = (_seat_moves_on() or _seated(row) or email in ALWAYS_EMAILS
+                        or (row["seat"] is None and email in snaps))
     return rows
+
+
+def _shown(row):
+    return row.get("shown", True)
 
 
 def _read_account(idx, live, row, force):
@@ -1767,10 +1796,10 @@ def _mover_once(args):
     idx = load_index()
     live = current_name(idx)
     state = pool_call("POST", "/api/machine", _machine_report(_email_of(idx, live), False), mover=True)
-    missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
+    rows = _read_pool(idx, live, state, force=args.force)
+    missing = [r["email"] for r in rows if _shown(r) and r["why"] == "not logged in on machine 2"]
     if missing:
         log_event("not_logged_in", "machine 2 is missing: %s (run /acct:login)" % ", ".join(missing), every=QUIET_EVERY)
-    rows = _read_pool(idx, live, state, force=args.force)
     _keep_readings(idx, state, rows)
     save_index(idx)
     fresh = any(r["fresh"] for r in rows)
@@ -1823,9 +1852,11 @@ ACCOUNTS_EVERY = 60  # seconds between two usage tables machine 2 sends to the d
 def _account_rows(rows, active):
     """The pool accounts for the dashboard, in POOL_EMAILS order. An account without a seat shows its last reading
     (estimated), 0 % if never read."""
-    free = _free_order(rows)
+    free = _free_order(rows) if _seat_moves_on() else []
     out = []
     for r in rows:
+        if not _shown(r):
+            continue
         est = r["est"]
         row = {"email": r["email"], "org": r["email"].rsplit("@", 1)[-1],
                "role": "premium" if r["email"] == PREMIUM_EMAIL else "swap" if r["email"] in SWAP_EMAILS else "standard",
@@ -2248,8 +2279,10 @@ def cmd_doctor(args):
     except AcctError:
         check("Claude Code login", False, "not logged in", "Log in to Claude Code with /login.")
     idx = load_index()
-    missing = [e for e in POOL_EMAILS if not _saved_name(idx, e)]
-    check("Pool accounts logged in", not missing, "all %d" % len(POOL_EMAILS) if not missing else "missing: " + ", ".join(missing),
+    required = _required_emails(_pool_state_quiet())  # the accounts with a seat, which machine 2 publishes
+    missing = [e for e in required if not _saved_name(idx, e)]
+    check("Pool accounts logged in", not missing, "all %d needed (%s)" % (len(required), ", ".join(required)) if not missing
+          else "missing: " + ", ".join(missing),
           "Log in to the missing accounts: /acct:login (it goes through them one by one).")
     if st.get("api_key") or mover:
         try:
