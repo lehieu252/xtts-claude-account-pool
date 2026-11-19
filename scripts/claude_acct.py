@@ -1038,7 +1038,11 @@ SWAP_ORG = "xtgroup.com.vn"
 SWAP_SEATS = 2  # the Standard seats of xtgroup.com.vn
 STANDARD_EMAILS = FIXED_STANDARD_EMAILS + SWAP_EMAILS  # the order breaks ties
 POOL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS
-ALWAYS_EMAILS = (PREMIUM_EMAIL,) + FIXED_STANDARD_EMAILS  # shown and logged in on every machine whatever their seat
+# Shown on the dashboard and asked for at login whatever their seat. Since 19/11 (1.0.36) all seven: xtgroup.com.vn has 4
+# Standard seats, one per account. An account that is not logged in on machine 2 cannot show its seat, so it would never
+# be listed or asked for if it had to hold one first. Narrow this to (PREMIUM_EMAIL,) + FIXED_STANDARD_EMAILS to show
+# and ask for the accounts that hold a seat only.
+ALWAYS_EMAILS = POOL_EMAILS
 # Accounts of former pools (before 1.0.33): a machine still on one of them goes to the active account.
 FORMER_POOL_EMAILS = (
     "hieule252uet@gmail.com", "xtts@xtgroup.vn", "contact@xtgroup.vn", "xtg1@xtgroup.vn", "xtg6@xtgroup.vn",
