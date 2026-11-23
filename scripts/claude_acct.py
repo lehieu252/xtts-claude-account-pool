@@ -1037,19 +1037,32 @@ SWAP_EMAILS = ("xtg@xtgroup.com.vn", "xtg1@xtgroup.com.vn", "xtg2@xtgroup.com.vn
 SWAP_ORG = "xtgroup.com.vn"
 SWAP_SEATS = 2  # the Standard seats of xtgroup.com.vn
 STANDARD_EMAILS = FIXED_STANDARD_EMAILS + SWAP_EMAILS  # the order breaks ties
-POOL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS
-# Shown on the dashboard and asked for at login whatever their seat. Since 19/11 (1.0.36) all seven: xtgroup.com.vn has 4
-# Standard seats, one per account. An account that is not logged in on machine 2 cannot show its seat, so it would never
-# be listed or asked for if it had to hold one first. Narrow this to (PREMIUM_EMAIL,) + FIXED_STANDARD_EMAILS to show
-# and ask for the accounts that hold a seat only.
+ALL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS  # the seven accounts of the two Teams
+# The Teams the pool works in. Since 23/11 (1.0.37) only xtgroup.com.vn: its four accounts each hold a Standard seat, there is
+# no Premium account, and a machine switches from one Standard account to the next. Every switch between two
+# organizations makes Claude Code rewrite the whole conversation into the prompt cache and drop its earlier thinking
+# ("Claude can't use thinking from another organization"), so staying in one Team also saves usage. Put "xtgroup.vn" back in
+# to use the three accounts of xtgroup.vn too (the account with Premium is then preferred while it is below the thresholds).
+POOL_ORGS = ("xtgroup.com.vn",)
+POOL_EMAILS = tuple(e for e in ALL_EMAILS if e.rsplit("@", 1)[1] in POOL_ORGS)
+# Shown on the dashboard and asked for at login whatever their seat. Since 19/11 (1.0.36) every pool account: xtgroup.com.vn
+# has 4 Standard seats, one per account. An account that is not logged in on machine 2 cannot show its seat, so it would never
+# be listed or asked for if it had to hold one first. Narrow this to the accounts that hold a seat for good to show and ask
+# for those only.
 ALWAYS_EMAILS = POOL_EMAILS
-# Accounts of former pools (before 1.0.33): a machine still on one of them goes to the active account.
+# Accounts of former pools (before 1.0.33, and the accounts of xtgroup.vn since 1.0.37): a machine still on one of them goes to
+# the active account.
 FORMER_POOL_EMAILS = (
     "hieule252uet@gmail.com", "xtts@xtgroup.vn", "contact@xtgroup.vn", "xtg1@xtgroup.vn", "xtg6@xtgroup.vn",
     "info@xtgroup.vn", "careers@xtgroup.vn", "support@xtgroup.vn", "hieunx@xtgroup.vn", "thanglt@xtgroup.vn",
     "kienlt@xtgroup.vn", "xtg3@xtgroup.vn", "xtg4@xtgroup.vn", "xtg5@xtgroup.vn", "xtg7@xtgroup.vn",
     "xtg8@xtgroup.vn", "xtg9@xtgroup.vn", "xtg10@xtgroup.vn", "xtg11@xtgroup.vn",
-)
+) + tuple(e for e in ALL_EMAILS if e not in POOL_EMAILS)
+
+
+def _premium_in_pool():
+    """The Premium account, or None when the pool does not use it (POOL_ORGS)."""
+    return PREMIUM_EMAIL if PREMIUM_EMAIL in POOL_EMAILS else None
 
 # An account is at a threshold at 5-hour >= DAILY_THRESHOLD or 7-day >= WEEKLY_THRESHOLD (or a window at 100 %), each
 # read against the limits of its own seat. The machines leave it then for another account with a seat.
@@ -1507,32 +1520,34 @@ def _premium_note(prem):
 def _choose_active(rows, current=None, pinned=None):
     """(email, why) of the account every machine works on; (None, why) leaves them where they are. In order:
     1. the account picked on the dashboard (`pinned`), while it is below the thresholds;
-    2. Premium, while it is below the thresholds;
+    2. Premium (when the pool has it, POOL_ORGS), while it is below the thresholds;
     3. the current Standard account, while it is below them (no switching back and forth);
     4. the best ranked Standard account with a seat below them (_rank_key);
-    5. none below them: the current one, else the best ranked one, unless it has used a window up."""
+    5. none below them: the current one, else the best ranked one, unless it has used a window up.
+    Without a Premium account `why` is "kept until it reaches a threshold" (3) or "best account below the thresholds" (4)."""
     by = {r["email"]: r for r in rows}
     pin = by.get(pinned)
     if pin is not None and _ready(pin) and not _over(pin["est"]):
         return pinned, "picked on the dashboard"
-    prem = by[PREMIUM_EMAIL]
-    if _ready(prem) and not _over(prem["est"]):
+    prem = by.get(PREMIUM_EMAIL)
+    if prem is not None and _ready(prem) and not _over(prem["est"]):
         return PREMIUM_EMAIL, "Premium"
-    why = _premium_note(prem)
+    note = _premium_note(prem) if prem is not None else None
     ready = [r for r in rows if _ready(r)]
     cur = by.get(current)
     standards = [r for r in ready if r["email"] != PREMIUM_EMAIL]
     if cur is not None and cur in standards and not _over(cur["est"]):
-        return current, why
+        return current, note or "kept until it reaches a threshold"
     below = [r for r in standards if not _over(r["est"])]
     if below:
-        return min(below, key=_row_rank)["email"], why
+        return min(below, key=_row_rank)["email"], note or "best account below the thresholds"
+    all_over = (note + "; " if note else "") + "every account with a seat is at a threshold"
     left = [r for r in ready if not _used_up(r["est"])]
     if cur is not None and cur in left:
-        return current, why + "; every account with a seat is at a threshold"
+        return current, all_over
     if left:
-        return min(left, key=_row_rank)["email"], why + "; every account with a seat is at a threshold"
-    return None, why + "; every account with a seat has used a window up"
+        return min(left, key=_row_rank)["email"], all_over
+    return None, (note + "; " if note else "") + "every account with a seat has used a window up"
 
 
 def _free_order(rows):
@@ -1570,8 +1585,8 @@ def _plan_swap(rows, active, now=None):
         return None, None, None
     if any(r is not act and _ready(r) and not _near(r["est"]) for r in rows):
         return None, None, None
-    prem = by[PREMIUM_EMAIL]
-    if _ready(prem):
+    prem = by.get(PREMIUM_EMAIL)
+    if prem is not None and _ready(prem):
         back = (_back_at(prem["est"], DAILY_THRESHOLD - PREPARE_MARGIN, WEEKLY_THRESHOLD - PREPARE_MARGIN)
                 if act is prem else _back_at(prem["est"]))
         if back is not None and back - now <= PREMIUM_SOON:
@@ -1729,7 +1744,7 @@ def _save_mover_state(ms):
 
 
 def _put_state(active, message, fallbacks, seated):
-    return pool_call("PUT", "/api/state", {"phase": "STABLE", "premium": PREMIUM_EMAIL, "active": active,
+    return pool_call("PUT", "/api/state", {"phase": "STABLE", "premium": _premium_in_pool(), "active": active,
                                            "fallbacks": fallbacks, "seated": seated, "message": message,
                                            "by": machine_name()}, mover=True)
 
@@ -1876,9 +1891,10 @@ def _account_rows(rows, active):
 
 def _pool_info(rows, state, now):
     ms = _mover_state()
-    prem = rows[0]
-    back = _back_at(prem["est"]) if prem["est"] is not None and _over(prem["est"]) else None
+    prem = next((r for r in rows if r["email"] == PREMIUM_EMAIL), None)  # none when the pool does not use Premium
+    back = _back_at(prem["est"]) if prem is not None and prem["est"] is not None and _over(prem["est"]) else None
     return {"active": state.get("active"), "reason": state.get("message"), "premium_back_at": back or None,
+            "has_premium": prem is not None,
             "swaps_week": len(_swaps_this_week(ms, now)), "week_start": _week_start(now),
             "swap_blocked": _swap_blocked(ms, now), "swap_blocked_until": ms.get("swap_blocked_until") if _swap_blocked(ms, now) else None,
             "swap_limit": bool(ms.get("swap_limit")) and bool(_swap_blocked(ms, now)),
@@ -2146,11 +2162,13 @@ def cmd_auto_status(args):
     print("acct plugin %s" % plugin_version())
     print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
     print("An account is left at: %s" % _trigger_text())
-    print("Premium (xtgroup.vn, fixed): %s" % PREMIUM_EMAIL)
-    print("Standard (xtgroup.vn, fixed): %s" % ", ".join(FIXED_STANDARD_EMAILS))
-    print("Standard (%s, %d seats for %d accounts): %s" % (SWAP_ORG, SWAP_SEATS, len(SWAP_EMAILS), ", ".join(SWAP_EMAILS)))
-    print("Order: Premium below the thresholds, else the Standard account with a seat in use until it reaches them, "
-          "else the best ranked one with a seat")
+    print("Pool (%s): %s" % (", ".join(POOL_ORGS), ", ".join(POOL_EMAILS)))
+    if _premium_in_pool():
+        print("Order: Premium below the thresholds, else the Standard account with a seat in use until it reaches them, "
+              "else the best ranked one with a seat")
+    else:
+        print("Order: the Standard account in use until it reaches the thresholds, then the best ranked one with a seat "
+              "below them (no Premium account, no switch between organizations)")
     print("Seat moves: %s" % ("ON (a seat of %s moves when the active account is %d points below a threshold and no other "
                               "account with a seat is)" % (SWAP_ORG, PREPARE_MARGIN) if _seat_moves_on()
                               else "OFF: machine 2 moves no seat; give one by hand on the Members page"))

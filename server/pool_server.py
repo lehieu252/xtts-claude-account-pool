@@ -50,7 +50,7 @@ LOG_KEEP_SEC = 30 * 86400
 ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligible", "near", "next_seat", "measured_at",
                   "five_hour", "five_hour_reset", "seven_day", "seven_day_reset", "status", "read_at", "login_expires")
 POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
-               "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "thresholds")
+               "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "has_premium", "thresholds")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
 
@@ -397,8 +397,8 @@ def make_handler(cfg, store):
                 if phase not in PHASES:
                     raise ValueError("phase must be one of %s" % ", ".join(PHASES))
                 premium, target = _text(b.get("premium")), _text(b.get("target"))
-                if phase == "STABLE" and not premium:
-                    raise ValueError("STABLE needs the premium account")
+                if phase == "STABLE" and not (premium or _text(b.get("active"))):
+                    raise ValueError("STABLE needs the premium or the active account")  # no Premium in the pool since 1.0.37
                 if phase in ("PREPARING", "MOVING") and not (premium and target):
                     raise ValueError("%s needs premium and target" % phase)
             except (ValueError, json.JSONDecodeError) as e:

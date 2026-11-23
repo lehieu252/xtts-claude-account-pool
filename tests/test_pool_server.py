@@ -128,6 +128,13 @@ class PoolServerTests(unittest.TestCase):
         d = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]
         self.assertEqual([t["active"] for t in d["transitions"]], ["p@x.vn", "s1@x.vn"])
 
+    def test_a_state_without_a_premium_account_needs_the_active_one(self):
+        # since 1.0.37 the pool has no Premium account
+        code, st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": None, "active": "x1@x.vn",
+                                                   "seated": ["x1@x.vn", "x2@x.vn"]}, mover=MOVER)
+        self.assertEqual((code, st["premium"], st["active"]), (200, None, "x1@x.vn"))
+        self.assertEqual(self.call("PUT", "/api/state", {"phase": "STABLE", "premium": None}, mover=MOVER)[0], 400)
+
     def test_machine_2_publishes_the_pool_figures_with_the_usage_table(self):
         pool_info = {"swaps_week": 3, "swap_blocked_until": 1795000000.0, "swap_limit": True, "secret": "x"}
         self.assertEqual(self.call("POST", "/api/accounts", {"accounts": [], "pool": pool_info}, mover=MOVER), (200, "ok"))

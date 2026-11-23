@@ -17,7 +17,7 @@ A Claude Code plugin for the XTGroup claude.ai Team. Save the team's accounts, s
 
 ## Install
 
-Requirements: Claude Code (CLI or VS Code extension) logged in with a claude.ai account, Python 3.8+, Node.js 20+ with npm, and Google Chrome. The accounts of the pool belong to two claude.ai Team organizations (xtgroup.vn and xtgroup.com.vn), and the admin browser on machine 2 must be signed in as an owner or admin of xtgroup.com.vn (for the seat changes). On Windows, Claude Code runs the plugin's shell scripts through Git Bash.
+Requirements: Claude Code (CLI or VS Code extension) logged in with a claude.ai account, Python 3.8+, Node.js 20+ with npm, and Google Chrome. The accounts of the pool belong to the claude.ai Team organization xtgroup.com.vn (since 1.0.37; xtgroup.vn too before), and the admin browser on machine 2 must be signed in as an owner or admin of xtgroup.com.vn (for the seat changes). On Windows, Claude Code runs the plugin's shell scripts through Git Bash.
 
 Platform support:
 
@@ -73,7 +73,7 @@ bash "$PLUGIN_ROOT/scripts/acct.sh" doctor
 
 Shell variables do not survive between tool calls, so in the next steps `$ACCT` stands for `bash "<PLUGIN_ROOT>/scripts/acct.sh"` with the absolute path printed above written out in full. The slash commands and hooks of a newly installed plugin are only loaded by a new session, but the script works right away, so steps 4 to 7 run it directly in the current session.
 
-**4. Log in to the pool accounts.** The seven accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
+**4. Log in to the pool accounts.** The accounts of the pool are fixed in the plugin (see [The XTGroup pool](#the-xtgroup-pool)). One command goes through the ones this machine lacks:
 
 ```bash
 $ACCT login
@@ -150,6 +150,8 @@ Two words with two meanings, never mixed:
 - **Switch account**: change the account Claude Code on one machine is logged in with. It affects only that machine. **The hooks of each working machine do it for that machine**, to the account machine 2 publishes as active.
 - **Move a seat**: change the seat tier of accounts on an organization's Members page. It affects the whole organization and needs an admin browser. **Only the service on machine 2 does it, and only in xtgroup.com.vn.**
 
+**Since 1.0.37 (23/11/2026) the pool is xtgroup.com.vn only** (`POOL_ORGS`): its four accounts (`xtg@`, `xtg1@`, `xtg2@`, `xtg3@`) each hold a Standard seat, there is no Premium account, and the accounts of xtgroup.vn (`sales@`, `truongnv@`, `xtg2@`) are no longer used: a machine still on one goes to the active account. Every switch between two organizations makes Claude Code rewrite the whole conversation into the prompt cache (about 350k tokens in a long session) and drop its earlier thinking ("Claude can't use thinking from another organization"), so staying in one Team also saves usage. The rules below are those of the pool with both Teams (they apply again if `"xtgroup.vn"` is put back into `POOL_ORGS`); with xtgroup.com.vn only, machine 2 takes the Standard rules: keep the current account until it reaches a threshold, then the best ranked one below them (lowest 7d, then 5h, …), and when every account is at a threshold the current one, unless it used a window up.
+
 claude.ai limits, per organization and seat type, how many people may use a seat type in a week and how often a seat may pass from one person to another ("This organization has reached its weekly limit on moving this seat type between people … You can try again after <date> (UTC)"; the week starts Monday 00:00 UTC). On 17–18/11/2026 both limits were used up in xtgroup.vn: an open seat then only went back to its last few holders. So since 1.0.33 the pool spans two claude.ai Teams, and the machines switch between accounts that already hold a seat instead of moving the Premium seat. The accounts are fixed in `scripts/claude_acct.py`:
 
 | Organization | Accounts | Seats |
@@ -158,7 +160,7 @@ claude.ai limits, per organization and seat type, how many people may use a seat
 | xtgroup.vn | `truongnv@`, `xtg2@` (`FIXED_STANDARD_EMAILS`) | Standard, held for good |
 | xtgroup.com.vn | `xtg@`, `xtg1@`, `xtg2@`, `xtg3@` (`SWAP_EMAILS`) | 2 Standard seats: machine 2 moves one only when it is needed |
 
-Every working machine must be logged in to all seven (the same name before `@` exists in both organizations: `/acct:switch` then needs the whole email). claude.ai refuses Claude Code to an account without a seat, so log in the accounts of xtgroup.com.vn while they hold one; every seat given by hand counts against the weekly limit. The accounts of former pools (`xtts@`, `contact@`, `xtg1@`, `xtg6@`, `info@xtgroup.vn` …) are no longer used: a machine still on one goes to the active account.
+Every working machine must be logged in to the pool accounts (four since 1.0.37; seven with both Teams, when the same name before `@` exists in both organizations and `/acct:switch` needs the whole email). claude.ai refuses Claude Code to an account without a seat, so log in the accounts of xtgroup.com.vn while they hold one; every seat given by hand counts against the weekly limit. The accounts of former pools (`xtts@`, `contact@`, `xtg1@`, `xtg6@`, `info@xtgroup.vn` …) are no longer used: a machine still on one goes to the active account.
 
 Each account is read against the limits of its own seat (a Standard seat has about a fifth of a Premium one).
 
@@ -189,7 +191,7 @@ Move a seat of xtgroup.com.vn when ALL of:
   account that holds a seat already.
 ```
 
-**Seat moves are off since 1.0.34** (`SEAT_MOVES = False`): how many moves claude.ai allows a week is not known, so machine 2 moves no seat and the machines only switch between the accounts that hold one. A seat given by hand on the Members page is used at once (machine 2 reads every seat every 3 minutes), and the dashboard shows no "Gán seat" button. Only the accounts that hold a seat are ever chosen. Since 19/11 (1.0.36) xtgroup.com.vn has 4 Standard seats, one per account, so all seven pool accounts (`ALWAYS_EMAILS = POOL_EMAILS`) are listed on the dashboard and asked for by `/acct:login` and `/acct:doctor`, even before machine 2 is logged in to them (it cannot read the seat of an account it has no login for). An account without a seat is listed as "No seat" and never chosen. Narrowing `ALWAYS_EMAILS` to the three fixed accounts of xtgroup.vn (1.0.35) lists and asks for only the accounts that hold a seat (machine 2 publishes the list). `"seatMoves": true` in machine 2's `~/.claude-acct/rotation.json` turns the rules above back on, without a new version.
+**Seat moves are off since 1.0.34** (`SEAT_MOVES = False`): how many moves claude.ai allows a week is not known, so machine 2 moves no seat and the machines only switch between the accounts that hold one. A seat given by hand on the Members page is used at once (machine 2 reads every seat every 3 minutes), and the dashboard shows no "Gán seat" button. Only the accounts that hold a seat are ever chosen. Since 19/11 (1.0.36) xtgroup.com.vn has 4 Standard seats, one per account, so every pool account (`ALWAYS_EMAILS = POOL_EMAILS`) are listed on the dashboard and asked for by `/acct:login` and `/acct:doctor`, even before machine 2 is logged in to them (it cannot read the seat of an account it has no login for). An account without a seat is listed as "No seat" and never chosen. Narrowing `ALWAYS_EMAILS` to the three fixed accounts of xtgroup.vn (1.0.35) lists and asks for only the accounts that hold a seat (machine 2 publishes the list). `"seatMoves": true` in machine 2's `~/.claude-acct/rotation.json` turns the rules above back on, without a new version.
 
 Machine 2 reads the seat of every account and the usage of every account with a seat every 3 minutes (the usage API limits each account), and keeps on the pool server the last reading of each one, which ranks it once it has no seat. It counts the seat moves of the week (Monday 00:00 UTC) and shows them on the dashboard.
 
@@ -201,7 +203,7 @@ Machine 2 reads the seat of every account and the usage of every account with a 
 
 **Working machines.** Before each prompt and tool call, the hook reads the pool state (cached 5 s) and switches to the active account, or, when it is not logged in on this machine, to the first fallback that is (and logs that the active one is missing). If the pool server cannot be reached, the machine stays where it is. A request that is already running always finishes with the account it started with.
 
-**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), all seven pool accounts logged in (`/acct:login`), the admin browser signed in as an owner or admin of xtgroup.com.vn (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
+**Machine 2.** An always-on machine that never sleeps, with a user logged in (the service needs that session's credentials and Chrome), every pool account logged in (`/acct:login`), the admin browser signed in as an owner or admin of xtgroup.com.vn (`/acct:auto browser`), and the service installed by `/acct:auto mover <mover key>`. It never switches account, starts Chrome in the background, and does not need Claude Code to be open.
 
 - macOS: a launch agent (`vn.xtgroup.acct-mover`) runs `acct.sh auto serve-once` every 30 seconds through `~/.claude-acct/bin/acct-mover.sh`, which always starts the installed plugin version.
 - Windows (for example Windows Server over RDP): a Task Scheduler task (`XTTS_Acct_Mover`) starts at logon in the user's interactive session and runs `~/.claude-acct/bin/acct-mover.py`, a loop that calls `auto serve-once` every 30 seconds without opening a window (Task Scheduler cannot repeat faster than once a minute). Leave the RDP session with **Disconnect**, never **Sign out**, so the task, the logins and Chrome keep running. Output goes to `~/.claude-acct/mover.out.log`.

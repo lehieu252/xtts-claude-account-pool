@@ -81,7 +81,7 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
 
   <div class="panel hero">
     <div class="stat"><span class="k">Các máy đang dùng</span><span class="v mono" id="active">—</span></div>
-    <div class="stat"><span class="k">Premium (xtgroup.vn)</span><span class="v mono" id="premium">—</span></div>
+    <div class="stat"><span class="k" id="premium-k">Premium (xtgroup.vn)</span><span class="v mono" id="premium">—</span></div>
     <div class="stat"><span class="k">Chuyển seat xtgroup.com.vn</span><span class="v" id="swaps">—</span></div>
     <div class="stat"><span class="k">Máy 2</span><span class="v" id="mover">—</span></div>
   </div>
@@ -134,6 +134,10 @@ function reasonVi(r) {
   if (!r) return "";
   return r.replace(/^Premium$/, "Premium còn dưới ngưỡng")
     .replace(/^picked on the dashboard$/, "chọn trên dashboard")
+    .replace(/^kept until it reaches a threshold$/, "giữ tới khi chạm ngưỡng")
+    .replace(/^best account below the thresholds$/, "account tốt nhất còn dưới ngưỡng")
+    .replace(/^every account with a seat is at a threshold$/, "mọi account có seat đều chạm ngưỡng")
+    .replace(/^every account with a seat has used a window up$/, "mọi account có seat đều đã dùng hết 100%")
     .replace(/Premium at a threshold until ([\d/]+ [\d:]+) UTC/, (m, t) => `Premium chạm ngưỡng tới ${t} UTC`)
     .replace(/Premium at a threshold/, "Premium chạm ngưỡng")
     .replace(/; every account with a seat is at a threshold/, "; mọi account có seat đều chạm ngưỡng")
@@ -149,9 +153,18 @@ function render(d) {
   const active = st.active || null;
   $("active").innerHTML = active ? `${esc(active)}<span class="sub">${esc(reasonVi(st.message))}</span>` : "—";
   const prem = accounts.find((a) => a.role === "premium");
-  $("premium").innerHTML = esc(st.premium || "—") + (pool.premium_back_at
-    ? `<span class="sub">dùng lại được lúc ${short(pool.premium_back_at)}</span>`
-    : prem && prem.eligible ? `<span class="sub">còn dưới ngưỡng</span>` : "");
+  const hasPremium = pool.has_premium !== false && !!prem;  // the pool has no Premium account since 1.0.37 (xtgroup.com.vn only)
+  if (hasPremium) {
+    $("premium-k").textContent = "Premium (xtgroup.vn)";
+    $("premium").innerHTML = esc(st.premium || "—") + (pool.premium_back_at
+      ? `<span class="sub">dùng lại được lúc ${short(pool.premium_back_at)}</span>`
+      : prem && prem.eligible ? `<span class="sub">còn dưới ngưỡng</span>` : "");
+  } else {
+    const seatedN = accounts.filter((a) => a.seat === "Premium" || a.seat === "Standard").length;
+    const freeN = accounts.filter((a) => (a.seat === "Premium" || a.seat === "Standard") && a.eligible).length;
+    $("premium-k").textContent = "Account có seat · còn dưới ngưỡng";
+    $("premium").innerHTML = accounts.length ? `${seatedN}/${accounts.length} · ${freeN}` : "—";
+  }
   $("swaps").innerHTML = pool.seat_moves === false
     ? `Tắt<span class="sub">máy 2 không chuyển seat; các máy chỉ dùng account đang có seat</span>`
     : (pool.swaps_week ?? "—") + ` <span class="muted" style="font-size:13px;font-weight:400">lần tuần này</span>`
@@ -206,7 +219,7 @@ function render(d) {
   const fixed = pool.seat_moves === false;  // no seat moves: both teams keep their seats, only accounts with a seat count
   const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định" + (fixed ? "" : " (1 Premium, 2 Standard)")],
                   ["comvn", "xtgroup.com.vn", fixed
-                    ? "xtgroup.com.vn · seat cố định"
+                    ? "xtgroup.com.vn · seat Standard cố định"
                     : "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, org, title]) => {
     const rows = accounts.filter((a) => (a.org || "") === org);
@@ -230,10 +243,13 @@ function render(d) {
     }).join("");
   }).join("") : `<tr><td colspan="6" class="muted">Máy 2 chưa gửi usage của các account.</td></tr>`;
   $("accounts-note").textContent = accounts.length ? `· máy 2 gửi ${ago(now - accounts[0].published)}` : "";
-  $("rules").textContent = `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
-    + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
+  $("rules").textContent = (hasPremium
+    ? `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
+      + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
+    : `Pool chỉ dùng các account của xtgroup.com.vn (không có Premium, không đổi qua tổ chức khác): các máy giữ một account tới khi nó chạm ngưỡng `
+      + `(5 giờ ≥ ${TH.five_hour}% hoặc 7 ngày ≥ ${TH.seven_day}%), rồi sang account còn dưới ngưỡng tốt nhất (7 ngày thấp nhất, rồi 5 giờ thấp nhất). `)
     + (pool.seat_moves === false
-      ? `Cả 2 team dùng seat cố định, máy 2 không chuyển seat: chỉ các account đang có seat được dùng; gán seat bằng tay trên trang Members thì account đó hiện ở đây và được dùng ngay.`
+      ? `Máy 2 không chuyển seat: chỉ các account đang có seat được dùng; gán seat bằng tay trên trang Members thì account đó hiện ở đây và được dùng ngay.`
       : `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `
       + `sang account không seat còn nhiều nhất (account chưa dùng tính 0%), trừ khi Premium sắp reset trong 30 phút.`);
 

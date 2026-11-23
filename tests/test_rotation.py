@@ -26,6 +26,13 @@ SPEC.loader.exec_module(acct)
 os.environ["CLAUDE_ACCT_HOME"] = tempfile.mkdtemp()
 os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 
+# Since 1.0.37 the pool is xtgroup.com.vn only (acct.POOL_ORGS). Most tests below cover the pool of two Teams with a Premium
+# account (1.0.33-1.0.36), which is what putting "xtgroup.vn" back into POOL_ORGS gives: they run in that mode, and the
+# tests of OnlyComVnTests in the default one.
+DEFAULT_POOL, DEFAULT_ALWAYS, DEFAULT_ORGS = acct.POOL_EMAILS, acct.ALWAYS_EMAILS, acct.POOL_ORGS
+acct.POOL_EMAILS = acct.ALWAYS_EMAILS = acct.ALL_EMAILS
+acct.POOL_ORGS = ("xtgroup.vn", "xtgroup.com.vn")
+
 P = acct.PREMIUM_EMAIL  # sales@xtgroup.vn: Premium, xtgroup.vn
 T1, T2 = acct.FIXED_STANDARD_EMAILS  # truongnv@, xtg2@xtgroup.vn: Standard for good
 X0, X1, X2, X3 = acct.SWAP_EMAILS  # xtg@, xtg1@, xtg2@, xtg3@xtgroup.com.vn: 2 Standard seats
@@ -123,13 +130,20 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(acct._near((0, None, 80, None)))
 
     def test_pool_is_fixed(self):
-        self.assertEqual(acct.POOL_EMAILS, ("sales@xtgroup.vn", "truongnv@xtgroup.vn", "xtg2@xtgroup.vn",
-                                            "xtg@xtgroup.com.vn", "xtg1@xtgroup.com.vn", "xtg2@xtgroup.com.vn",
-                                            "xtg3@xtgroup.com.vn"))
+        self.assertEqual(acct.ALL_EMAILS, ("sales@xtgroup.vn", "truongnv@xtgroup.vn", "xtg2@xtgroup.vn",
+                                           "xtg@xtgroup.com.vn", "xtg1@xtgroup.com.vn", "xtg2@xtgroup.com.vn",
+                                           "xtg3@xtgroup.com.vn"))
         self.assertEqual((acct.DAILY_THRESHOLD, acct.WEEKLY_THRESHOLD, acct.PREPARE_MARGIN), (80, 90, 10))
         self.assertEqual(acct.SWAP_SEATS, 2)
-        self.assertFalse(set(acct.FORMER_POOL_EMAILS) & set(acct.POOL_EMAILS))
         self.assertIn(XTTS, acct.FORMER_POOL_EMAILS)
+
+    def test_since_1_0_37_the_pool_is_the_four_accounts_of_xtgroup_com_vn(self):
+        self.assertEqual(DEFAULT_ORGS, ("xtgroup.com.vn",))
+        self.assertEqual(DEFAULT_POOL, acct.SWAP_EMAILS)
+        self.assertEqual(DEFAULT_ALWAYS, DEFAULT_POOL)
+        self.assertFalse(set(acct.FORMER_POOL_EMAILS) & set(DEFAULT_POOL))
+        for email in (P, T1, T2):  # the accounts of xtgroup.vn are former pool accounts now
+            self.assertIn(email, acct.FORMER_POOL_EMAILS)
 
     def test_a_window_past_its_reset_counts_as_0_and_a_never_read_account_as_0(self):
         self.assertEqual(acct._estimate(snap(95, 92, -1, -2))[::2], (0.0, 0.0))
@@ -672,6 +686,80 @@ class SeatMovesOffTests(unittest.TestCase):
         self.run_once(pool, claude)
         self.assertEqual(claude.changes, [([(X1, "No seat"), (X2, "Standard")], ORG_B)])
         self.assertTrue(pool.pool["seat_moves"])
+
+
+class OnlyComVnTests(unittest.TestCase):
+    """Since 1.0.37 (23/11) the pool is the four accounts of xtgroup.com.vn, each with a Standard seat: no Premium account,
+    no switch between organizations. The default pool; the tests above run with both Teams."""
+
+    SEATED = (X0, X1, X2, X3)
+    MOVES = False
+    run_once = MoverTests.run_once
+
+    def setUp(self):
+        self.default = [patch.object(acct, "POOL_EMAILS", DEFAULT_POOL), patch.object(acct, "ALWAYS_EMAILS", DEFAULT_ALWAYS),
+                        patch.object(acct, "POOL_ORGS", DEFAULT_ORGS)]
+        for p in self.default:
+            p.start()
+        MoverTests.setUp(self)
+
+    def tearDown(self):
+        MoverTests.tearDown(self)
+        for p in reversed(self.default):
+            p.stop()
+
+    def claude(self, usage):
+        return Claude(usage, {e: acct.STANDARD_TIER for e in self.SEATED})
+
+    def test_no_premium_account_and_the_accounts_of_xtgroup_vn_are_not_in_the_pool(self):
+        self.assertEqual(acct.POOL_EMAILS, (X0, X1, X2, X3))
+        self.assertIsNone(acct._premium_in_pool())
+        self.assertEqual(acct._required_emails(None), (X0, X1, X2, X3))
+
+    def test_the_machines_keep_an_account_until_it_reaches_a_threshold_then_take_the_best_one_below_them(self):
+        r = rows({X0: (60, 20), X1: (0, 5), X2: (0, 30), X3: (10, 0)}, seated=self.SEATED)
+        self.assertEqual(acct._choose_active(r, X0), (X0, "kept until it reaches a threshold"))
+        self.assertEqual(acct._choose_active(r, None), (X3, "best account below the thresholds"))  # 7-day 0: lowest
+        r = rows({X0: (80, 20), X1: (0, 5), X2: (0, 30), X3: (10, 40)}, seated=self.SEATED)
+        self.assertEqual(acct._choose_active(r, X0)[0], X1)
+        r = rows({X0: (85, 20), X1: (90, 5), X2: (80, 30), X3: (95, 40)}, seated=self.SEATED)
+        email, why = acct._choose_active(r, X1)
+        self.assertEqual((email, why), (X1, "every account with a seat is at a threshold"))  # none below: keep the current one
+        r = rows({e: (100, 10) for e in self.SEATED}, seated=self.SEATED)
+        self.assertEqual(acct._choose_active(r, X1), (None, "every account with a seat has used a window up"))
+
+    def test_an_account_picked_on_the_dashboard_is_kept_while_it_is_below_the_thresholds(self):
+        r = rows({X0: (10, 10), X2: (50, 50)}, seated=self.SEATED)
+        self.assertEqual(acct._choose_active(r, X0, pinned=X2), (X2, "picked on the dashboard"))
+
+    def test_machine_2_publishes_the_active_account_without_a_premium_account_and_reads_only_the_four(self):
+        pool, claude = FakePool(active=X0), self.claude({X0: (60, 20), X1: (0, 5), X2: (10, 10), X3: (90, 50)})
+        self.run_once(pool, claude)
+        put = pool.puts[0]
+        self.assertEqual((put["active"], put["premium"], put["message"]), (X0, None, "kept until it reaches a threshold"))
+        self.assertEqual(put["seated"], [X0, X1, X2, X3])
+        self.assertEqual(put["fallbacks"], [X1, X2])  # best first; X3 is at a threshold (5-hour 90 %)
+        self.assertEqual([a["email"] for a in pool.accounts], [X0, X1, X2, X3])
+        self.assertFalse(pool.pool["has_premium"])
+        self.assertIsNone(pool.pool["premium_back_at"])
+        self.assertEqual(claude.changes, [])
+        claude.usage[X0] = (85, 20)  # X0 reaches a threshold
+        self.run_once(pool, claude)
+        self.assertEqual(pool.state["active"], X1)  # the lowest 7-day below the thresholds
+
+    def test_a_machine_on_an_account_of_xtgroup_vn_goes_to_the_active_one(self):
+        idx = pool_index([T1] + list(acct.POOL_EMAILS))
+        self.assertEqual(WorkerTests.run_check(self, T1, {"active": X0, "fallbacks": [X1]}, idx=idx)[0], [X0])
+
+    def test_the_accounts_of_xtgroup_vn_are_neither_read_nor_listed(self):
+        idx = pool_index([P, T1, T2] + list(acct.POOL_EMAILS))
+        pool, claude = FakePool(active=X0), self.claude({X0: (10, 10)})
+        asked = []
+        read = claude.read_usage
+        claude.read_usage = lambda meta, *a, **k: asked.append(meta["profile"]["emailAddress"]) or read(meta, *a, **k)
+        self.run_once(pool, claude, idx)
+        self.assertEqual(sorted(set(asked)), sorted(acct.SWAP_EMAILS))
+        self.assertEqual([a["email"] for a in pool.accounts], list(acct.SWAP_EMAILS))
 
 
 class TokenRefreshTests(unittest.TestCase):
