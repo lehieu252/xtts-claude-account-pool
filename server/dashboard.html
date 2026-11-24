@@ -61,9 +61,10 @@ tr.is-active td { background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .use:hover:not(:disabled) { background: var(--accent); color: var(--surface); }
 .use:disabled { opacity: .35; cursor: not-allowed; }
 tr.group td { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; padding-top: 12px; border-bottom: 1px solid currentColor; }
-tr.group.vn td { color: var(--ok); } tr.group.comvn td { color: var(--accent); }
+tr.group.vn td { color: var(--ok); } tr.group.comvn td { color: var(--accent); } tr.group.reserve td { color: var(--warn); }
 tr.g-vn td:first-child { box-shadow: inset 3px 0 var(--ok); }
 tr.g-comvn td:first-child { box-shadow: inset 3px 0 var(--accent); }
+tr.g-reserve td:first-child { box-shadow: inset 3px 0 var(--warn); }
 tr.noseat td { opacity: .75; }
 .chip { display: inline-block; background: var(--chip); border-radius: 4px; padding: 0 6px; font-size: 12px; }
 .chip.mover { color: var(--accent); font-weight: 600; }
@@ -134,6 +135,7 @@ function reasonVi(r) {
   if (!r) return "";
   return r.replace(/^Premium$/, "Premium còn dưới ngưỡng")
     .replace(/^picked on the dashboard$/, "chọn trên dashboard")
+    .replace(/^no Standard account below the thresholds: the Claude Max account$/, "mọi account Standard đều chạm ngưỡng: dùng account Claude Max")
     .replace(/^kept until it reaches a threshold$/, "giữ tới khi chạm ngưỡng")
     .replace(/^best account below the thresholds$/, "account tốt nhất còn dưới ngưỡng")
     .replace(/^every account with a seat is at a threshold$/, "mọi account có seat đều chạm ngưỡng")
@@ -160,10 +162,11 @@ function render(d) {
       ? `<span class="sub">dùng lại được lúc ${short(pool.premium_back_at)}</span>`
       : prem && prem.eligible ? `<span class="sub">còn dưới ngưỡng</span>` : "");
   } else {
-    const seatedN = accounts.filter((a) => a.seat === "Premium" || a.seat === "Standard").length;
-    const freeN = accounts.filter((a) => (a.seat === "Premium" || a.seat === "Standard") && a.eligible).length;
-    $("premium-k").textContent = "Account có seat · còn dưới ngưỡng";
-    $("premium").innerHTML = accounts.length ? `${seatedN}/${accounts.length} · ${freeN}` : "—";
+    const std = accounts.filter((a) => a.role !== "reserve");  // the Claude Max reserve is counted apart
+    const seatedN = std.filter((a) => a.seat === "Premium" || a.seat === "Standard").length;
+    const freeN = std.filter((a) => (a.seat === "Premium" || a.seat === "Standard") && a.eligible).length;
+    $("premium-k").textContent = "Account Standard có seat · còn dưới ngưỡng";
+    $("premium").innerHTML = std.length ? `${seatedN}/${std.length} · ${freeN}` : "—";
   }
   $("swaps").innerHTML = pool.seat_moves === false
     ? `Tắt<span class="sub">máy 2 không chuyển seat; các máy chỉ dùng account đang có seat</span>`
@@ -220,12 +223,13 @@ function render(d) {
   const groups = [["vn", "xtgroup.vn", "xtgroup.vn · seat cố định" + (fixed ? "" : " (1 Premium, 2 Standard)")],
                   ["comvn", "xtgroup.com.vn", fixed
                     ? "xtgroup.com.vn · seat Standard cố định"
-                    : "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"]];
+                    : "xtgroup.com.vn · 2 seat Standard luân phiên giữa 4 account (máy 2 chuyển khi cần)"],
+                  ["reserve", null, "Dự phòng · Claude Max (chỉ dùng khi mọi account Standard đều chạm ngưỡng)"]];
   $("accounts").innerHTML = accounts.length ? groups.map(([g, org, title]) => {
-    const rows = accounts.filter((a) => (a.org || "") === org);
+    const rows = accounts.filter((a) => g === "reserve" ? a.role === "reserve" : (a.org || "") === org && a.role !== "reserve");
     if (!rows.length) return "";
     return `<tr class="group ${g}"><td colspan="6">${title}</td></tr>` + rows.map((a) => {
-      const seated = a.seat === "Premium" || a.seat === "Standard";
+      const seated = a.seat === "Premium" || a.seat === "Standard" || a.seat === "Max";
       const tag = (a.active ? ` <span class="chip active">Đang dùng</span>` : "")
         + (a.next_seat ? ` <span class="chip next">Seat tiếp theo</span>` : "");
       const btn = (kind, label) => `<button class="use" data-kind="${kind}" data-email="${esc(a.email)}"${busy ? " disabled" : ""}>${label}</button>`;
@@ -247,7 +251,9 @@ function render(d) {
     ? `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
       + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
     : `Pool chỉ dùng các account của xtgroup.com.vn (không có Premium, không đổi qua tổ chức khác): các máy giữ một account tới khi nó chạm ngưỡng `
-      + `(5 giờ ≥ ${TH.five_hour}% hoặc 7 ngày ≥ ${TH.seven_day}%), rồi sang account còn dưới ngưỡng tốt nhất (7 ngày thấp nhất, rồi 5 giờ thấp nhất). `)
+      + `(5 giờ ≥ ${TH.five_hour}% hoặc 7 ngày ≥ ${TH.seven_day}%), rồi sang account còn dưới ngưỡng tốt nhất (7 ngày thấp nhất, rồi 5 giờ thấp nhất). `
+      + (accounts.some((a) => a.role === "reserve")
+        ? `Khi không còn account Standard nào dưới ngưỡng, các máy dùng account Claude Max (dự phòng) và quay lại account Standard ngay khi có account dưới ngưỡng. ` : ""))
     + (pool.seat_moves === false
       ? `Máy 2 không chuyển seat: chỉ các account đang có seat được dùng; gán seat bằng tay trên trang Members thì account đó hiện ở đây và được dùng ngay.`
       : `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `

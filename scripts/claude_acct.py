@@ -1044,7 +1044,11 @@ ALL_EMAILS = (PREMIUM_EMAIL,) + STANDARD_EMAILS  # the seven accounts of the two
 # ("Claude can't use thinking from another organization"), so staying in one Team also saves usage. Put "xtgroup.vn" back in
 # to use the three accounts of xtgroup.vn too (the account with Premium is then preferred while it is below the thresholds).
 POOL_ORGS = ("xtgroup.com.vn",)
-POOL_EMAILS = tuple(e for e in ALL_EMAILS if e.rsplit("@", 1)[1] in POOL_ORGS)
+# The last resort (1.0.38): a personal Claude Max plan, with no organization seat. The machines work on it only while no
+# Standard account of the pool is below the thresholds, and go back to a Standard account as soon as one is (a window
+# of an account only goes down when it resets, so this does not flip back and forth).
+RESERVE_EMAILS = ("xuanpt2@gmail.com",)
+POOL_EMAILS = tuple(e for e in ALL_EMAILS if e.rsplit("@", 1)[1] in POOL_ORGS) + RESERVE_EMAILS
 # Shown on the dashboard and asked for at login whatever their seat. Since 19/11 (1.0.36) every pool account: xtgroup.com.vn
 # has 4 Standard seats, one per account. An account that is not logged in on machine 2 cannot show its seat, so it would never
 # be listed or asked for if it had to hold one first. Narrow this to the accounts that hold a seat for good to show and ask
@@ -1421,13 +1425,13 @@ SEAT_NAMES = {PREMIUM_TIER: "Premium", STANDARD_TIER: "Standard"}
 
 
 def _seated(row):
-    return row["seat"] in ("Premium", "Standard")
+    return row["seat"] in ("Premium", "Standard", "Max")
 
 
 def _ready(row):
-    """The machines can work on it: it holds its seat (Premium for the Premium account, Standard for the others), its
-    login on machine 2 is valid, and its usage is known."""
-    seat = "Premium" if row["email"] == PREMIUM_EMAIL else "Standard"
+    """The machines can work on it: it holds its seat (Premium for the Premium account, Standard for the others, a Max
+    plan for the reserve), its login on machine 2 is valid, and its usage is known."""
+    seat = ("Premium" if row["email"] == PREMIUM_EMAIL else "Max" if row["email"] in RESERVE_EMAILS else "Standard")
     return row["seat"] == seat and not row["why"] and row["est"] is not None
 
 
@@ -1475,9 +1479,12 @@ def _read_account(idx, live, row, force):
     if token_state(meta, creds) == "relogin":
         row["why"] = "log in again"
         return
-    refresh_seat(meta, creds, force=force, refresh_name=refresh_name, ttl=SEAT_CHECK_EVERY)
-    if meta.get("seat"):  # the last seat read; unknown until one is
-        row["seat"] = SEAT_NAMES.get(meta["seat"].get("tier"), "No seat")
+    if row["email"] in RESERVE_EMAILS:
+        row["seat"] = "Max"  # a personal Claude Max plan: there is no organization seat to read
+    else:
+        refresh_seat(meta, creds, force=force, refresh_name=refresh_name, ttl=SEAT_CHECK_EVERY)
+        if meta.get("seat"):  # the last seat read; unknown until one is
+            row["seat"] = SEAT_NAMES.get(meta["seat"].get("tier"), "No seat")
     if not _seated(row):
         return
     status = refresh_usage(meta, creds, force=force, refresh_name=refresh_name, ttl=USAGE_READ_EVERY)
@@ -1523,8 +1530,11 @@ def _choose_active(rows, current=None, pinned=None):
     2. Premium (when the pool has it, POOL_ORGS), while it is below the thresholds;
     3. the current Standard account, while it is below them (no switching back and forth);
     4. the best ranked Standard account with a seat below them (_rank_key);
-    5. none below them: the current one, else the best ranked one, unless it has used a window up.
-    Without a Premium account `why` is "kept until it reaches a threshold" (3) or "best account below the thresholds" (4)."""
+    5. none below them: the reserve (the Claude Max account, RESERVE_EMAILS), while it is below them;
+    6. none below them: the current one, else the best ranked one, unless it has used a window up.
+    Only Standard accounts count for 3 and 4, so the machines leave the reserve for a Standard account the moment one is
+    below the thresholds. Without a Premium account `why` is "kept until it reaches a threshold" (3) or "best account
+    below the thresholds" (4)."""
     by = {r["email"]: r for r in rows}
     pin = by.get(pinned)
     if pin is not None and _ready(pin) and not _over(pin["est"]):
@@ -1535,12 +1545,16 @@ def _choose_active(rows, current=None, pinned=None):
     note = _premium_note(prem) if prem is not None else None
     ready = [r for r in rows if _ready(r)]
     cur = by.get(current)
-    standards = [r for r in ready if r["email"] != PREMIUM_EMAIL]
+    standards = [r for r in ready if r["email"] != PREMIUM_EMAIL and r["email"] not in RESERVE_EMAILS]
     if cur is not None and cur in standards and not _over(cur["est"]):
         return current, note or "kept until it reaches a threshold"
     below = [r for r in standards if not _over(r["est"])]
     if below:
         return min(below, key=_row_rank)["email"], note or "best account below the thresholds"
+    reserve = [r for r in ready if r["email"] in RESERVE_EMAILS and not _over(r["est"])]
+    if reserve:
+        pick = current if cur is not None and cur in reserve else min(reserve, key=_row_rank)["email"]
+        return pick, "no Standard account below the thresholds: the Claude Max account"
     all_over = (note + "; " if note else "") + "every account with a seat is at a threshold"
     left = [r for r in ready if not _used_up(r["est"])]
     if cur is not None and cur in left:
@@ -1583,7 +1597,7 @@ def _plan_swap(rows, active, now=None):
     act = by.get(active)
     if act is None or not _ready(act) or not _near(act["est"]):
         return None, None, None
-    if any(r is not act and _ready(r) and not _near(r["est"]) for r in rows):
+    if any(r is not act and _ready(r) and not _near(r["est"]) for r in rows if r["email"] not in RESERVE_EMAILS):
         return None, None, None
     prem = by.get(PREMIUM_EMAIL)
     if prem is not None and _ready(prem):
@@ -1754,8 +1768,9 @@ def _publish_state(state, rows, active, why):
     accounts with a seat, when one of them changed. Returns the state."""
     if not active:
         return state
+    # best first, the reserve (Claude Max) after every Standard account
     fallbacks = [r["email"] for r in sorted((r for r in rows if r["email"] != active and _ready(r) and not _over(r["est"])),
-                                            key=_row_rank)]
+                                            key=lambda r: (r["email"] in RESERVE_EMAILS, _row_rank(r)))]
     seated = [r["email"] for r in rows if _seated(r)]
     if (state.get("active"), state.get("message"), state.get("fallbacks"), state.get("seated")) == (
             active, why, fallbacks, seated):
@@ -1878,7 +1893,8 @@ def _account_rows(rows, active):
             continue
         est = r["est"]
         row = {"email": r["email"], "org": r["email"].rsplit("@", 1)[-1],
-               "role": "premium" if r["email"] == PREMIUM_EMAIL else "swap" if r["email"] in SWAP_EMAILS else "standard",
+               "role": ("premium" if r["email"] == PREMIUM_EMAIL else "reserve" if r["email"] in RESERVE_EMAILS
+                        else "swap" if r["email"] in SWAP_EMAILS else "standard"),
                "seat": r["seat"], "active": r["email"] == active, "estimated": r["estimated"],
                "measured_at": r["measured_at"], "read_at": r["read_at"], "status": r["why"] or r["status"],
                "login_expires": r["login_expires"], "eligible": est is not None and not _over(est),
@@ -2162,7 +2178,8 @@ def cmd_auto_status(args):
     print("acct plugin %s" % plugin_version())
     print("Account switching: %s" % ("ON" if load_rotation().get("enabled") else "OFF"))
     print("An account is left at: %s" % _trigger_text())
-    print("Pool (%s): %s" % (", ".join(POOL_ORGS), ", ".join(POOL_EMAILS)))
+    print("Pool (%s): %s" % (", ".join(POOL_ORGS), ", ".join(e for e in POOL_EMAILS if e not in RESERVE_EMAILS)))
+    print("Reserve (Claude Max, used only while no Standard account is below the thresholds): %s" % ", ".join(RESERVE_EMAILS))
     if _premium_in_pool():
         print("Order: Premium below the thresholds, else the Standard account with a seat in use until it reaches them, "
               "else the best ranked one with a seat")

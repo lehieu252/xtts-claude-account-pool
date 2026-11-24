@@ -36,6 +36,7 @@ acct.POOL_ORGS = ("xtgroup.vn", "xtgroup.com.vn")
 P = acct.PREMIUM_EMAIL  # sales@xtgroup.vn: Premium, xtgroup.vn
 T1, T2 = acct.FIXED_STANDARD_EMAILS  # truongnv@, xtg2@xtgroup.vn: Standard for good
 X0, X1, X2, X3 = acct.SWAP_EMAILS  # xtg@, xtg1@, xtg2@, xtg3@xtgroup.com.vn: 2 Standard seats
+R = acct.RESERVE_EMAILS[0]  # the Claude Max account: used only while no Standard account is below the thresholds
 XTTS = "xtts@xtgroup.vn"  # an account of the pool before 1.0.33
 CREDS = {"claudeAiOauth": {"refreshToken": "r"}}
 SEATS = {P: acct.PREMIUM_TIER, T1: acct.STANDARD_TIER, T2: acct.STANDARD_TIER, X0: acct.STANDARD_TIER,
@@ -139,7 +140,8 @@ class ThresholdTests(unittest.TestCase):
 
     def test_since_1_0_37_the_pool_is_the_four_accounts_of_xtgroup_com_vn(self):
         self.assertEqual(DEFAULT_ORGS, ("xtgroup.com.vn",))
-        self.assertEqual(DEFAULT_POOL, acct.SWAP_EMAILS)
+        self.assertEqual(DEFAULT_POOL, acct.SWAP_EMAILS + (R,))  # the four Standard accounts, then the Claude Max reserve
+        self.assertEqual(acct.RESERVE_EMAILS, ("xuanpt2@gmail.com",))
         self.assertEqual(DEFAULT_ALWAYS, DEFAULT_POOL)
         self.assertFalse(set(acct.FORMER_POOL_EMAILS) & set(DEFAULT_POOL))
         for email in (P, T1, T2):  # the accounts of xtgroup.vn are former pool accounts now
@@ -712,9 +714,9 @@ class OnlyComVnTests(unittest.TestCase):
         return Claude(usage, {e: acct.STANDARD_TIER for e in self.SEATED})
 
     def test_no_premium_account_and_the_accounts_of_xtgroup_vn_are_not_in_the_pool(self):
-        self.assertEqual(acct.POOL_EMAILS, (X0, X1, X2, X3))
+        self.assertEqual(acct.POOL_EMAILS, (X0, X1, X2, X3, R))
         self.assertIsNone(acct._premium_in_pool())
-        self.assertEqual(acct._required_emails(None), (X0, X1, X2, X3))
+        self.assertEqual(acct._required_emails(None), (X0, X1, X2, X3, R))  # every machine needs the reserve's login too
 
     def test_the_machines_keep_an_account_until_it_reaches_a_threshold_then_take_the_best_one_below_them(self):
         r = rows({X0: (60, 20), X1: (0, 5), X2: (0, 30), X3: (10, 0)}, seated=self.SEATED)
@@ -737,9 +739,10 @@ class OnlyComVnTests(unittest.TestCase):
         self.run_once(pool, claude)
         put = pool.puts[0]
         self.assertEqual((put["active"], put["premium"], put["message"]), (X0, None, "kept until it reaches a threshold"))
-        self.assertEqual(put["seated"], [X0, X1, X2, X3])
-        self.assertEqual(put["fallbacks"], [X1, X2])  # best first; X3 is at a threshold (5-hour 90 %)
-        self.assertEqual([a["email"] for a in pool.accounts], [X0, X1, X2, X3])
+        self.assertEqual(put["seated"], [X0, X1, X2, X3, R])
+        self.assertEqual(put["fallbacks"], [X1, X2, R])  # best first, the reserve last; X3 is at a threshold (5-hour 90 %)
+        self.assertEqual([a["email"] for a in pool.accounts], [X0, X1, X2, X3, R])
+        self.assertEqual([a["role"] for a in pool.accounts][-1], "reserve")
         self.assertFalse(pool.pool["has_premium"])
         self.assertIsNone(pool.pool["premium_back_at"])
         self.assertEqual(claude.changes, [])
@@ -758,8 +761,71 @@ class OnlyComVnTests(unittest.TestCase):
         read = claude.read_usage
         claude.read_usage = lambda meta, *a, **k: asked.append(meta["profile"]["emailAddress"]) or read(meta, *a, **k)
         self.run_once(pool, claude, idx)
-        self.assertEqual(sorted(set(asked)), sorted(acct.SWAP_EMAILS))
-        self.assertEqual([a["email"] for a in pool.accounts], list(acct.SWAP_EMAILS))
+        self.assertEqual(sorted(set(asked)), sorted(acct.SWAP_EMAILS + (R,)))
+        self.assertEqual([a["email"] for a in pool.accounts], list(acct.SWAP_EMAILS) + [R])
+
+    # ---- the reserve: the Claude Max account
+
+    def test_the_reserve_is_used_only_while_no_standard_account_is_below_the_thresholds(self):
+        over = {X0: (85, 20), X1: (10, 91), X2: (80, 30), X3: (100, 10)}  # every Standard account is at a threshold
+        r = rows(dict(over, **{R: (10, 5)}), seated=self.SEATED, seat={R: "Max"})
+        email, why = acct._choose_active(r, X0)
+        self.assertEqual(email, R)
+        self.assertEqual(why, "no Standard account below the thresholds: the Claude Max account")
+        self.assertEqual(acct._choose_active(r, R)[0], R)  # kept while it has room
+        # a Standard account is back below the thresholds (its window reset): every machine leaves the reserve at once
+        r = rows(dict(over, **{R: (10, 5), X3: (0, 10)}), seated=self.SEATED, seat={R: "Max"})
+        self.assertEqual(acct._choose_active(r, R), (X3, "best account below the thresholds"))
+        # and a Standard account below them is kept over the reserve, however much room the reserve has
+        r = rows({X0: (60, 20), R: (0, 0)}, seated=self.SEATED, seat={R: "Max"})
+        self.assertEqual(acct._choose_active(r, X0)[0], X0)
+        self.assertIn(acct._choose_active(r, None)[0], self.SEATED)  # a Standard account, never the reserve
+
+    def test_with_the_reserve_too_at_a_threshold_the_current_account_stays_unless_it_used_a_window_up(self):
+        usage = {X0: (85, 20), X1: (90, 5), X2: (80, 30), X3: (95, 40), R: (88, 40)}
+        r = rows(usage, seated=self.SEATED, seat={R: "Max"})
+        email, why = acct._choose_active(r, R)
+        self.assertEqual((email, why), (R, "every account with a seat is at a threshold"))
+        used_up = rows(dict(usage, **{R: (100, 40)}), seated=self.SEATED, seat={R: "Max"})
+        self.assertEqual(acct._choose_active(used_up, R)[0], X1)  # the reserve used a window up: the best ranked (lowest 7-day)
+        everything = {e: (100, 50) for e in self.SEATED + (R,)}
+        self.assertIsNone(acct._choose_active(rows(everything, seated=self.SEATED, seat={R: "Max"}), R)[0])
+
+    def test_the_reserve_can_be_picked_on_the_dashboard_and_a_reserve_without_login_is_never_chosen(self):
+        r = rows({X0: (10, 10), R: (20, 20)}, seated=self.SEATED, seat={R: "Max"})
+        self.assertEqual(acct._choose_active(r, X0, pinned=R), (R, "picked on the dashboard"))
+        r = rows({e: (90, 50) for e in self.SEATED}, seated=self.SEATED, seat={R: "Max"}, why={R: "not logged in on machine 2"})
+        self.assertEqual(acct._choose_active(r, X0)[0], X0)  # all at a threshold and no reserve to go to: stay
+
+    def test_the_reserve_does_not_stop_a_seat_move_the_machines_do_not_need_it_for(self):
+        near = {X0: (72, 50), X1: (82, 60), R: (0, 0)}
+        r = rows(near, seated=(X0, X1), seat={R: "Max"})
+        self.assertEqual(acct._plan_swap(r, X0)[:2], (X1, X2))
+
+    def test_machine_2_goes_to_the_reserve_and_back_to_a_standard_account_when_one_resets(self):
+        pool = FakePool(active=X0)
+        claude = self.claude({X0: (85, 20), X1: (10, 91), X2: (80, 30), X3: (100, 10), R: (10, 5)})
+        self.run_once(pool, claude)
+        self.assertEqual((pool.state["active"], pool.pool["has_premium"]), (R, False))
+        self.assertIn("Claude Max", pool.state["message"])
+        self.assertEqual(pool.state["fallbacks"], [])  # nothing else is below the thresholds
+        claude.usage[R] = (50, 30)  # still the only one with room: kept
+        self.run_once(pool, claude)
+        self.assertEqual(pool.state["active"], R)
+        claude.usage[X3] = (0, 10)  # xtg3@ resets its 5-hour window
+        self.run_once(pool, claude)
+        self.assertEqual(pool.state["active"], X3)
+        self.assertEqual(pool.state["fallbacks"], [R])
+        self.assertEqual(claude.changes, [])
+
+    def test_a_machine_on_the_reserve_goes_to_the_active_account_and_its_seat_is_never_read(self):
+        self.assertEqual(WorkerTests.run_check(self, R, {"active": X0, "fallbacks": [X1]})[0], [X0])  # a pool account
+        seen = []
+        read = Claude().seat
+        claude = self.claude({R: (10, 10)})
+        claude.seat = lambda meta, *a, **k: seen.append(meta["profile"]["emailAddress"]) or read(meta, *a, **k)
+        self.run_once(FakePool(active=X0), claude)
+        self.assertNotIn(R, seen)  # a personal plan has no organization seat: only the usage is read
 
 
 class TokenRefreshTests(unittest.TestCase):
