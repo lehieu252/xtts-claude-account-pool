@@ -32,6 +32,10 @@ os.environ.pop("CLAUDE_ACCT_POOL_URL", None)
 DEFAULT_POOL, DEFAULT_ALWAYS, DEFAULT_ORGS = acct.POOL_EMAILS, acct.ALWAYS_EMAILS, acct.POOL_ORGS
 acct.POOL_EMAILS = acct.ALWAYS_EMAILS = acct.ALL_EMAILS
 acct.POOL_ORGS = ("xtgroup.vn", "xtgroup.com.vn")
+# Since 1.0.39 a Standard account is at a threshold at 90 %/95 % (Premium and the reserve stay at 80 %/90 %). The tests of the
+# rules below were written with 80 %/90 % for every account and run that way; StandardLimitsTests covers the defaults.
+DEFAULT_STANDARD_LIMITS = (acct.STANDARD_DAILY_THRESHOLD, acct.STANDARD_WEEKLY_THRESHOLD)
+acct.STANDARD_DAILY_THRESHOLD, acct.STANDARD_WEEKLY_THRESHOLD = acct.DAILY_THRESHOLD, acct.WEEKLY_THRESHOLD
 
 P = acct.PREMIUM_EMAIL  # sales@xtgroup.vn: Premium, xtgroup.vn
 T1, T2 = acct.FIXED_STANDARD_EMAILS  # truongnv@, xtg2@xtgroup.vn: Standard for good
@@ -605,7 +609,9 @@ class MoverTests(unittest.TestCase):
         self.assertEqual((by[X2]["estimated"], by[X2]["five_hour"], by[X2]["seven_day"]), (True, 10, 30))
         self.assertTrue(by[X3]["next_seat"])
         self.assertFalse(by[X2]["next_seat"])
-        self.assertEqual(pool.pool["thresholds"], {"five_hour": 80, "seven_day": 90, "margin": 10})
+        self.assertEqual(pool.pool["thresholds"], {"five_hour": 80, "seven_day": 90, "margin": 10,
+                                                   "standard_five_hour": acct.STANDARD_DAILY_THRESHOLD,
+                                                   "standard_seven_day": acct.STANDARD_WEEKLY_THRESHOLD})
 
     def test_needs_the_mover_key(self):
         acct.save_pool_settings({"api_key": "k", "machine_id": "m"})
@@ -688,6 +694,53 @@ class SeatMovesOffTests(unittest.TestCase):
         self.run_once(pool, claude)
         self.assertEqual(claude.changes, [([(X1, "No seat"), (X2, "Standard")], ORG_B)])
         self.assertTrue(pool.pool["seat_moves"])
+
+
+class StandardLimitsTests(unittest.TestCase):
+    """Since 1.0.39 (26/11) a Standard account is used up to 5-hour 90 % and 7-day 95 %; the Claude Max reserve (and
+    Premium) are left at 80 %/90 %."""
+
+    SEATED = (X0, X1, X2, X3)
+
+    def setUp(self):
+        self.patches = [patch.object(acct, "POOL_EMAILS", DEFAULT_POOL), patch.object(acct, "POOL_ORGS", DEFAULT_ORGS),
+                        patch.object(acct, "STANDARD_DAILY_THRESHOLD", DEFAULT_STANDARD_LIMITS[0]),
+                        patch.object(acct, "STANDARD_WEEKLY_THRESHOLD", DEFAULT_STANDARD_LIMITS[1])]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+
+    def rows(self, usage):
+        return rows(usage, seated=self.SEATED, seat={R: "Max"})
+
+    def test_the_limits_of_each_kind_of_account(self):
+        self.assertEqual(DEFAULT_STANDARD_LIMITS, (90, 95))
+        self.assertEqual([acct._limits(e) for e in (X0, T1, R, P)], [(90, 95), (90, 95), (80, 90), (80, 90)])
+        self.assertIn("Standard 5-hour >= 90% or 7-day >= 95%", acct._trigger_text())
+
+    def test_a_standard_account_is_kept_up_to_90_and_95(self):
+        r = self.rows({X0: (89, 94), X1: (0, 0)})
+        self.assertEqual(acct._choose_active(r, X0), (X0, "kept until it reaches a threshold"))  # 80 %/90 % before
+        r = self.rows({X0: (90, 20), X1: (0, 0)})
+        self.assertEqual(acct._choose_active(r, X0)[0], X1)
+        r = self.rows({X0: (10, 95), X1: (0, 0)})
+        self.assertEqual(acct._choose_active(r, X0)[0], X1)
+
+    def test_the_reserve_is_left_at_80_and_90(self):
+        over = {X0: (90, 20), X1: (10, 95), X2: (95, 30), X3: (100, 10)}
+        r = self.rows(dict(over, **{R: (79, 89)}))
+        self.assertEqual(acct._choose_active(r, X0)[0], R)
+        r = self.rows(dict(over, **{R: (85, 40)}))  # the reserve at its threshold too: the current account stays
+        self.assertEqual(acct._choose_active(r, X0), (X0, "every account with a seat is at a threshold"))
+
+    def test_the_dashboard_rows_carry_each_account_s_limits_and_colour_by_them(self):
+        r = self.rows({X0: (85, 92), R: (85, 40)})
+        out = {a["email"]: a for a in acct._account_rows(r, X0)}
+        self.assertEqual((out[X0]["limit_5h"], out[X0]["limit_7d"], out[X0]["eligible"], out[X0]["near"]), (90, 95, True, True))
+        self.assertEqual((out[R]["limit_5h"], out[R]["limit_7d"], out[R]["eligible"]), (80, 90, False))
 
 
 class OnlyComVnTests(unittest.TestCase):

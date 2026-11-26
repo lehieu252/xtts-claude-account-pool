@@ -241,7 +241,7 @@ function render(d) {
       return `<tr class="g-${g} ${a.active ? "is-active" : ""} ${seated ? "" : "noseat"}">
       <td class="mono">${esc(a.email)}${tag}</td>
       <td>${esc(a.seat || "?")}</td>
-      <td>${usageCell(a.five_hour, a.five_hour_reset, TH.five_hour)}</td><td>${usageCell(a.seven_day, a.seven_day_reset, TH.seven_day)}</td>
+      <td>${usageCell(a.five_hour, a.five_hour_reset, a.limit_5h ?? TH.five_hour)}</td><td>${usageCell(a.seven_day, a.seven_day_reset, a.limit_7d ?? TH.seven_day)}</td>
       <td class="${a.status || loginLeft(a, now) || a.eligible === false ? "mismatch" : "muted"}">${esc(state)}</td>
       <td>${action}</td></tr>`;
     }).join("");
@@ -251,9 +251,10 @@ function render(d) {
     ? `Các máy dùng Premium khi còn dưới ngưỡng (5 giờ < ${TH.five_hour}%, 7 ngày < ${TH.seven_day}%); `
       + `chạm ngưỡng thì sang account Standard có seat tốt nhất và giữ tới khi nó chạm ngưỡng; Premium reset thì quay lại. `
     : `Pool chỉ dùng các account của xtgroup.com.vn (không có Premium, không đổi qua tổ chức khác): các máy giữ một account tới khi nó chạm ngưỡng `
-      + `(5 giờ ≥ ${TH.five_hour}% hoặc 7 ngày ≥ ${TH.seven_day}%), rồi sang account còn dưới ngưỡng tốt nhất (7 ngày thấp nhất, rồi 5 giờ thấp nhất). `
+      + `(5 giờ ≥ ${TH.standard_five_hour ?? TH.five_hour}% hoặc 7 ngày ≥ ${TH.standard_seven_day ?? TH.seven_day}%), rồi sang account còn dưới ngưỡng tốt nhất (7 ngày thấp nhất, rồi 5 giờ thấp nhất). `
       + (accounts.some((a) => a.role === "reserve")
-        ? `Khi không còn account Standard nào dưới ngưỡng, các máy dùng account Claude Max (dự phòng) và quay lại account Standard ngay khi có account dưới ngưỡng. ` : ""))
+        ? `Khi không còn account Standard nào dưới ngưỡng, các máy dùng account Claude Max (dự phòng, ngưỡng 5 giờ ${TH.five_hour}% / 7 ngày ${TH.seven_day}%) `
+          + `và quay lại account Standard ngay khi có account dưới ngưỡng. ` : ""))
     + (pool.seat_moves === false
       ? `Máy 2 không chuyển seat: chỉ các account đang có seat được dùng; gán seat bằng tay trên trang Members thì account đó hiện ở đây và được dùng ngay.`
       : `Khi account đang dùng còn cách ngưỡng ${TH.margin} điểm và không account có seat nào khác còn dư, máy 2 chuyển một seat của xtgroup.com.vn `

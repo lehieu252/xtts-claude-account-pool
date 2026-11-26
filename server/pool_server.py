@@ -48,7 +48,8 @@ MOVER_STALE_SEC = 300  # the dashboard flags machine 2 after this long without a
 MAX_BODY = 1024 * 1024
 LOG_KEEP_SEC = 30 * 86400
 ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligible", "near", "next_seat", "measured_at",
-                  "five_hour", "five_hour_reset", "seven_day", "seven_day_reset", "status", "read_at", "login_expires")
+                  "five_hour", "five_hour_reset", "seven_day", "seven_day_reset", "status", "read_at", "login_expires",
+                  "limit_5h", "limit_7d")
 POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
                "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "has_premium", "thresholds")
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")

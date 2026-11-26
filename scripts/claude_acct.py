@@ -1072,6 +1072,10 @@ def _premium_in_pool():
 # read against the limits of its own seat. The machines leave it then for another account with a seat.
 DAILY_THRESHOLD = 80
 WEEKLY_THRESHOLD = 90
+# Since 26/11 (1.0.39) a Standard account is used further: up to 5-hour 90 % and 7-day 95 %. Premium and the reserve
+# (the Claude Max account) keep DAILY_THRESHOLD / WEEKLY_THRESHOLD.
+STANDARD_DAILY_THRESHOLD = 90
+STANDARD_WEEKLY_THRESHOLD = 95
 # PREPARE_MARGIN points below the thresholds the active account is "near" them. If no other account with a seat is
 # below that too, machine 2 gives a seat of xtgroup.com.vn to an account without one that has room, so it holds the
 # seat before the machines need it: a machine only ever switches to an account that holds a seat already.
@@ -1120,7 +1124,8 @@ def _saved_name(idx, email):
 
 
 def _trigger_text():
-    return "5-hour >= %d%% or 7-day >= %d%% (or any window at 100%%)" % (DAILY_THRESHOLD, WEEKLY_THRESHOLD)
+    return ("Standard 5-hour >= %d%% or 7-day >= %d%%, Claude Max 5-hour >= %d%% or 7-day >= %d%% (or any window at 100%%)"
+            % (STANDARD_DAILY_THRESHOLD, STANDARD_WEEKLY_THRESHOLD, DAILY_THRESHOLD, WEEKLY_THRESHOLD))
 
 
 # ---------------------------------------------------------------- pool server client
@@ -1399,16 +1404,36 @@ def _back_at(est, five=None, seven=None):
     return at
 
 
-def _rank_key(est, pos):
+def _limits(email):
+    """(5-hour %, 7-day %) at which this account is at a threshold: STANDARD_* for a Standard account, else (Premium,
+    the Claude Max reserve) DAILY_THRESHOLD / WEEKLY_THRESHOLD."""
+    if email == PREMIUM_EMAIL or email in RESERVE_EMAILS:
+        return DAILY_THRESHOLD, WEEKLY_THRESHOLD
+    return STANDARD_DAILY_THRESHOLD, STANDARD_WEEKLY_THRESHOLD
+
+
+def _row_over(row):
+    """The account of a pool row is at its thresholds (_limits)."""
+    return _over(row["est"], *_limits(row["email"]))
+
+
+def _row_near(row):
+    """PREPARE_MARGIN points below its thresholds, or above."""
+    five, seven = _limits(row["email"])
+    return _over(row["est"], five - PREPARE_MARGIN, seven - PREPARE_MARGIN)
+
+
+def _rank_key(est, pos, over=None):
     """Below the thresholds first, then at one; within each the lowest 7-day, the lowest 5-hour, the earliest 5-hour
     reset, the earliest 7-day reset (a window not running has none: after one that has), then the list order."""
     inf = float("inf")
-    return (1 if _over(est) else 0, est[2], est[0], est[1] if est[1] is not None else inf,
+    return (1 if (_over(est) if over is None else over) else 0, est[2], est[0], est[1] if est[1] is not None else inf,
             est[3] if est[3] is not None else inf, pos)
 
 
 def _row_rank(row):
-    return _rank_key(row["est"] if row["est"] is not None else (100.0, None, 100.0, None), row["pos"])
+    est = row["est"] if row["est"] is not None else (100.0, None, 100.0, None)
+    return _rank_key(est, row["pos"], _over(est, *_limits(row["email"])))
 
 
 def _hhmm(t):
@@ -1537,21 +1562,21 @@ def _choose_active(rows, current=None, pinned=None):
     below the thresholds" (4)."""
     by = {r["email"]: r for r in rows}
     pin = by.get(pinned)
-    if pin is not None and _ready(pin) and not _over(pin["est"]):
+    if pin is not None and _ready(pin) and not _row_over(pin):
         return pinned, "picked on the dashboard"
     prem = by.get(PREMIUM_EMAIL)
-    if prem is not None and _ready(prem) and not _over(prem["est"]):
+    if prem is not None and _ready(prem) and not _row_over(prem):
         return PREMIUM_EMAIL, "Premium"
     note = _premium_note(prem) if prem is not None else None
     ready = [r for r in rows if _ready(r)]
     cur = by.get(current)
     standards = [r for r in ready if r["email"] != PREMIUM_EMAIL and r["email"] not in RESERVE_EMAILS]
-    if cur is not None and cur in standards and not _over(cur["est"]):
+    if cur is not None and cur in standards and not _row_over(cur):
         return current, note or "kept until it reaches a threshold"
-    below = [r for r in standards if not _over(r["est"])]
+    below = [r for r in standards if not _row_over(r)]
     if below:
         return min(below, key=_row_rank)["email"], note or "best account below the thresholds"
-    reserve = [r for r in ready if r["email"] in RESERVE_EMAILS and not _over(r["est"])]
+    reserve = [r for r in ready if r["email"] in RESERVE_EMAILS and not _row_over(r)]
     if reserve:
         pick = current if cur is not None and cur in reserve else min(reserve, key=_row_rank)["email"]
         return pick, "no Standard account below the thresholds: the Claude Max account"
@@ -1568,7 +1593,7 @@ def _free_order(rows):
     """The accounts of xtgroup.com.vn without a seat that could take one (logged in on machine 2, below the near
     level once their windows reset; never read: 0 %), best ranked first."""
     return sorted((r for r in rows if r["email"] in SWAP_EMAILS and r["seat"] == "No seat" and not r["why"]
-                   and not _near(r["est"])), key=_row_rank)
+                   and not _row_near(r)), key=_row_rank)
 
 
 def _seat_to_free(rows, active):
@@ -1595,9 +1620,9 @@ def _plan_swap(rows, active, now=None):
     now = time.time() if now is None else now
     by = {r["email"]: r for r in rows}
     act = by.get(active)
-    if act is None or not _ready(act) or not _near(act["est"]):
+    if act is None or not _ready(act) or not _row_near(act):
         return None, None, None
-    if any(r is not act and _ready(r) and not _near(r["est"]) for r in rows if r["email"] not in RESERVE_EMAILS):
+    if any(r is not act and _ready(r) and not _row_near(r) for r in rows if r["email"] not in RESERVE_EMAILS):
         return None, None, None
     prem = by.get(PREMIUM_EMAIL)
     if prem is not None and _ready(prem):
@@ -1769,7 +1794,7 @@ def _publish_state(state, rows, active, why):
     if not active:
         return state
     # best first, the reserve (Claude Max) after every Standard account
-    fallbacks = [r["email"] for r in sorted((r for r in rows if r["email"] != active and _ready(r) and not _over(r["est"])),
+    fallbacks = [r["email"] for r in sorted((r for r in rows if r["email"] != active and _ready(r) and not _row_over(r)),
                                             key=lambda r: (r["email"] in RESERVE_EMAILS, _row_rank(r)))]
     seated = [r["email"] for r in rows if _seated(r)]
     if (state.get("active"), state.get("message"), state.get("fallbacks"), state.get("seated")) == (
@@ -1798,7 +1823,7 @@ def _run_request(idx, state, request, rows, now):
     elif kind == "use":
         why = (row["why"] or (None if _ready(row) else "%s has no seat" % email if not _seated(row)
                               else "the usage of %s is unknown" % email)
-               or ("%s is at a threshold" % email if _over(row["est"]) else None))
+               or ("%s is at a threshold" % email if _row_over(row) else None))
     elif kind == "seat":
         frm, why = _seat_to_free(rows, (state.get("active") or "").lower())
         why = ("seat moves are turned off: give the seat by hand on the Members page" if not _seat_moves_on()
@@ -1897,8 +1922,9 @@ def _account_rows(rows, active):
                         else "swap" if r["email"] in SWAP_EMAILS else "standard"),
                "seat": r["seat"], "active": r["email"] == active, "estimated": r["estimated"],
                "measured_at": r["measured_at"], "read_at": r["read_at"], "status": r["why"] or r["status"],
-               "login_expires": r["login_expires"], "eligible": est is not None and not _over(est),
-               "near": est is not None and _near(est), "next_seat": bool(free) and r is free[0]}
+               "login_expires": r["login_expires"], "eligible": est is not None and not _row_over(r),
+               "near": est is not None and _row_near(r), "next_seat": bool(free) and r is free[0],
+               "limit_5h": _limits(r["email"])[0], "limit_7d": _limits(r["email"])[1]}
         if est is not None:
             row.update(five_hour=est[0], five_hour_reset=_iso(est[1]), seven_day=est[2], seven_day_reset=_iso(est[3]))
         out.append(row)
@@ -1916,7 +1942,8 @@ def _pool_info(rows, state, now):
             "swap_limit": bool(ms.get("swap_limit")) and bool(_swap_blocked(ms, now)),
             "swap_error": ms.get("swap_error"), "swap_note": ms.get("swap_note"),
             "pin": (ms.get("pin") or {}).get("email"), "swap_org": SWAP_ORG, "seat_moves": _seat_moves_on(),
-            "thresholds": {"five_hour": DAILY_THRESHOLD, "seven_day": WEEKLY_THRESHOLD, "margin": PREPARE_MARGIN}}
+            "thresholds": {"five_hour": DAILY_THRESHOLD, "seven_day": WEEKLY_THRESHOLD, "margin": PREPARE_MARGIN,
+                           "standard_five_hour": STANDARD_DAILY_THRESHOLD, "standard_seven_day": STANDARD_WEEKLY_THRESHOLD}}
 
 
 def _publish_accounts(rows, state, force=False):
