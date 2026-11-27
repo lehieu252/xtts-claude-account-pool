@@ -1,6 +1,6 @@
 {
   "name": "acct",
-  "version": "1.0.41",
+  "version": "1.0.42",
   "description": "Manage multiple Claude accounts, monitor usage, and share them as one pool of the claude.ai Team xtgroup.com.vn: every machine switches to the account with usage left.",
   "author": {
     "name": "Hieu Le",

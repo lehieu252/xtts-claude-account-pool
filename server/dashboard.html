@@ -127,7 +127,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; } th.num { text-
 
   <div class="panel">
       <div class="tok-head">
-        <h2 style="margin:0">Token <span class="muted" style="font-weight:400;font-size:13px">· hôm nay (giờ Việt Nam), đếm từ transcript Claude Code trên từng máy</span></h2>
+        <h2 style="margin:0">Token <span class="muted" style="font-weight:400;font-size:13px">· hôm nay (giờ Việt Nam), đếm từ transcript Claude Code trên từng máy, chỉ các lượt gọi bằng account của pool</span></h2>
         <div class="filters" style="margin:0">
           <div class="seg" id="tok-metric" role="group" aria-label="Cách đếm">
             <button data-m="usd" class="on">USD quy đổi</button><button data-m="new">Token mới</button><button data-m="total">Tổng gồm đọc cache</button>
@@ -162,7 +162,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; } th.num { text-
       <div class="tbl"><table>
         <thead><tr><th>Máy</th><th class="num" id="tok-col-today">USD hôm nay</th><th>Tỉ lệ</th><th class="num">Hôm trước</th><th class="num">7 ngày</th>
           <th class="num">Số lần gọi</th><th class="num">Cache đọc</th><th>Cập nhật</th></tr></thead>
-        <tbody id="tok-table"><tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.40).</td></tr></tbody>
+        <tbody id="tok-table"><tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.42).</td></tr></tbody>
       </table></div>
   </div>
 
@@ -358,7 +358,11 @@ let tokSelected = "", tokMetric = "usd";
 function renderTokens(d, now) {
   const rows = d.tokens || [];
   const names = {};
-  for (const m of d.machines) names[m.machine_id] = m.name || m.host || m.machine_id;
+  const versions = {};
+  for (const m of d.machines) {
+    names[m.machine_id] = m.name || m.host || m.machine_id;
+    versions[m.machine_id] = m.version;
+  }
   const days = [...Array(7)].map((_, i) => dayOf(now - (6 - i) * 86400));
   const today = days[6], yesterday = days[5];
   // Colour follows the machine (sorted by name), never its rank: a machine keeps its colour from day to day.
@@ -390,7 +394,7 @@ function renderTokens(d, now) {
   const show = (o, k) => k === "calls" ? val(o, k) : k === "usd" ? fmtUsd(val(o, k)) : fmtTok(val(o, k));
   $("tok-tiles").innerHTML = rows.length ? tiles.map(([k, f]) => `<div class="tile${f === tokMetric ? " main" : ""}"><div class="k">${k}</div>
       <div class="v">${show(t, f)}</div><div class="d">hôm trước ${show(y, f)}</div></div>`).join("")
-    : `<div class="muted">Chưa có số liệu: các máy gửi số liệu token từ plugin 1.0.40, khoảng 10 phút một lần khi Claude Code đang được dùng.</div>`;
+    : `<div class="muted">Chưa có số liệu: các máy gửi số liệu token từ plugin 1.0.42, khoảng 10 phút một lần khi Claude Code đang được dùng.</div>`;
 
   // stacked bars: per day, per machine (or the selected machine only), in the chosen measure
   const M = METRICS[tokMetric];
@@ -416,13 +420,16 @@ function renderTokens(d, now) {
     const todayRow = mine.find((r) => r.day === today) || zero();
     return { id, today: on(today), yesterday: on(yesterday), week: days.reduce((a, dd) => a + on(dd), 0),
              calls: todayRow.calls, cacheRead: todayRow.cache_read, updated: Math.max(0, ...mine.map((r) => r.updated || 0)),
-             noUsd: mine.some((r) => r.usd === undefined || r.usd === null) };
+             noUsd: mine.some((r) => r.usd === undefined || r.usd === null),
+             // before 1.0.42 a machine counted the calls of every account, not only those of the pool
+             allAccounts: olderThan(versions[id], "1.0.42") };
   }).sort((a, b) => b.today - a.today || b.week - a.week);
   const all = byMachine.reduce((a, m) => a + m.today, 0) || 1;
   const silent = d.machines.filter((m) => m.role !== "mover" && !ids.includes(m.machine_id) && now - m.last_seen < 7 * 86400);
   $("tok-table").innerHTML = byMachine.length || silent.length ? byMachine.map((m) => {
     const share = Math.round((m.today / all) * 100);
-    const note = tokMetric === "usd" && m.noUsd ? ` <span class="muted" style="font-size:12px">(cần 1.0.41 để tính USD)</span>` : "";
+    const note = m.allAccounts ? ` <span class="muted" style="font-size:12px">(bản cũ: tính cả account ngoài pool, cần 1.0.42)</span>`
+      : tokMetric === "usd" && m.noUsd ? ` <span class="muted" style="font-size:12px">(cần 1.0.42 để tính USD)</span>` : "";
     return `<tr${tokSelected === m.id ? ' style="font-weight:600"' : ""}>
       <td><i class="share" style="width:10px;background:${color(seriesOf(m.id))}"></i> ${esc(names[m.id] || m.id)}${note}</td>
       <td class="num">${M.fmt(m.today)}</td>
@@ -431,8 +438,15 @@ function renderTokens(d, now) {
       <td class="num">${m.calls}</td><td class="num">${fmtTok(m.cacheRead)}</td>
       <td class="muted">${m.updated ? ago(now - m.updated) : "—"}</td></tr>`;
   }).join("") + silent.map((m) => `<tr><td>${esc(m.name || m.host)}</td>
-      <td colspan="7" class="muted">Chưa gửi số liệu (plugin ${esc(m.version || "?")}, cần 1.0.41)</td></tr>`).join("")
-    : `<tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.41).</td></tr>`;
+      <td colspan="7" class="muted">Chưa gửi số liệu (plugin ${esc(m.version || "?")}, cần 1.0.42)</td></tr>`).join("")
+    : `<tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.42).</td></tr>`;
+}
+
+// "1.0.9" < "1.0.42": compare the numbers, not the text; an unknown version counts as older
+function olderThan(v, than) {
+  const a = String(v || "0").split(".").map((x) => parseInt(x, 10) || 0), b = than.split(".").map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+  return false;
 }
 
 function niceMax(v) {
