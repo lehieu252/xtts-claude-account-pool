@@ -153,12 +153,6 @@ class PoolServerTests(unittest.TestCase):
         self.assertEqual((got[day(0)]["usd"], got[day(0)]["unpriced"]), (27.2912, 1))
         self.assertNotIn("usd", got[day(1)])
         self.assertNotIn("usd", got[day(2)])
-        # since 1.0.42 a count says its first day: every day of the machine from it on that it leaves out is cleared
-        self.call("POST", "/api/tokens", {"machine_id": "m3", "since": day(1), "days": {day(0): {"calls": 7}}}, key=API)
-        got = {r["day"]: r for r in self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"] if r["machine_id"] == "m3"}
-        self.assertEqual({d: r["calls"] for d, r in got.items()}, {day(2): 1, day(0): 7})  # day(1) cleared, day(2) kept
-        self.call("POST", "/api/tokens", {"machine_id": "m3", "since": day(7), "days": {}}, key=API)
-        self.assertFalse([r for r in self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"] if r["machine_id"] == "m3"])
         body["days"] = {day(0): {"calls": 4}}  # a later count of the same day replaces it
         self.call("POST", "/api/tokens", body, key=API)
         got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"]

@@ -24,7 +24,6 @@ Standard library only, Python 3.8+.
 """
 
 import argparse
-import bisect
 import datetime as dt
 import getpass
 import glob
@@ -1001,7 +1000,6 @@ def cmd_switch(args):
     write_live_profile(idx["accounts"][args.name].get("profile"))
     save_index(idx)
     p = idx["accounts"][args.name].get("profile") or {}
-    _note_live_account((p.get("emailAddress") or "").lower() or None)  # the token statistics count calls by account
     # The file backend is re-read as soon as its mtime changes; only the Keychain read is cached.
     if where == "keychain" and not args.no_wait and os.environ.get("CLAUDECODE") and KEYCHAIN_CACHE_WAIT > 0:
         time.sleep(KEYCHAIN_CACHE_WAIT)
@@ -1052,9 +1050,6 @@ POOL_ORGS = ("xtgroup.com.vn",)
 # of an account only goes down when it resets, so this does not flip back and forth).
 RESERVE_EMAILS = ("xuanpt2@gmail.com",)
 POOL_EMAILS = tuple(e for e in ALL_EMAILS if e.rsplit("@", 1)[1] in POOL_ORGS) + RESERVE_EMAILS
-# The token statistics count only the calls made with these accounts (both Teams and the reserve, whichever the pool
-# uses that day); a call made with any other account (a personal plan, ...) is left out.
-STATS_EMAILS = ALL_EMAILS + RESERVE_EMAILS
 # Shown on the dashboard and asked for at login whatever their seat. Since 19/11 (1.0.36) every pool account: xtgroup.com.vn
 # has 4 Standard seats, one per account. An account that is not logged in on machine 2 cannot show its seat, so it would never
 # be listed or asked for if it had to hold one first. Narrow this to the accounts that hold a seat for good to show and ask
@@ -2438,77 +2433,7 @@ def _heartbeat():
                   every=HEARTBEAT_EVERY, live=current_name(idx))
     except Exception:
         pass
-    _note_live_account()
     _maybe_token_stats()
-
-
-# ---------------------------------------------------------------- which account made each call
-
-# A transcript does not say which account made a call. Every hook (before each prompt and tool call) writes the live
-# account to account-timeline.jsonl when it changed (1.0.42), and so does every switch: a call is then counted for the
-# account live when it was made. Before that file exists, the rotation log stands in: its heartbeats (at most every
-# 10 minutes, with the live account) and its switches.
-def _timeline_path():
-    return os.path.join(store_dir(), "account-timeline.jsonl")
-
-
-def _note_live_account(email=False, now=None):
-    """Write the live account (`email`, else read from Claude Code's profile) to the timeline when it changed. Never
-    raises."""
-    try:
-        now = time.time() if now is None else now
-        if email is False:
-            email = ((read_live_profile() or {}).get("emailAddress") or "").lower() or None
-        state_path = os.path.join(store_dir(), "account-now.json")
-        last = read_json(state_path, {}) or {}
-        if "email" in last and last["email"] == email:
-            return
-        os.makedirs(store_dir(), exist_ok=True)
-        with open(_timeline_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"at": now, "email": email}) + "\n")
-        write_json_atomic(state_path, {"email": email, "at": now})
-    except Exception:
-        pass
-
-
-def _account_timeline(idx=None):
-    """[(epoch, email or None)] by time: the live account of this machine from that moment on (None: an account that is
-    not saved here). From account-timeline.jsonl, and the rotation log's heartbeats and switches."""
-    points = []
-    try:
-        with open(_timeline_path(), encoding="utf-8") as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    points.append((float(e["at"]), (e.get("email") or None)))
-                except (ValueError, KeyError, TypeError):
-                    pass
-    except OSError:
-        pass
-    try:
-        idx = idx or load_index()
-    except Exception:
-        idx = {"accounts": {}}
-    for name in ("rotation.log.1", "rotation.log"):
-        try:
-            f = open(os.path.join(store_dir(), name), encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        with f:
-            for line in f:
-                if '"heartbeat"' not in line and '"switch_ok"' not in line:
-                    continue
-                try:
-                    e = json.loads(line)
-                    at = time.mktime(time.strptime(e["ts"], "%Y-%m-%d %H:%M:%S"))  # written in this machine's local time
-                except (ValueError, KeyError, TypeError, OverflowError):
-                    continue
-                who = e.get("live") if e.get("event") == "heartbeat" else e.get("target") if e.get("event") == "switch_ok" else 0
-                if who == 0:
-                    continue
-                points.append((at, (_email_of(idx, who) or (who.lower() if "@" in who else None)) if who else None))
-    points.sort(key=lambda p: p[0])
-    return points
 
 
 # ---------------------------------------------------------------- token statistics (dashboard)
@@ -2565,19 +2490,10 @@ def _token_cost(model, usage):
     return usd * (2.0 if usage.get("speed") == "fast" else 1.0)
 
 
-def _token_days(projects_dir, now=None, days=TOKEN_DAYS, timeline=None):
+def _token_days(projects_dir, now=None, days=TOKEN_DAYS):
     """{"YYYY-MM-DD": {"calls", "input", "output", "cache_write", "cache_read", "usd", "unpriced"}} for the last `days`
-    days (TOKEN_TZ); usd: what they would cost on the Claude API (_token_cost); unpriced: calls of an unknown model.
-    With a `timeline` (_account_timeline), only the calls made with an account of STATS_EMAILS count: a call made with
-    another account (a personal plan, ...), or before the timeline knows any, is left out. Without one, every call counts."""
+    days (TOKEN_TZ); usd: what they would cost on the Claude API (_token_cost); unpriced: calls of an unknown model."""
     now = time.time() if now is None else now
-    times = [p[0] for p in timeline or []]
-
-    def ours(at):
-        if timeline is None:
-            return True
-        i = bisect.bisect_right(times, at) - 1
-        return i >= 0 and timeline[i][1] in STATS_EMAILS
     first = dt.datetime.fromtimestamp(now, TOKEN_TZ).date() - dt.timedelta(days=days - 1)
     since = dt.datetime.combine(first, dt.time(), TOKEN_TZ).timestamp()
     out, seen = {}, set()
@@ -2608,16 +2524,14 @@ def _token_days(projects_dir, now=None, days=TOKEN_DAYS, timeline=None):
                 day = dt.datetime.fromtimestamp(at, TOKEN_TZ).date() if at is not None else None
                 if day is None or day < first:
                     continue
-                if not ours(at):
-                    continue  # made with an account outside the pool: not counted
                 d = out.setdefault(day.isoformat(), {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
                                                      "usd": 0.0, "unpriced": 0})
-                n = lambda field: int(u[field]) if isinstance(u.get(field), (int, float)) and u[field] > 0 else 0
-                cost = _token_cost(m.get("model"), u)
                 d["calls"] += 1
                 for name, field in (("input", "input_tokens"), ("output", "output_tokens"),
                                     ("cache_write", "cache_creation_input_tokens"), ("cache_read", "cache_read_input_tokens")):
-                    d[name] += n(field)
+                    value = u.get(field)
+                    d[name] += int(value) if isinstance(value, (int, float)) and value > 0 else 0
+                cost = _token_cost(m.get("model"), u)
                 if cost is None:
                     d["unpriced"] += 1
                 else:
@@ -2653,14 +2567,9 @@ def cmd_token_stats(args):
     if not _acquire_lock(lock_path, stale=600):
         return
     try:
-        now = time.time()
-        days = _token_days(os.path.join(config_dir(), "projects"), now=now, timeline=_account_timeline())
-        # since: the first day counted; the server replaces every day of this machine from it on, so a day left with no
-        # call of a pool account (or counted by an older version with every account) is cleared, not kept as it was
-        since = (dt.datetime.fromtimestamp(now, TOKEN_TZ).date() - dt.timedelta(days=TOKEN_DAYS - 1)).isoformat()
+        days = _token_days(os.path.join(config_dir(), "projects"))
         pool_call("POST", "/api/tokens", {"machine_id": pool_settings()["machine_id"], "name": machine_name(),
-                                          "host": platform.node(), "version": plugin_version(), "since": since,
-                                          "days": days}, timeout=20)
+                                          "host": platform.node(), "version": plugin_version(), "days": days}, timeout=20)
         path = os.path.join(store_dir(), "token-stats.json")
         st = read_json(path, {}) or {}
         st["sent"] = time.time()

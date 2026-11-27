@@ -1370,57 +1370,6 @@ class TokenStatsTests(unittest.TestCase):
         self.assertAlmostEqual(acct._token_cost("claude-haiku-5-5", long_prompt), 0.1 + 2.50)
         self.assertIsNone(acct._token_cost("gpt-5", u))
 
-    def test_only_the_calls_made_with_an_account_of_the_pool_count(self):
-        at = lambda s: dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-        timeline = [(at("2026-11-27T00:00:00Z"), "me@gmail.com"), (at("2026-11-27T02:00:00Z"), X1),
-                    (at("2026-11-27T03:00:00Z"), None), (at("2026-11-27T04:00:00Z"), R)]
-        self.write("-p/s.jsonl", [
-            self.msg("m0", "2026-11-26T23:00:00Z"),  # before the timeline knows any account: not counted
-            self.msg("m1", "2026-11-27T01:00:00Z"),  # a personal account
-            self.msg("m2", "2026-11-27T02:30:00Z", out=7),  # xtg1@xtgroup.com.vn
-            self.msg("m3", "2026-11-27T03:30:00Z"),  # an account not saved on this machine
-            self.msg("m4", "2026-11-27T05:00:00Z", out=9),  # the Claude Max reserve
-        ])
-        days = acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW, timeline=timeline)
-        self.assertEqual(sorted(days), ["2026-11-27"])
-        d = days["2026-11-27"]
-        self.assertEqual((d["calls"], d["output"]), (2, 16))  # m2 and m4 only
-        self.assertNotIn("other_calls", d)  # the calls of other accounts are not counted at all
-        self.assertAlmostEqual(d["usd"], 2 * (2 * 4 + 1000 * 5 + 5000 * 0.2) / 1e6 + 16 * 20 / 1e6, places=4)
-        self.assertEqual(acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW)["2026-11-27"]["calls"], 5)
-        everyone_else = [(at("2026-11-27T00:00:00Z"), "me@gmail.com")]
-        self.assertEqual(acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW, timeline=everyone_else), {})
-        self.assertIn(P, acct.STATS_EMAILS)  # an account of xtgroup.vn still counts, used or not by the pool that day
-        self.assertNotIn("hieule252uet@gmail.com", acct.STATS_EMAILS)
-
-    def test_every_hook_notes_the_live_account_when_it_changes(self):
-        with patch.object(acct, "read_live_profile", return_value={"emailAddress": "XTG1@xtgroup.com.vn"}):
-            acct._note_live_account(now=100.0)
-            acct._note_live_account(now=200.0)  # unchanged: not written again
-        acct._note_live_account("me@gmail.com", now=300.0)  # a switch says which account it put in
-        with patch.object(acct, "read_live_profile", return_value=None):
-            acct._note_live_account(now=400.0)  # not logged in, or an account Claude Code does not name
-        lines = [json.loads(l) for l in open(acct._timeline_path(), encoding="utf-8")]
-        self.assertEqual([(l["at"], l["email"]) for l in lines],
-                         [(100.0, X1), (300.0, "me@gmail.com"), (400.0, None)])
-        with patch.object(acct, "_note_live_account") as note, patch.object(acct, "_maybe_token_stats"):
-            acct._heartbeat()
-        note.assert_called_once()
-
-    def test_before_the_timeline_the_rotation_log_says_which_account_was_live(self):
-        idx = {"accounts": {"xtg1": {"profile": {"emailAddress": X1}}, "me": {"profile": {"emailAddress": "me@gmail.com"}}}}
-        with open(os.path.join(self.dir, "rotation.log"), "w", encoding="utf-8") as f:
-            for ts, event, extra in (("2026-11-20 10:00:00", "heartbeat", {"live": "me"}),
-                                     ("2026-11-20 11:00:00", "switch_ok", {"live": "me", "target": "xtg1"}),
-                                     ("2026-11-20 11:30:00", "switch_fail", {"target": "me"}),
-                                     ("2026-11-20 12:00:00", "heartbeat", {}),  # the live account was not saved
-                                     ("2026-11-20 13:00:00", "heartbeat", {"live": "truongnv@xtgroup.vn"})):
-                f.write(json.dumps(dict(extra, ts=ts, event=event)) + "\n")
-        acct._note_live_account(X3, now=time.mktime(time.strptime("2026-11-21 08:00:00", "%Y-%m-%d %H:%M:%S")))
-        timeline = acct._account_timeline(idx)
-        self.assertEqual([e for _, e in timeline], ["me@gmail.com", X1, None, T1, X3])
-        self.assertEqual(timeline[1][0], time.mktime(time.strptime("2026-11-20 11:00:00", "%Y-%m-%d %H:%M:%S")))
-
     def test_a_call_of_an_unknown_model_is_counted_as_unpriced(self):
         self.write("-p/s.jsonl", [self.msg("m1", "2026-11-27T01:00:00Z", model="some-other-model"),
                                   self.msg("m2", "2026-11-27T01:00:00Z")])
@@ -1462,8 +1411,6 @@ class TokenStatsTests(unittest.TestCase):
             acct.cmd_token_stats(None)
         method, path, body = call.call_args.args[:3]
         self.assertEqual((method, path, body["machine_id"], body["name"], body["days"]), ("POST", "/api/tokens", "m1", "Hiếu", days))
-        first = dt.datetime.now(acct.TOKEN_TZ).date() - dt.timedelta(days=acct.TOKEN_DAYS - 1)
-        self.assertEqual(body["since"], first.isoformat())  # the server clears the days of this window it is not sent
         with patch.object(acct, "_token_days", return_value=days), \
              patch.object(acct, "pool_call", side_effect=acct.AcctError("pool server unreachable")), \
              patch.object(acct, "log_event") as log:

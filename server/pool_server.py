@@ -59,9 +59,7 @@ ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligib
 POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
                "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "has_premium", "thresholds")
 TOKEN_FIELDS = ("calls", "input", "output", "cache_write", "cache_read", "unpriced")
-# usd: what the day's tokens would cost on the Claude API (1.0.41); a count from 1.0.40 has none. Since 1.0.42 machines
-# count only the calls made with an account of the pool.
-TOKEN_FLOATS = ("usd",)
+# usd: what the day's tokens would cost on the Claude API (1.0.41); a count from 1.0.40 has none.
 TOKEN_TZ_SEC = 7 * 3600  # days are counted in Vietnam time, like the machines count them
 TOKEN_KEEP_DAYS = 40
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
@@ -204,15 +202,12 @@ class Store:
                                 "UPDATE SET data=excluded.data, updated=excluded.updated",
                                 [(e, json.dumps(d, ensure_ascii=False), now) for e, d in snaps.items()])
 
-    def set_tokens(self, machine_id, days, since=None):
+    def set_tokens(self, machine_id, days):
         """The tokens a machine used each day ({"YYYY-MM-DD": {...}}), as it counted them now: each day replaces the
-        last count of that day, and with `since` every day of this machine from it on that the count leaves out is
-        dropped. Days older than TOKEN_KEEP_DAYS are dropped."""
+        last count of that day. Days older than TOKEN_KEEP_DAYS are dropped."""
         now = time.time()
         oldest = time.strftime("%Y-%m-%d", time.gmtime(now + TOKEN_TZ_SEC - TOKEN_KEEP_DAYS * 86400))
         with self.lock, self.db:
-            if since:
-                self.db.execute("DELETE FROM tokens WHERE machine_id = ? AND day >= ?", (machine_id, since))
             self.db.executemany("INSERT INTO tokens (machine_id, day, data, updated) VALUES (?,?,?,?) ON CONFLICT(machine_id, day) "
                                 "DO UPDATE SET data=excluded.data, updated=excluded.updated",
                                 [(machine_id, day, json.dumps(d), now) for day, d in days.items()])
@@ -479,13 +474,10 @@ def make_handler(cfg, store):
                     if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and isinstance(d, dict):
                         clean[day] = {k: int(d[k]) if isinstance(d.get(k), (int, float)) and d[k] > 0 else 0
                                       for k in TOKEN_FIELDS}
-                        for k in TOKEN_FLOATS:
-                            v = d.get(k)
-                            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e7:
-                                clean[day][k] = round(float(v), 4)
-                since = b.get("since")
-                since = since if isinstance(since, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", since) else None
-                store.set_tokens(machine_id, clean, since)
+                        usd = d.get("usd")
+                        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and 0 <= usd < 1e7:
+                            clean[day]["usd"] = round(float(usd), 4)
+                store.set_tokens(machine_id, clean)
                 return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/snapshots":
                 if not self._is_mover():
