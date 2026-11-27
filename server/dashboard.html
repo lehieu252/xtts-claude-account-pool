@@ -142,9 +142,22 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; } th.num { text-
         <svg id="tok-chart" viewBox="0 0 720 240" role="img" aria-label="Mỗi ngày của từng máy, 7 ngày gần nhất"></svg>
         <div class="tip" id="tok-tip"></div>
       </div>
-      <p class="muted" style="margin:6px 0 0;font-size:12px">USD quy đổi = số token của từng lần gọi nhân giá API Anthropic của đúng model đã dùng
-        (ví dụ Opus 5.5: input $4, output $20, cache ghi 1 giờ $8, cache đọc $0,20 mỗi 1M token). Gói claude.ai không tính tiền theo token:
-        đây là thước đo để so máy nào thực sự tốn, không phải hoá đơn.</p>
+      <div class="muted" style="margin:10px 0 0;font-size:12px">
+        <div style="font-weight:600;color:var(--fg)">Cách quy đổi USD: số token của từng lần gọi × giá API Anthropic của đúng model đã dùng, tính theo <u>mỗi 1 triệu (1M) token</u></div>
+        <div class="tbl" style="max-width:720px;margin:6px 0"><table style="font-size:12px">
+          <thead><tr><th>Loại token</th><th class="num">Opus 5.5</th><th class="num">Sonnet 5.5</th><th>So với input</th></tr></thead>
+          <tbody>
+            <tr><td>Input (vào mới)</td><td class="num">$4</td><td class="num">$2</td><td>1× (giá gốc)</td></tr>
+            <tr><td>Output (ra)</td><td class="num">$20</td><td class="num">$10</td><td>5×</td></tr>
+            <tr><td>Cache ghi, thời hạn 5 phút</td><td class="num">$5</td><td class="num">$2,50</td><td>1,25×</td></tr>
+            <tr><td>Cache ghi, thời hạn 1 giờ</td><td class="num">$8</td><td class="num">$4</td><td>2× · Claude Code dùng loại này gần như toàn bộ (để giữ ngữ cảnh khi nghỉ vài phút rồi quay lại)</td></tr>
+            <tr><td>Cache đọc (đọc lại)</td><td class="num">$0,20</td><td class="num">$0,10</td><td>0,05×</td></tr>
+          </tbody>
+        </table></div>
+        Mỗi lần gọi, Claude Code ghi rõ bao nhiêu token cache 5 phút và bao nhiêu token cache 1 giờ; plugin tính từng phần với đúng giá, và dùng giá riêng
+        của từng model (Opus, Sonnet, Haiku, Fable…), chế độ fast tính gấp đôi. Cache đọc chiếm phần lớn số token nhưng rẻ, nên USD phản ánh mức tốn thật tốt hơn
+        tổng số token. Gói claude.ai không tính tiền theo token: đây là thước đo để so máy nào thực sự tốn, không phải hoá đơn.
+      </div>
       <h2 style="margin:18px 0 10px">So sánh các máy</h2>
       <div class="tbl"><table>
         <thead><tr><th>Máy</th><th class="num" id="tok-col-today">USD hôm nay</th><th>Tỉ lệ</th><th class="num">Hôm trước</th><th class="num">7 ngày</th>
