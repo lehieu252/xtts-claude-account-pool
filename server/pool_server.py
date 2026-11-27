@@ -26,6 +26,10 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
                                      seat of xtgroup.com.vn (seat); machine 2 does it on its next run (one at a time)
   POST /api/request/result           X-Pool-Mover-Key: {id, status: running|ok|fail, message}
   DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
+  POST /api/tokens                   X-Pool-Key: {machine_id, name, days: {"YYYY-MM-DD": {calls, input, output,
+                                     cache_write, cache_read}}}: the tokens a machine's Claude Code used each day
+                                     (Vietnam time), counted from its transcripts; GET /api/dashboard returns the last
+                                     8 days as "tokens"
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
   GET  /api/dashboard                Basic auth: state, machines, transitions, log (filters: machine, event)
 
@@ -35,6 +39,7 @@ import base64
 import hmac
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -52,6 +57,9 @@ ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligib
                   "limit_5h", "limit_7d")
 POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
                "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "has_premium", "thresholds")
+TOKEN_FIELDS = ("calls", "input", "output", "cache_write", "cache_read")
+TOKEN_TZ_SEC = 7 * 3600  # days are counted in Vietnam time, like the machines count them
+TOKEN_KEEP_DAYS = 40
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
 
 
@@ -91,6 +99,8 @@ class Store:
                     updated REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS snapshots (email TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS tokens (machine_id TEXT NOT NULL, day TEXT NOT NULL, data TEXT NOT NULL,
+                    updated REAL NOT NULL, PRIMARY KEY (machine_id, day));
             """)
             # 1.0.8: the backup account the machines wait on while the seat moves (machine 2 picks it)
             cols = [r["name"] for r in self.db.execute("PRAGMA table_info(state)")]
@@ -189,6 +199,25 @@ class Store:
             self.db.executemany("INSERT INTO snapshots (email, data, updated) VALUES (?,?,?) ON CONFLICT(email) DO "
                                 "UPDATE SET data=excluded.data, updated=excluded.updated",
                                 [(e, json.dumps(d, ensure_ascii=False), now) for e, d in snaps.items()])
+
+    def set_tokens(self, machine_id, days):
+        """The tokens a machine used each day ({"YYYY-MM-DD": {...}}), as it counted them now: each day replaces the
+        last count of that day. Days older than TOKEN_KEEP_DAYS are dropped."""
+        now = time.time()
+        oldest = time.strftime("%Y-%m-%d", time.gmtime(now + TOKEN_TZ_SEC - TOKEN_KEEP_DAYS * 86400))
+        with self.lock, self.db:
+            self.db.executemany("INSERT INTO tokens (machine_id, day, data, updated) VALUES (?,?,?,?) ON CONFLICT(machine_id, day) "
+                                "DO UPDATE SET data=excluded.data, updated=excluded.updated",
+                                [(machine_id, day, json.dumps(d), now) for day, d in days.items()])
+            self.db.execute("DELETE FROM tokens WHERE day < ?", (oldest,))
+
+    def tokens(self, days=8):
+        """[{machine_id, day, calls, input, output, cache_write, cache_read, updated}] of the last `days` days."""
+        first = time.strftime("%Y-%m-%d", time.gmtime(time.time() + TOKEN_TZ_SEC - (days - 1) * 86400))
+        with self.lock:
+            rows = self.db.execute("SELECT machine_id, day, data, updated FROM tokens WHERE day >= ? ORDER BY day",
+                                   (first,)).fetchall()
+        return [dict(json.loads(r["data"]), machine_id=r["machine_id"], day=r["day"], updated=r["updated"]) for r in rows]
 
     def set_kv(self, key, data):
         with self.lock, self.db:
@@ -327,6 +356,7 @@ def make_handler(cfg, store):
                     "transitions": store.transitions(),
                     "accounts": store.accounts(),
                     "pool": store.kv("pool"),
+                    "tokens": store.tokens(),
                     "log": store.log(limit, first("machine"), first("event")),
                     "active_sec": ACTIVE_SEC, "mover_stale_sec": MOVER_STALE_SEC,
                 })
@@ -423,7 +453,7 @@ def make_handler(cfg, store):
                     return self._request_result(self._body())
                 except (ValueError, json.JSONDecodeError) as e:
                     return self._send(400, {"error": str(e)})
-            if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold", "/api/snapshots"):
+            if path not in ("/api/machine", "/api/log", "/api/accounts", "/api/hold", "/api/snapshots", "/api/tokens"):
                 return self._send(404, {"error": "not found"})
             if not self._is_machine():
                 return self._send(403, {"error": "key required"})
@@ -433,6 +463,17 @@ def make_handler(cfg, store):
                 return self._send(400, {"error": str(e)})
             if path == "/api/hold":
                 return self._take_hold(b)
+            if path == "/api/tokens":
+                machine_id, days = _text(b.get("machine_id"), 100), b.get("days")
+                if not machine_id or not isinstance(days, dict):
+                    return self._send(400, {"error": "machine_id and days required"})
+                clean = {}
+                for day, d in list(days.items())[:TOKEN_KEEP_DAYS]:
+                    if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and isinstance(d, dict):
+                        clean[day] = {k: int(d[k]) if isinstance(d.get(k), (int, float)) and d[k] > 0 else 0
+                                      for k in TOKEN_FIELDS}
+                store.set_tokens(machine_id, clean)
+                return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/snapshots":
                 if not self._is_mover():
                     return self._send(403, {"error": "mover key required"})

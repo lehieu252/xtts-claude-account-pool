@@ -1302,6 +1302,96 @@ class RotationPreviewTests(unittest.TestCase):
         self.assertIn("not published yet", self.preview(pool_index(), {"phase": "STABLE", "premium": P}))
 
 
+class TokenStatsTests(unittest.TestCase):
+    """The tokens each machine's Claude Code used per day (Vietnam time), counted from its transcripts (1.0.40)."""
+
+    NOW = dt.datetime(2026, 11, 27, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=7))).timestamp()
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = patch.dict(os.environ, {"CLAUDE_ACCT_HOME": self.dir})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.dir)
+
+    def write(self, rel, entries, age_days=0):
+        path = os.path.join(self.dir, "projects", rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write((e if isinstance(e, str) else json.dumps(e)) + "\n")
+        at = self.NOW - age_days * 86400
+        os.utime(path, (at, at))
+
+    @staticmethod
+    def msg(mid, when, inp=2, out=100, write=1000, read=5000, model="claude-opus-5-5", req=None):
+        return {"type": "assistant", "timestamp": when, "requestId": req or "req_" + mid, "uuid": "u-" + mid + when,
+                "message": {"id": mid, "model": model, "usage": {"input_tokens": inp, "output_tokens": out,
+                                                                 "cache_creation_input_tokens": write,
+                                                                 "cache_read_input_tokens": read}}}
+
+    def test_each_message_counts_once_on_its_vietnam_day_subagents_included(self):
+        a = self.msg("msg_a", "2026-11-27T01:00:00Z")
+        self.write("-proj/s1.jsonl", [
+            {"type": "user", "timestamp": "2026-11-27T01:00:00Z", "message": {"role": "user", "content": "hi"}},
+            a, a, a,  # one message is written several times with the same usage
+            self.msg("msg_b", "2026-11-26T18:30:00Z", out=50),  # 27/11 01:30 in Vietnam: today
+            self.msg("msg_c", "2026-11-26T16:00:00Z", out=7),  # 26/11 23:00 in Vietnam: yesterday
+            self.msg("msg_s", "2026-11-27T02:00:00Z", model="<synthetic>"),  # not a request
+            self.msg("msg_old", "2026-11-10T02:00:00Z"),  # before the 8 days
+            "not json", '{"type": "assistant", "message": "odd"}',
+        ])
+        self.write("-proj/s1/subagents/agent-x.jsonl", [self.msg("msg_d", "2026-11-27T02:00:00Z", out=1)])
+        self.write("-proj/old.jsonl", [self.msg("msg_e", "2026-11-27T02:00:00Z")], age_days=20)  # untouched for 20 days
+        days = acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW)
+        self.assertEqual(sorted(days), ["2026-11-26", "2026-11-27"])
+        self.assertEqual(days["2026-11-27"], {"calls": 3, "input": 6, "output": 151, "cache_write": 3000, "cache_read": 15000})
+        self.assertEqual(days["2026-11-26"]["output"], 7)
+
+    def test_only_the_last_8_days_are_kept(self):
+        self.write("-p/s.jsonl", [self.msg("m%d" % i, "2026-11-%02dT05:00:00Z" % (27 - i)) for i in range(10)])
+        days = acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW)
+        self.assertEqual(sorted(days)[0], "2026-11-20")
+        self.assertEqual(len(days), 8)
+
+    def test_a_hook_starts_a_count_at_most_every_10_minutes_and_only_on_a_machine_of_the_pool(self):
+        with patch.object(acct.subprocess, "Popen") as popen:
+            acct._maybe_token_stats()
+            popen.assert_not_called()  # not joined
+            acct.save_pool_settings({"api_key": "k", "machine_id": "m1"})
+            acct._maybe_token_stats()
+            acct._maybe_token_stats()
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args.args[0][-1], "token-stats")
+            st = acct.read_json(os.path.join(self.dir, "token-stats.json"), {})
+            st["spawned"] -= acct.TOKEN_STATS_EVERY
+            acct.write_json_atomic(os.path.join(self.dir, "token-stats.json"), st)
+            acct._maybe_token_stats()
+            self.assertEqual(popen.call_count, 2)
+
+    def test_the_heartbeat_of_every_hook_starts_it_even_with_switching_off(self):
+        with patch.object(acct, "_maybe_token_stats") as start, patch.object(acct, "load_rotation", return_value={}), \
+             patch.object(acct, "_spawn_log_flush"):
+            acct.cmd_auto_check(argparse.Namespace(force=False, manual=False))
+        start.assert_called_once()
+
+    def test_the_count_is_sent_to_the_pool_server_and_a_failure_is_logged_not_raised(self):
+        acct.save_pool_settings({"api_key": "k", "machine_id": "m1", "name": "Hiếu"})
+        days = {"2026-11-27": {"calls": 1, "input": 2, "output": 3, "cache_write": 4, "cache_read": 5}}
+        with patch.object(acct, "_token_days", return_value=days), patch.object(acct, "pool_call") as call:
+            acct.cmd_token_stats(None)
+        method, path, body = call.call_args.args[:3]
+        self.assertEqual((method, path, body["machine_id"], body["name"], body["days"]), ("POST", "/api/tokens", "m1", "Hiếu", days))
+        with patch.object(acct, "_token_days", return_value=days), \
+             patch.object(acct, "pool_call", side_effect=acct.AcctError("pool server unreachable")), \
+             patch.object(acct, "log_event") as log:
+            acct.cmd_token_stats(None)
+        self.assertEqual(log.call_args.args[0], "read_fail")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "token-stats.lock")))
+
+
 class RotationLogTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

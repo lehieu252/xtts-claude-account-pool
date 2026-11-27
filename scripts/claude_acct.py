@@ -26,6 +26,7 @@ Standard library only, Python 3.8+.
 import argparse
 import datetime as dt
 import getpass
+import glob
 import hashlib
 import json
 import os
@@ -2432,6 +2433,102 @@ def _heartbeat():
                   every=HEARTBEAT_EVERY, live=current_name(idx))
     except Exception:
         pass
+    _maybe_token_stats()
+
+
+# ---------------------------------------------------------------- token statistics (dashboard)
+
+# Every machine that joined the pool sends, at most every TOKEN_STATS_EVERY, the tokens its Claude Code used on each of
+# the last TOKEN_DAYS days (Vietnam time), read from the transcripts Claude Code keeps on the machine
+# (<config dir>/projects/**/*.jsonl, subagents included). Nothing is asked of Claude or of the usage API: it costs no
+# token. A message is written 1-5 times in a transcript with the same usage, so each one is counted once by its id.
+TOKEN_STATS_EVERY = 600
+TOKEN_DAYS = 8  # today and the 7 days before it
+TOKEN_TZ = dt.timezone(dt.timedelta(hours=7))
+
+
+def _token_days(projects_dir, now=None, days=TOKEN_DAYS):
+    """{"YYYY-MM-DD": {"calls", "input", "output", "cache_write", "cache_read"}} for the last `days` days (TOKEN_TZ)."""
+    now = time.time() if now is None else now
+    first = dt.datetime.fromtimestamp(now, TOKEN_TZ).date() - dt.timedelta(days=days - 1)
+    since = dt.datetime.combine(first, dt.time(), TOKEN_TZ).timestamp()
+    out, seen = {}, set()
+    for path in glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True):
+        try:
+            if os.path.getmtime(path) < since:
+                continue  # last written before the first day: none of its messages counts
+            f = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with f:
+            for line in f:
+                if '"assistant"' not in line or '"usage"' not in line:  # most lines: skip them unparsed
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                m = e.get("message") if isinstance(e, dict) else None
+                u = (m or {}).get("usage") if isinstance(m, dict) else None
+                if e.get("type") != "assistant" or not isinstance(u, dict) or m.get("model") == "<synthetic>":
+                    continue
+                key = (m.get("id"), e.get("requestId")) if m.get("id") or e.get("requestId") else e.get("uuid")
+                if key in seen:
+                    continue
+                seen.add(key)
+                at = _parse_reset(e.get("timestamp"))
+                day = dt.datetime.fromtimestamp(at, TOKEN_TZ).date() if at is not None else None
+                if day is None or day < first:
+                    continue
+                d = out.setdefault(day.isoformat(), {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0})
+                d["calls"] += 1
+                for name, field in (("input", "input_tokens"), ("output", "output_tokens"),
+                                    ("cache_write", "cache_creation_input_tokens"), ("cache_read", "cache_read_input_tokens")):
+                    value = u.get(field)
+                    d[name] += int(value) if isinstance(value, (int, float)) and value > 0 else 0
+    return out
+
+
+def _maybe_token_stats():
+    """From a hook: start a token count in the background once TOKEN_STATS_EVERY has passed. Never raises."""
+    try:
+        if not _log_upload_enabled():
+            return
+        path = os.path.join(store_dir(), "token-stats.json")
+        st = read_json(path, {}) or {}
+        if time.time() - st.get("spawned", 0) < TOKEN_STATS_EVERY:
+            return
+        st["spawned"] = time.time()
+        write_json_atomic(path, st)
+        subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "token-stats"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        pass
+
+
+def cmd_token_stats(args):
+    """Count the tokens of the last TOKEN_DAYS days and send them to the pool server (the dashboard's Token panel)."""
+    if not _log_upload_enabled():
+        return
+    lock_path = os.path.join(store_dir(), "token-stats.lock")
+    if not _acquire_lock(lock_path, stale=600):
+        return
+    try:
+        days = _token_days(os.path.join(config_dir(), "projects"))
+        pool_call("POST", "/api/tokens", {"machine_id": pool_settings()["machine_id"], "name": machine_name(),
+                                          "host": platform.node(), "version": plugin_version(), "days": days}, timeout=20)
+        path = os.path.join(store_dir(), "token-stats.json")
+        st = read_json(path, {}) or {}
+        st["sent"] = time.time()
+        write_json_atomic(path, st)
+    except Exception as e:
+        log_event("read_fail", "token statistics: %s" % e, every=QUIET_EVERY, key="token-stats")
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
 
 
 def cmd_auto_check(args, lock_wait=0):
@@ -2541,6 +2638,7 @@ def main(argv=None):
     q = autos.add_parser("recover", help=argparse.SUPPRESS)
     q.set_defaults(fn=cmd_auto_recover, hook="StopFailure")
     p = sub.add_parser("log-flush", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_log_flush)
+    p = sub.add_parser("token-stats", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_token_stats)
     p = sub.add_parser("login-backup", help=argparse.SUPPRESS); p.set_defaults(fn=cmd_login_backup)
     args = ap.parse_args(argv)
     global _hook

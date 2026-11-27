@@ -128,6 +128,28 @@ class PoolServerTests(unittest.TestCase):
         d = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]
         self.assertEqual([t["active"] for t in d["transitions"]], ["p@x.vn", "s1@x.vn"])
 
+    def test_every_machine_sends_its_tokens_per_day_and_the_dashboard_gets_the_last_8_days(self):
+        import time as t
+        day = lambda n: t.strftime("%Y-%m-%d", t.gmtime(t.time() + pool.TOKEN_TZ_SEC - n * 86400))
+        body = {"machine_id": "m1", "name": "Hiếu", "days": {
+            day(0): {"calls": 3, "input": 6, "output": 150.0, "cache_write": 3000, "cache_read": 15000, "secret": 1},
+            day(1): {"calls": 1, "input": -5, "output": "x"}, day(9): {"calls": 9}, "bad-day": {"calls": 1}}}
+        self.assertEqual(self.call("POST", "/api/tokens", body)[0], 403)
+        self.assertEqual(self.call("POST", "/api/tokens", body, key=API), (200, "ok"))
+        self.assertEqual(self.call("POST", "/api/tokens", {"machine_id": "m2", "days": {day(0): {"calls": 1}}}, mover=MOVER), (200, "ok"))
+        self.assertEqual(self.call("POST", "/api/tokens", {"days": {}}, key=API)[0], 400)
+        got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"]
+        mine = {r["day"]: r for r in got if r["machine_id"] == "m1"}
+        self.assertEqual(sorted(mine), [day(1), day(0)])  # 9 days ago and "bad-day" are not shown
+        self.assertEqual({k: mine[day(0)][k] for k in pool.TOKEN_FIELDS},
+                         {"calls": 3, "input": 6, "output": 150, "cache_write": 3000, "cache_read": 15000})
+        self.assertNotIn("secret", mine[day(0)])
+        self.assertEqual((mine[day(1)]["input"], mine[day(1)]["output"]), (0, 0))
+        body["days"] = {day(0): {"calls": 4}}  # a later count of the same day replaces it
+        self.call("POST", "/api/tokens", body, key=API)
+        got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"]
+        self.assertEqual([r["calls"] for r in got if r["machine_id"] == "m1" and r["day"] == day(0)], [4])
+
     def test_a_state_without_a_premium_account_needs_the_active_one(self):
         # since 1.0.37 the pool has no Premium account
         code, st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": None, "active": "x1@x.vn",
