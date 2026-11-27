@@ -158,6 +158,22 @@ class PoolServerTests(unittest.TestCase):
         got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"]
         self.assertEqual([r["calls"] for r in got if r["machine_id"] == "m1" and r["day"] == day(0)], [4])
 
+    def test_a_token_count_updates_the_version_of_its_machine_not_what_the_switching_saw(self):
+        # switching off: the machine no longer reports itself, but its token counts still come every 10 minutes
+        self.call("POST", "/api/machine", {"machine_id": "m1", "name": "Hiếu", "host": "mac", "account": "a@x.vn",
+                                           "version": "1.0.35"}, key=API)
+        self.store.db.execute("UPDATE machines SET last_seen = 1")
+        self.call("POST", "/api/tokens", {"machine_id": "m1", "name": "Hiếu Lê", "host": "mac2", "version": "1.0.41",
+                                          "days": {}}, key=API)
+        self.call("POST", "/api/tokens", {"machine_id": "m9", "version": "1.0.41", "days": {}}, key=API)  # never reported
+        machines = {m["machine_id"]: m for m in self.call("GET", "/api/machines", key=API)[1]}
+        m = machines["m1"]
+        self.assertEqual((m["name"], m["host"], m["version"]), ("Hiếu Lê", "mac2", "1.0.41"))
+        self.assertEqual((m["account"], m["last_seen"], m["active"]), ("a@x.vn", 1, False))
+        self.assertNotIn("m9", machines)  # not added: only a machine the switching has seen is listed
+        self.call("POST", "/api/tokens", {"machine_id": "m1", "days": {}}, key=API)  # without them: kept
+        self.assertEqual(self.call("GET", "/api/machines", key=API)[1][0]["version"], "1.0.41")
+
     def test_a_state_without_a_premium_account_needs_the_active_one(self):
         # since 1.0.37 the pool has no Premium account
         code, st = self.call("PUT", "/api/state", {"phase": "STABLE", "premium": None, "active": "x1@x.vn",

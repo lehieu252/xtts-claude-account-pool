@@ -202,6 +202,14 @@ class Store:
                                 "UPDATE SET data=excluded.data, updated=excluded.updated",
                                 [(e, json.dumps(d, ensure_ascii=False), now) for e, d in snaps.items()])
 
+    def touch_machine(self, machine_id, name=None, host=None, version=None):
+        """A machine that sends its token counts says its name, host and plugin version: update them on its row (kept
+        from its last switching report, so with switching off the version shown would stay at the one it had then).
+        Its account and last_seen are left as they were: they say what the switching saw."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE machines SET name=COALESCE(?, name), host=COALESCE(?, host), "
+                            "version=COALESCE(?, version) WHERE machine_id=?", (name, host, version, machine_id))
+
     def set_tokens(self, machine_id, days):
         """The tokens a machine used each day ({"YYYY-MM-DD": {...}}), as it counted them now: each day replaces the
         last count of that day. Days older than TOKEN_KEEP_DAYS are dropped."""
@@ -478,6 +486,7 @@ def make_handler(cfg, store):
                         if isinstance(usd, (int, float)) and not isinstance(usd, bool) and 0 <= usd < 1e7:
                             clean[day]["usd"] = round(float(usd), 4)
                 store.set_tokens(machine_id, clean)
+                store.touch_machine(machine_id, _text(b.get("name")), _text(b.get("host")), _text(b.get("version"), 40))
                 return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/snapshots":
                 if not self._is_mover():
