@@ -142,9 +142,17 @@ class PoolServerTests(unittest.TestCase):
         mine = {r["day"]: r for r in got if r["machine_id"] == "m1"}
         self.assertEqual(sorted(mine), [day(1), day(0)])  # 9 days ago and "bad-day" are not shown
         self.assertEqual({k: mine[day(0)][k] for k in pool.TOKEN_FIELDS},
-                         {"calls": 3, "input": 6, "output": 150, "cache_write": 3000, "cache_read": 15000})
+                         {"calls": 3, "input": 6, "output": 150, "cache_write": 3000, "cache_read": 15000, "unpriced": 0})
         self.assertNotIn("secret", mine[day(0)])
         self.assertEqual((mine[day(1)]["input"], mine[day(1)]["output"]), (0, 0))
+        self.assertNotIn("usd", mine[day(0)])  # a count from 1.0.40 has no USD
+        usd = {"machine_id": "m3", "days": {day(0): {"calls": 2, "usd": 27.291234, "unpriced": 1},
+                                            day(1): {"calls": 1, "usd": "x"}, day(2): {"calls": 1, "usd": True}}}
+        self.assertEqual(self.call("POST", "/api/tokens", usd, key=API), (200, "ok"))
+        got = {r["day"]: r for r in self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"] if r["machine_id"] == "m3"}
+        self.assertEqual((got[day(0)]["usd"], got[day(0)]["unpriced"]), (27.2912, 1))
+        self.assertNotIn("usd", got[day(1)])
+        self.assertNotIn("usd", got[day(2)])
         body["days"] = {day(0): {"calls": 4}}  # a later count of the same day replaces it
         self.call("POST", "/api/tokens", body, key=API)
         got = self.call("GET", "/api/dashboard", viewer="xtts:" + PASS)[1]["tokens"]

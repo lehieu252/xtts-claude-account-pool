@@ -27,7 +27,8 @@ Runs on the xtts server (port 5680) behind nginx at https://xtts.xtgroup.vn/pool
   POST /api/request/result           X-Pool-Mover-Key: {id, status: running|ok|fail, message}
   DELETE /api/hold                   any key: release it (machine 2 also releases an expired one after restoring)
   POST /api/tokens                   X-Pool-Key: {machine_id, name, days: {"YYYY-MM-DD": {calls, input, output,
-                                     cache_write, cache_read}}}: the tokens a machine's Claude Code used each day
+                                     cache_write, cache_read, usd, unpriced}}}: the tokens a machine's Claude Code used each day
+                                     and what they would cost on the Claude API (usd)
                                      (Vietnam time), counted from its transcripts; GET /api/dashboard returns the last
                                      8 days as "tokens"
   GET  /                             dashboard (Basic auth POOL_VIEW_USER / POOL_VIEW_PASS)
@@ -57,7 +58,8 @@ ACCOUNT_FIELDS = ("email", "org", "role", "seat", "active", "estimated", "eligib
                   "limit_5h", "limit_7d")
 POOL_FIELDS = ("active", "reason", "premium_back_at", "swaps_week", "week_start", "swap_blocked", "swap_blocked_until",
                "swap_limit", "swap_error", "swap_note", "pin", "swap_org", "seat_moves", "has_premium", "thresholds")
-TOKEN_FIELDS = ("calls", "input", "output", "cache_write", "cache_read")
+TOKEN_FIELDS = ("calls", "input", "output", "cache_write", "cache_read", "unpriced")
+# usd: what the day's tokens would cost on the Claude API (1.0.41); a count from 1.0.40 has none.
 TOKEN_TZ_SEC = 7 * 3600  # days are counted in Vietnam time, like the machines count them
 TOKEN_KEEP_DAYS = 40
 LOG_FIELDS = ("ts", "machine", "host", "version", "hook", "event", "live", "premium", "target", "p5h", "p7d", "message")
@@ -472,6 +474,9 @@ def make_handler(cfg, store):
                     if isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and isinstance(d, dict):
                         clean[day] = {k: int(d[k]) if isinstance(d.get(k), (int, float)) and d[k] > 0 else 0
                                       for k in TOKEN_FIELDS}
+                        usd = d.get("usd")
+                        if isinstance(usd, (int, float)) and not isinstance(usd, bool) and 0 <= usd < 1e7:
+                            clean[day]["usd"] = round(float(usd), 4)
                 store.set_tokens(machine_id, clean)
                 return self._send(200, "ok", "text/plain; charset=utf-8")
             if path == "/api/snapshots":

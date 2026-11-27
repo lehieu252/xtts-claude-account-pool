@@ -76,6 +76,12 @@ select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid 
 @media (prefers-color-scheme: dark) { :root { --s1: #338ced; --s2: #e76624; --s3: #00a888; --s4: #d28e05; --s5: #e24d8b; --s6: #0aac23; --s7: #9887ef; --s8: #eb6263; } }
 .tok-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+@media (min-width: 900px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.tile.main { border-color: var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { font: inherit; font-size: 12px; padding: 3px 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: var(--surface); font-weight: 600; }
 .tile { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--bg); min-width: 0; }
 .tile .k { font-size: 13px; color: var(--muted); }
 .tile .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0; }
@@ -122,18 +128,26 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; } th.num { text-
   <div class="panel">
       <div class="tok-head">
         <h2 style="margin:0">Token <span class="muted" style="font-weight:400;font-size:13px">· hôm nay (giờ Việt Nam), đếm từ transcript Claude Code trên từng máy</span></h2>
-        <label class="muted" style="font-size:13px">Máy <select id="tok-machine"><option value="">Tất cả máy</option></select></label>
+        <div class="filters" style="margin:0">
+          <div class="seg" id="tok-metric" role="group" aria-label="Cách đếm">
+            <button data-m="usd" class="on">USD quy đổi</button><button data-m="new">Token mới</button><button data-m="total">Tổng gồm đọc cache</button>
+          </div>
+          <label class="muted" style="font-size:13px">Máy <select id="tok-machine"><option value="">Tất cả máy</option></select></label>
+        </div>
       </div>
       <div class="tiles" id="tok-tiles"></div>
       <div class="chart-wrap" id="tok-wrap">
-        <div style="font-size:13px;font-weight:600">Token mới mỗi ngày · 7 ngày gần nhất <span class="muted" style="font-weight:400">(input + output + cache ghi)</span></div>
+        <div style="font-size:13px;font-weight:600"><span id="tok-chart-title">Chi phí quy đổi mỗi ngày (USD)</span> · 7 ngày gần nhất</div>
         <div class="legend" id="tok-legend"></div>
-        <svg id="tok-chart" viewBox="0 0 720 240" role="img" aria-label="Token mới mỗi ngày của từng máy, 7 ngày gần nhất"></svg>
+        <svg id="tok-chart" viewBox="0 0 720 240" role="img" aria-label="Mỗi ngày của từng máy, 7 ngày gần nhất"></svg>
         <div class="tip" id="tok-tip"></div>
       </div>
+      <p class="muted" style="margin:6px 0 0;font-size:12px">USD quy đổi = số token của từng lần gọi nhân giá API Anthropic của đúng model đã dùng
+        (ví dụ Opus 5.5: input $4, output $20, cache ghi 1 giờ $8, cache đọc $0,20 mỗi 1M token). Gói claude.ai không tính tiền theo token:
+        đây là thước đo để so máy nào thực sự tốn, không phải hoá đơn.</p>
       <h2 style="margin:18px 0 10px">So sánh các máy</h2>
       <div class="tbl"><table>
-        <thead><tr><th>Máy</th><th class="num">Token mới hôm nay</th><th>Tỉ lệ</th><th class="num">Hôm trước</th><th class="num">7 ngày</th>
+        <thead><tr><th>Máy</th><th class="num" id="tok-col-today">USD hôm nay</th><th>Tỉ lệ</th><th class="num">Hôm trước</th><th class="num">7 ngày</th>
           <th class="num">Số lần gọi</th><th class="num">Cache đọc</th><th>Cập nhật</th></tr></thead>
         <tbody id="tok-table"><tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.40).</td></tr></tbody>
       </table></div>
@@ -312,13 +326,21 @@ function render(d) {
 }
 
 // ---- Token panel. Machines count their tokens per day in Vietnam time; the rows are {machine_id, day, calls, input,
-// output, cache_write, cache_read, updated}. "Token mới" = input + output + cache ghi (cache đọc is shown apart).
+// output, cache_write, cache_read, usd, unpriced, updated}. "Token mới" = input + output + cache ghi; "Tổng" adds cache
+// đọc; "USD" = what the calls would cost on the Claude API at each model's price (1.0.41; a 1.0.40 count has no usd).
 const SERIES = 8;  // the categorical palette (--s1 .. --s8), in fixed order; a 9th machine and later fold into "Khác"
 const fmtTok = (n) => n < 1000 ? String(Math.round(n)) : n < 1e6 ? (n / 1e3).toFixed(1) + "k" : n < 1e9 ? (n / 1e6).toFixed(2) + "M" : (n / 1e9).toFixed(2) + "B";
+const fmtUsd = (n) => n < 100 ? "$" + n.toFixed(2) : "$" + Math.round(n).toLocaleString("en-US");
 const dayOf = (t) => new Date((t + 7 * 3600) * 1000).toISOString().slice(0, 10);
 const newTok = (r) => (r.input || 0) + (r.output || 0) + (r.cache_write || 0);
-const zero = () => ({ calls: 0, input: 0, output: 0, cache_write: 0, cache_read: 0 });
-let tokSelected = "";
+const zero = () => ({ calls: 0, input: 0, output: 0, cache_write: 0, cache_read: 0, usd: 0 });
+const METRICS = {
+  usd: { of: (r) => r.usd || 0, fmt: fmtUsd, tick: (v) => "$" + (+v.toFixed(2)).toLocaleString("en-US"),
+         title: "Chi phí quy đổi mỗi ngày (USD)", col: "USD hôm nay" },
+  new: { of: newTok, fmt: fmtTok, title: "Token mới mỗi ngày (input + output + cache ghi)", col: "Token mới hôm nay" },
+  total: { of: (r) => newTok(r) + (r.cache_read || 0), fmt: fmtTok, title: "Tổng token mỗi ngày (gồm đọc cache)", col: "Tổng hôm nay" },
+};
+let tokSelected = "", tokMetric = "usd";
 
 function renderTokens(d, now) {
   const rows = d.tokens || [];
@@ -348,49 +370,56 @@ function renderTokens(d, now) {
     return a;
   }, zero());
   const t = sumDay(today), y = sumDay(yesterday);
-  const tiles = [["Số lần gọi", "calls"], ["Input (vào mới)", "input"], ["Output (ra)", "output"], ["Cache ghi", "cache_write"],
-                 ["Token mới trong ngày", "new"], ["Cache đọc (đọc lại)", "cache_read"]];
-  const val = (o, k) => k === "new" ? newTok(o) : o[k];
-  $("tok-tiles").innerHTML = rows.length ? tiles.map(([k, f]) => `<div class="tile"><div class="k">${k}</div>
-      <div class="v">${f === "calls" ? val(t, f) : fmtTok(val(t, f))}</div>
-      <div class="d">hôm trước ${f === "calls" ? val(y, f) : fmtTok(val(y, f))}</div></div>`).join("")
+  const tiles = [["Chi phí quy đổi (USD)", "usd"], ["Token mới trong ngày", "new"], ["Tổng gồm đọc cache", "total"],
+                 ["Số lần gọi", "calls"], ["Input (vào mới)", "input"], ["Output (ra)", "output"], ["Cache ghi", "cache_write"],
+                 ["Cache đọc (đọc lại)", "cache_read"]];
+  const val = (o, k) => k === "new" ? newTok(o) : k === "total" ? newTok(o) + o.cache_read : o[k];
+  const show = (o, k) => k === "calls" ? val(o, k) : k === "usd" ? fmtUsd(val(o, k)) : fmtTok(val(o, k));
+  $("tok-tiles").innerHTML = rows.length ? tiles.map(([k, f]) => `<div class="tile${f === tokMetric ? " main" : ""}"><div class="k">${k}</div>
+      <div class="v">${show(t, f)}</div><div class="d">hôm trước ${show(y, f)}</div></div>`).join("")
     : `<div class="muted">Chưa có số liệu: các máy gửi số liệu token từ plugin 1.0.40, khoảng 10 phút một lần khi Claude Code đang được dùng.</div>`;
 
-  // stacked bars: per day, per machine (or the selected machine only)
+  // stacked bars: per day, per machine (or the selected machine only), in the chosen measure
+  const M = METRICS[tokMetric];
+  document.querySelectorAll("#tok-metric button").forEach((b) => b.classList.toggle("on", b.dataset.m === tokMetric));
+  $("tok-chart-title").textContent = M.title;
+  $("tok-col-today").textContent = M.col;
   const stackIds = tokSelected ? [tokSelected] : series;
-  const per = {};  // per[day][series] = token mới
+  const per = {};  // per[day][series] = the measure
   for (const r of pick) {
     const s = tokSelected ? r.machine_id : seriesOf(r.machine_id);
     per[r.day] = per[r.day] || {};
-    per[r.day][s] = (per[r.day][s] || 0) + newTok(r);
+    per[r.day][s] = (per[r.day][s] || 0) + M.of(r);
   }
   const totals = days.map((dd) => Object.values(per[dd] || {}).reduce((a, b) => a + b, 0));
-  drawTokChart(days, today, per, totals, stackIds, label, color);
+  drawTokChart(days, today, per, totals, stackIds, label, color, M);
   $("tok-legend").innerHTML = stackIds.length >= 2
     ? stackIds.map((s) => `<span><i style="background:${color(s)}"></i>${esc(label(s))}</span>`).join("") : "";
 
-  // the machines side by side, most tokens today first
+  // the machines side by side, the most today first (in the chosen measure)
   const byMachine = ids.map((id) => {
     const mine = rows.filter((r) => r.machine_id === id);
-    const on = (day) => mine.filter((r) => r.day === day).reduce((a, r) => a + newTok(r), 0);
+    const on = (day) => mine.filter((r) => r.day === day).reduce((a, r) => a + M.of(r), 0);
     const todayRow = mine.find((r) => r.day === today) || zero();
     return { id, today: on(today), yesterday: on(yesterday), week: days.reduce((a, dd) => a + on(dd), 0),
-             calls: todayRow.calls, cacheRead: todayRow.cache_read, updated: Math.max(0, ...mine.map((r) => r.updated || 0)) };
+             calls: todayRow.calls, cacheRead: todayRow.cache_read, updated: Math.max(0, ...mine.map((r) => r.updated || 0)),
+             noUsd: mine.some((r) => r.usd === undefined || r.usd === null) };
   }).sort((a, b) => b.today - a.today || b.week - a.week);
   const all = byMachine.reduce((a, m) => a + m.today, 0) || 1;
   const silent = d.machines.filter((m) => m.role !== "mover" && !ids.includes(m.machine_id) && now - m.last_seen < 7 * 86400);
   $("tok-table").innerHTML = byMachine.length || silent.length ? byMachine.map((m) => {
     const share = Math.round((m.today / all) * 100);
+    const note = tokMetric === "usd" && m.noUsd ? ` <span class="muted" style="font-size:12px">(cần 1.0.41 để tính USD)</span>` : "";
     return `<tr${tokSelected === m.id ? ' style="font-weight:600"' : ""}>
-      <td><i class="share" style="width:10px;background:${color(seriesOf(m.id))}"></i> ${esc(names[m.id] || m.id)}</td>
-      <td class="num">${fmtTok(m.today)}</td>
+      <td><i class="share" style="width:10px;background:${color(seriesOf(m.id))}"></i> ${esc(names[m.id] || m.id)}${note}</td>
+      <td class="num">${M.fmt(m.today)}</td>
       <td><span class="share" style="width:${Math.max(2, share)}px;background:var(--muted)"></span> <span class="muted">${share}%</span></td>
-      <td class="num">${fmtTok(m.yesterday)}</td><td class="num">${fmtTok(m.week)}</td>
+      <td class="num">${M.fmt(m.yesterday)}</td><td class="num">${M.fmt(m.week)}</td>
       <td class="num">${m.calls}</td><td class="num">${fmtTok(m.cacheRead)}</td>
       <td class="muted">${m.updated ? ago(now - m.updated) : "—"}</td></tr>`;
   }).join("") + silent.map((m) => `<tr><td>${esc(m.name || m.host)}</td>
-      <td colspan="7" class="muted">Chưa gửi số liệu (plugin ${esc(m.version || "?")}, cần 1.0.40)</td></tr>`).join("")
-    : `<tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.40).</td></tr>`;
+      <td colspan="7" class="muted">Chưa gửi số liệu (plugin ${esc(m.version || "?")}, cần 1.0.41)</td></tr>`).join("")
+    : `<tr><td colspan="8" class="muted">Chưa máy nào gửi số liệu token (cần plugin 1.0.41).</td></tr>`;
 }
 
 function niceMax(v) {
@@ -401,9 +430,9 @@ function niceMax(v) {
 
 let tokChartKey = "";
 
-function drawTokChart(days, today, per, totals, stackIds, label, color) {
+function drawTokChart(days, today, per, totals, stackIds, label, color, M) {
   // The page refreshes every 5 s: draw again only when the figures change, so a tooltip being read stays put.
-  const key = JSON.stringify([days, per, stackIds, stackIds.map(label)]);
+  const key = JSON.stringify([tokMetric, days, per, stackIds, stackIds.map(label)]);
   if (key === tokChartKey) return;
   tokChartKey = key;
   $("tok-tip").style.display = "none";
@@ -413,7 +442,7 @@ function drawTokChart(days, today, per, totals, stackIds, label, color) {
   let s = "";
   for (let i = 0; i <= 4; i++) {
     const v = (top / 4) * i, yy = yOf(v);
-    const tick = fmtTok(v).replace(/\.0+([kMB])$/, "$1").replace(/(\.\d*?)0+([kMB])$/, "$1$2");  // 20.00M -> 20M, 2.50M -> 2.5M
+    const tick = M.tick ? M.tick(v) : fmtTok(v).replace(/\.0+([kMB])$/, "$1").replace(/(\.\d*?)0+([kMB])$/, "$1$2");  // 20.00M -> 20M
     s += `<line class="grid" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/><text class="ax" x="${L - 6}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
   }
   days.forEach((dd, i) => {
@@ -445,8 +474,8 @@ function drawTokChart(days, today, per, totals, stackIds, label, color) {
     b.addEventListener("mousemove", (ev) => {
       const i = +b.dataset.i, dd = days[i], parts = stackIds.map((id) => [id, (per[dd] || {})[id] || 0]).filter(([, v]) => v).sort((a, c) => c[1] - a[1]);
       const [, mm, ddn] = dd.split("-");
-      tip.innerHTML = `<div class="row" style="font-weight:600"><span>${dd === today ? "Hôm nay" : `${ddn}/${mm}`}</span><span class="num">${fmtTok(totals[i])}</span></div>`
-        + (parts.length ? parts.map(([id, v]) => `<div class="row"><span><i style="background:${color(id)}"></i>${esc(label(id))}</span><span class="num">${fmtTok(v)}</span></div>`).join("")
+      tip.innerHTML = `<div class="row" style="font-weight:600"><span>${dd === today ? "Hôm nay" : `${ddn}/${mm}`}</span><span class="num">${M.fmt(totals[i])}</span></div>`
+        + (parts.length ? parts.map(([id, v]) => `<div class="row"><span><i style="background:${color(id)}"></i>${esc(label(id))}</span><span class="num">${M.fmt(v)}</span></div>`).join("")
           : `<div class="muted">Không có số liệu</div>`);
       tip.style.display = "block";
       const r = wrap.getBoundingClientRect();
@@ -458,6 +487,14 @@ function drawTokChart(days, today, per, totals, stackIds, label, color) {
     b.addEventListener("mouseleave", () => { tip.style.display = "none"; });
   });
 }
+
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest && ev.target.closest("#tok-metric button");
+  if (b && METRICS[b.dataset.m]) {
+    tokMetric = b.dataset.m;
+    refresh();
+  }
+});
 
 document.addEventListener("change", (ev) => {
   if (ev.target && ev.target.id === "tok-machine") {

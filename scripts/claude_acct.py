@@ -2447,8 +2447,52 @@ TOKEN_DAYS = 8  # today and the 7 days before it
 TOKEN_TZ = dt.timezone(dt.timedelta(hours=7))
 
 
+# What the tokens would cost on the Claude API (USD per 1M tokens: input, output, cache read), to compare machines by what
+# they really use (a cache read costs 0.025-0.1x an input token, an output token 5x). A cache write costs 1.25x input
+# with the 5-minute TTL and 2x with the 1-hour one, which Claude Code uses for almost everything (usage.cache_creation
+# splits them). Fast mode costs 2x. claude.ai plans do not bill per token: this is a yardstick, not a bill.
+# A model id is matched by its longest prefix here (ids may carry a suffix); an unknown model is counted as unpriced.
+MODEL_PRICES = {
+    "claude-fable-5-2": (8.0, 40.0, 0.20), "claude-mythos-5-2": (8.0, 40.0, 0.20),
+    "claude-fable-5-1": (10.0, 50.0, 0.25), "claude-mythos-5-1": (10.0, 50.0, 0.25),
+    "claude-fable-5": (10.0, 50.0, 1.0), "claude-mythos-5": (10.0, 50.0, 1.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.20), "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4-8": (5.0, 25.0, 0.50), "claude-opus-4-7": (5.0, 25.0, 0.50), "claude-opus-4-6": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10), "claude-sonnet-5": (2.0, 10.0, 0.20), "claude-sonnet-4-6": (3.0, 15.0, 0.30),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-haiku-4-5": (1.0, 5.0, 0.10),
+}
+# Claude Haiku 5.5 costs more once the prompt is above 100K tokens.
+LONG_PROMPT_PRICES = {"claude-haiku-5-5": (100_000, (0.50, 2.50, 0.05))}
+
+
+def _model_price(model):
+    """(input, output, cache read) USD per 1M tokens of `model`, or None when it is unknown."""
+    model = (model or "").lower()
+    best = max((k for k in MODEL_PRICES if model.startswith(k)), key=len, default=None)
+    return (best, MODEL_PRICES[best]) if best else (None, None)
+
+
+def _token_cost(model, usage):
+    """USD the request would cost on the Claude API, or None for an unknown model."""
+    key, price = _model_price(model)
+    if price is None:
+        return None
+    n = lambda v: v if isinstance(v, (int, float)) and v > 0 else 0
+    i, o = n(usage.get("input_tokens")), n(usage.get("output_tokens"))
+    r, w = n(usage.get("cache_read_input_tokens")), n(usage.get("cache_creation_input_tokens"))
+    cc = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+    w1h = min(n(cc.get("ephemeral_1h_input_tokens")), w)
+    w5m = w - w1h
+    if key in LONG_PROMPT_PRICES and i + r + w > LONG_PROMPT_PRICES[key][0]:
+        price = LONG_PROMPT_PRICES[key][1]
+    inp, out, read = price
+    usd = (i * inp + w5m * inp * 1.25 + w1h * inp * 2.0 + r * read + o * out) / 1e6
+    return usd * (2.0 if usage.get("speed") == "fast" else 1.0)
+
+
 def _token_days(projects_dir, now=None, days=TOKEN_DAYS):
-    """{"YYYY-MM-DD": {"calls", "input", "output", "cache_write", "cache_read"}} for the last `days` days (TOKEN_TZ)."""
+    """{"YYYY-MM-DD": {"calls", "input", "output", "cache_write", "cache_read", "usd", "unpriced"}} for the last `days`
+    days (TOKEN_TZ); usd: what they would cost on the Claude API (_token_cost); unpriced: calls of an unknown model."""
     now = time.time() if now is None else now
     first = dt.datetime.fromtimestamp(now, TOKEN_TZ).date() - dt.timedelta(days=days - 1)
     since = dt.datetime.combine(first, dt.time(), TOKEN_TZ).timestamp()
@@ -2480,12 +2524,20 @@ def _token_days(projects_dir, now=None, days=TOKEN_DAYS):
                 day = dt.datetime.fromtimestamp(at, TOKEN_TZ).date() if at is not None else None
                 if day is None or day < first:
                     continue
-                d = out.setdefault(day.isoformat(), {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0})
+                d = out.setdefault(day.isoformat(), {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
+                                                     "usd": 0.0, "unpriced": 0})
                 d["calls"] += 1
                 for name, field in (("input", "input_tokens"), ("output", "output_tokens"),
                                     ("cache_write", "cache_creation_input_tokens"), ("cache_read", "cache_read_input_tokens")):
                     value = u.get(field)
                     d[name] += int(value) if isinstance(value, (int, float)) and value > 0 else 0
+                cost = _token_cost(m.get("model"), u)
+                if cost is None:
+                    d["unpriced"] += 1
+                else:
+                    d["usd"] += cost
+    for d in out.values():
+        d["usd"] = round(d["usd"], 4)
     return out
 
 

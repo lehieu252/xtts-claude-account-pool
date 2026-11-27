@@ -1347,8 +1347,35 @@ class TokenStatsTests(unittest.TestCase):
         self.write("-proj/old.jsonl", [self.msg("msg_e", "2026-11-27T02:00:00Z")], age_days=20)  # untouched for 20 days
         days = acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW)
         self.assertEqual(sorted(days), ["2026-11-26", "2026-11-27"])
-        self.assertEqual(days["2026-11-27"], {"calls": 3, "input": 6, "output": 151, "cache_write": 3000, "cache_read": 15000})
+        today = dict(days["2026-11-27"])
+        usd = today.pop("usd")
+        self.assertEqual(today, {"calls": 3, "input": 6, "output": 151, "cache_write": 3000, "cache_read": 15000, "unpriced": 0})
+        # Opus 5.5: input $4, 5-minute cache write $5, cache read $0.20, output $20 per 1M tokens
+        self.assertAlmostEqual(usd, (6 * 4 + 3000 * 5 + 15000 * 0.20 + 151 * 20) / 1e6, places=4)
         self.assertEqual(days["2026-11-26"]["output"], 7)
+
+    def test_the_usd_of_a_call_follows_its_model_its_cache_ttl_and_its_speed(self):
+        u = {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "cache_read_input_tokens": 1_000_000,
+             "cache_creation_input_tokens": 1_000_000}
+        self.assertAlmostEqual(acct._token_cost("claude-opus-5-5", u), 4 + 20 + 0.20 + 5)  # all 5-minute writes
+        one_hour = dict(u, cache_creation={"ephemeral_1h_input_tokens": 1_000_000, "ephemeral_5m_input_tokens": 0})
+        self.assertAlmostEqual(acct._token_cost("claude-opus-5-5", one_hour), 4 + 20 + 0.20 + 8)  # 1 h: 2x input
+        self.assertAlmostEqual(acct._token_cost("claude-sonnet-5-5", one_hour), 2 + 10 + 0.10 + 4)
+        self.assertAlmostEqual(acct._token_cost("claude-opus-5-5", dict(one_hour, speed="fast")), 2 * (4 + 20 + 0.20 + 8))
+        self.assertAlmostEqual(acct._token_cost("claude-opus-5-5[1m]", u), acct._token_cost("claude-opus-5-5", u))  # a suffix
+        self.assertAlmostEqual(acct._token_cost("claude-opus-5", u), 5 + 25 + 0.5 + 6.25)  # not Opus 5.5
+        small = {"input_tokens": 50_000, "output_tokens": 1_000_000}
+        self.assertAlmostEqual(acct._token_cost("claude-haiku-5-5", small), 0.005 + 0.50)
+        long_prompt = {"input_tokens": 200_000, "output_tokens": 1_000_000}  # above 100K: $0.50 / $2.50
+        self.assertAlmostEqual(acct._token_cost("claude-haiku-5-5", long_prompt), 0.1 + 2.50)
+        self.assertIsNone(acct._token_cost("gpt-5", u))
+
+    def test_a_call_of_an_unknown_model_is_counted_as_unpriced(self):
+        self.write("-p/s.jsonl", [self.msg("m1", "2026-11-27T01:00:00Z", model="some-other-model"),
+                                  self.msg("m2", "2026-11-27T01:00:00Z")])
+        d = acct._token_days(os.path.join(self.dir, "projects"), now=self.NOW)["2026-11-27"]
+        self.assertEqual((d["calls"], d["unpriced"]), (2, 1))
+        self.assertGreater(d["usd"], 0)
 
     def test_only_the_last_8_days_are_kept(self):
         self.write("-p/s.jsonl", [self.msg("m%d" % i, "2026-11-%02dT05:00:00Z" % (27 - i)) for i in range(10)])
